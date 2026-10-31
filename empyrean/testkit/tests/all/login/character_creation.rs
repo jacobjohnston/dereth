@@ -8,19 +8,29 @@ use std::sync::Arc;
 
 use dereth_primitives::NetQueue;
 use dereth_protocol::login::{CharGenVerificationResponse, CharacterSendCharGenResult};
+use empyrean_common::account_defaults::AccountDefaults;
+use empyrean_common::clock::{Clock, VirtualClock};
 use empyrean_content::models::world::Weenie;
 use empyrean_content::MemContent;
-use empyrean_entity::enums::{PropertyInt, WeenieType};
+use empyrean_entity::enums::{AccessLevel, PropertyInt, WeenieType};
 use empyrean_net::SessionId;
+use empyrean_store::MemAuth;
 use empyrean_testkit::{ClientId, ClientStatus, TestServer};
 use empyrean_world::managers::guid_manager;
 use empyrean_world::managers::world_manager::WorldStatusState;
+use empyrean_world::world::AuthHandle;
 
 const ACCOUNT: &str = "acct";
 const ACCOUNT_ID: u32 = 1;
 
 fn logged_in() -> (TestServer, ClientId, SessionId) {
+    logged_in_on(empyrean_testkit::ace_account_defaults())
+}
+
+fn logged_in_on(config: AccountDefaults) -> (TestServer, ClientId, SessionId) {
     let mut ts = TestServer::with_dats(crate::support::login_fixture::dats(&[0x0100_0001], true));
+    let clock: Arc<dyn Clock> = Arc::<VirtualClock>::clone(&ts.clock);
+    ts.world.auth = AuthHandle::new(Box::new(MemAuth::new(config, clock)));
     ts.world.content = Arc::new(
         MemContent::new().weenie(
             Weenie::new(1, "human", WeenieType::Creature)
@@ -48,6 +58,24 @@ fn create(ts: &mut TestServer, id: ClientId, name: &str) -> Vec<CharGenVerificat
     ts.advance(0.5);
     ts.received::<CharGenVerificationResponse>(id)
         .split_off(before)
+}
+
+/// DIVERGE: V461. An Admin account's new character is a plain player unless permissions follow the
+/// account.
+#[test]
+fn a_new_character_on_an_admin_account_is_a_plain_player_by_default() {
+    for (config, plussed) in [
+        (AccountDefaults::default(), false),
+        (empyrean_testkit::ace_account_defaults(), true),
+    ] {
+        let (mut ts, id, session) = logged_in_on(config);
+        ts.world.sessions.get_mut(session).unwrap().access_level = AccessLevel::Admin;
+
+        let response = create(&mut ts, id, "Aldric");
+        assert_eq!(response[0].response_type, 1, "Ok");
+        let characters = ts.shard().get_characters(ACCOUNT_ID, false);
+        assert_eq!(characters[0].is_plussed, plussed);
+    }
 }
 
 #[test]

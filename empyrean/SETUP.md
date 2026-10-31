@@ -281,6 +281,13 @@ Access levels are 0 Player, 1 Advocate, 2 Sentinel, 3 Envoy, 4 Developer, 5 Admi
 name). An admin can use the same commands in game with `@`. If you turn off
 `allow_auto_account_creation`, create each player's account with `accountcreate`.
 
+**An account's level does not make its characters staff.** Permissions belong to each character,
+as on retail, so an admin account's characters start as ordinary players. Make one staff from the
+console with `set-characteraccess <character> admin`, or run a single command from an ordinary
+character with `@sudo <command>`. To have every character on an account follow the account's level
+instead, as ACE does by default, set `override_character_permissions = true` under
+`[server.accounts]`.
+
 ### 4.3 The console
 
 When the server runs in a terminal, it reads commands at the `empyrean>> ` prompt:

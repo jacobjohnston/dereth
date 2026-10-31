@@ -241,9 +241,9 @@ public_url = ""
 [server.accounts]
 # Account creation and permissions.
 
-# default: true (ACE Config.js: Server.Accounts.OverrideCharacterPermissions)
+# default: false (ACE Config.js: Server.Accounts.OverrideCharacterPermissions)
 # Account-level permissions (true) rather than character-level ones (retail).
-override_character_permissions = true
+override_character_permissions = false
 
 # default: 0 (ACE Config.js: Server.Accounts.DefaultAccessLevel)
 # The access level of a new account (0 is Player).

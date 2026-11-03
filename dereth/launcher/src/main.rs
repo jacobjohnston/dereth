@@ -340,6 +340,31 @@ fn set_default_set(b: State<'_, Shared>, id: String) -> Cmd<()> {
     lock(&b).set_default_set(&id)
 }
 
+/// Ask for an art pack's packed file and add it to the Library. Whether one was chosen.
+#[tauri::command]
+async fn add_art_pack(app: tauri::AppHandle, b: State<'_, Shared>) -> Cmd<bool> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Choose an art pack")
+        .add_filter("Art pack", &["dat"])
+        .blocking_pick_file();
+    let Some(path) = picked.and_then(|p| p.into_path().ok()) else {
+        return Ok(false);
+    };
+    lock(&b).add_art_pack(&path).map(|()| true)
+}
+
+#[tauri::command]
+fn set_default_art_pack(b: State<'_, Shared>, id: String) -> Cmd<()> {
+    lock(&b).set_default_art_pack(&id)
+}
+
+#[tauri::command]
+fn remove_art_pack(b: State<'_, Shared>, id: String) {
+    lock(&b).remove_art_pack(&id);
+}
+
 #[tauri::command]
 async fn add_custom_dats(app: tauri::AppHandle, b: State<'_, Shared>, slug: String) -> Cmd<bool> {
     let picked = app
@@ -895,6 +920,9 @@ fn main() {
             pick_folder,
             add_folder,
             set_default_set,
+            add_art_pack,
+            set_default_art_pack,
+            remove_art_pack,
             add_custom_dats,
             create_private_copy,
             reset_set,

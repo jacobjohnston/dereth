@@ -346,15 +346,16 @@ pub static DIVERGENCES: &[Divergence] = &[
                  desktop wgpu renderer. With the weather ticked, the game's own falling-rain \
                  layer gives way to rain (or, over snowy land, snow) drawn by the effect, on the \
                  same rainy days. Everything the game reads still comes from the ordinary frame, \
-                 which is recorded in full either way. Every box is off by default; the classic \
-                 and modern interfaces never draw the effects, and the browser client does not \
-                 contain them. They draw only on the wgpu renderer, chosen by the player; the \
-                 client never picks it for them. Heavier frames lower the frame rate, and three \
-                 things follow the frame time as they do on a slower machine: the automatic \
-                 degrade, so detail \
-                 levels and which far objects are drawn can shift; through the degrade, which \
-                 objects at the edge of the drawing distance can be picked and selected; and the \
-                 client's physics, which steps by the time a frame took, so the predicted \
+                 which is recorded in full either way. The boxes start on, as the Medium quality \
+                 preset has them; the classic and modern interfaces never draw the effects, and \
+                 the browser client does not contain them. They draw only on the wgpu renderer, \
+                 chosen by the player; the client never picks it for them. While they draw, the \
+                 world is drawn with whole textures, the best filtering and frames on the \
+                 display's refresh (unless VSync is unticked), whatever the retail graphics \
+                 options ask, and the automatic degrade is off, so detail levels, and which \
+                 objects at the edge of the drawing distance can be picked and selected, do not \
+                 follow the frame time. Heavier frames lower the frame rate, and the client's \
+                 physics steps by the time a frame took, as on a slower machine, so the predicted \
                  positions the client reports are integrated in other steps.",
         why: "The 1999 art drawn with today's graphics, for a player who asks for it, without \
               changing how the game plays.",

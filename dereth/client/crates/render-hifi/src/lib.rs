@@ -1258,9 +1258,10 @@ impl FrameSidecar for HifiRenderer {
         timing::add_ms(&mut self.cpu_prepare, "re-shade plan", watch.ms());
         let watch = timing::Stopwatch::start();
         // A re-shaded frame drawn with the anti-aliasing replays its world at the frame's jitter:
-        // each block it was recorded with, as the passes' say hands it on, shifted.
+        // each block it was recorded with, as the passes' say hands it on, shifted. Without it,
+        // the blocks still give up a brightness that the finished picture takes instead.
         if let (Some(_), Some(frame)) = (&self.plan, self.frame.as_ref()) {
-            if frame.camera.dither > 0.0 {
+            if frame.camera.dither > 0.0 || frame.brightness != 0.0 {
                 let filters: Vec<&mut dyn ReplayFilter> = self
                     .graph
                     .passes_mut()

@@ -14,6 +14,10 @@ use glam::{Mat4, Quat, Vec2, Vec3};
 /// The snapshot of one frame.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HifiFrame {
+    /// The player's Screen Brightness, which the presentation applies to its finished picture.
+    pub brightness: f32,
+    /// How many times brighter than white the display can show; 1 or less for no more.
+    pub hdr_headroom: f32,
     /// The device's frame stamp of the frame this snapshot describes. A snapshot whose stamp is
     /// not the frame being ended is not used for it.
     pub stamp: u64,

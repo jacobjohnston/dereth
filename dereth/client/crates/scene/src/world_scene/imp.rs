@@ -1139,6 +1139,8 @@ pub struct SceneDraw {
     /// that differs does any work. [`SceneConfig::render`] holds the current values and this is the
     /// shadow bank, so [`WorldScene::update_from_preferences`] is the same poll.
     render_shadow: dereth_client_runtime::render_prefs::RenderPreferences,
+    /// Whether Enhanced Graphics Mode drew at the last poll.
+    enhanced_shadow: bool,
     /// What the high-fidelity bridge remembers between frames.
     #[cfg(feature = "hifi")]
     hifi: RefCell<hifi_bridge::Shadow>,

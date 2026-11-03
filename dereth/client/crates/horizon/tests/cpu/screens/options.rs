@@ -292,10 +292,10 @@ fn the_client_page_sets_the_shared_preferences_and_tries_a_screen_size_before_ke
         },
     ]);
     let state = in_world();
-    let mut h = options_on("Client", &state);
+    let mut h = options_on("Display", &state);
     // A check box: the shared store, at once, and the game's preference chain.
     let row = sheet::rows_for(sheet::PageId::Client, interface::Interface::Horizon)
-        .find(|r| matches!(r.value, sheet::Value::Check(_)))
+        .find(|r| r.caption == "Full Screen")
         .expect("a check row");
     let sheet::Value::Check(name) = row.value else {
         unreachable!()
@@ -355,7 +355,7 @@ fn the_client_page_s_slow_down_in_the_background_box_turns_the_option_off_and_on
     use dereth_client_contract::options::background;
     store::init();
     let state = in_world();
-    let mut h = options_on("Client", &state);
+    let mut h = options_on("Display", &state);
     scroll_to(&mut h, &state, background::CAPTION);
     for on in [false, true] {
         let r = control(&h, background::CAPTION);
@@ -382,7 +382,7 @@ fn the_client_page_s_render_scale_changes_the_share_drawn_at_once() {
     store::init();
     render_scale::register(100);
     let state = in_world();
-    let mut h = options_on("Client", &state);
+    let mut h = options_on("Display", &state);
     scroll_to(&mut h, &state, render_scale::CAPTION);
     let out = choose(&mut h, &state, render_scale::CAPTION, 4);
     assert_eq!(
@@ -483,13 +483,20 @@ fn while_a_key_is_awaited_enter_and_escape_reach_the_game_and_its_question_is_an
 }
 
 #[test]
-fn the_pages_are_character_chat_client_controls_and_key_bindings() {
+fn the_pages_are_character_chat_display_sound_controls_and_key_bindings() {
     let state = in_world();
     let h = options_on("Character", &state);
     for gone in ["Game / Support", "Style"] {
         assert!(h.ui.windows.options_page.control(gone).is_none(), "{gone}");
     }
-    for tab in ["Character", "Chat", "Client", "Controls", "Key Bindings"] {
+    for tab in [
+        "Character",
+        "Chat",
+        "Display",
+        "Sound",
+        "Controls",
+        "Key Bindings",
+    ] {
         assert!(h.ui.windows.options_page.control(tab).is_some(), "{tab}");
     }
 }
@@ -517,7 +524,7 @@ fn the_interface_scale_offers_auto_and_the_steps_the_window_holds_and_says_what_
     // A 4K window: Auto, 100%, 150% and 200%, four marks across the row, each at the left of its
     // quarter; 300% is left out and the note under the row says what it needs.
     let uhd = (3840.0, 2160.0);
-    let mut h = options_at("Client", &state, uhd, HorizonOptions::default());
+    let mut h = options_at("Display", &state, uhd, HorizonOptions::default());
     scroll_to(&mut h, &state, "Interface Scale");
     let r = control(&h, "Interface Scale");
     let note = "300% needs a window of 4320 \u{d7} 2592 or larger.";
@@ -536,7 +543,7 @@ fn the_interface_scale_offers_auto_and_the_steps_the_window_holds_and_says_what_
         scale: Some(1.5),
         ..HorizonOptions::default()
     };
-    let mut h = options_at("Client", &state, uhd, chose);
+    let mut h = options_at("Display", &state, uhd, chose);
     scroll_to(&mut h, &state, "Interface Scale");
     let r = control(&h, "Interface Scale");
     let out = click_at(&mut h, &state, r.x + 9.0, r.y + r.h / 2.0);
@@ -544,7 +551,7 @@ fn the_interface_scale_offers_auto_and_the_steps_the_window_holds_and_says_what_
 
     // A 1080p window: Auto and 100% alone, half the row each, and the note says what 150% needs.
     let fhd = (1920.0, 1080.0);
-    let mut h = options_at("Client", &state, fhd, HorizonOptions::default());
+    let mut h = options_at("Display", &state, fhd, HorizonOptions::default());
     scroll_to(&mut h, &state, "Interface Scale");
     let r = control(&h, "Interface Scale");
     let note = "150% and larger need a window of 2160 \u{d7} 1296 or larger.";
@@ -559,7 +566,7 @@ fn the_interface_scale_offers_auto_and_the_steps_the_window_holds_and_says_what_
         scale: Some(2.0),
         ..HorizonOptions::default()
     };
-    let mut h = options_at("Client", &state, fhd, chose);
+    let mut h = options_at("Display", &state, fhd, chose);
     scroll_to(
         &mut h,
         &state,
@@ -624,7 +631,7 @@ fn the_interface_follows_its_window_frame_by_frame_and_a_choice_waits_for_one_th
 fn smooth_movement_is_this_interface_s_own_box_under_smooth_animation_and_on_until_unticked() {
     store::init();
     let state = in_world();
-    let mut h = options_on("Client", &state);
+    let mut h = options_on("Display", &state);
     scroll_to(&mut h, &state, "Smooth Movement");
     let animation = control(&h, "Smooth Animation");
     let r = control(&h, "Smooth Movement");
@@ -645,7 +652,7 @@ fn smooth_movement_is_this_interface_s_own_box_under_smooth_animation_and_on_unt
 fn smooth_animation_is_this_interface_s_own_box_on_the_client_page_and_on_until_unticked() {
     store::init();
     let state = in_world();
-    let mut h = options_on("Client", &state);
+    let mut h = options_on("Display", &state);
     scroll_to(&mut h, &state, "Smooth Animation");
     let r = control(&h, "Smooth Animation");
     let out = click_at(&mut h, &state, r.x + 10.0, r.y + r.h / 2.0);
@@ -794,7 +801,7 @@ fn an_open_dropdown_list_takes_the_presses_over_it_and_a_press_elsewhere_only_cl
     let chat = control(&h, "Chat");
     click_at(&mut h, &state, chat.x + chat.w / 2.0, chat.y + chat.h / 2.0);
     assert!(h.ui.windows.options_page.menu.is_none());
-    assert_eq!(h.ui.windows.options_page.tab, 3, "still on Controls");
+    assert_eq!(h.ui.windows.options_page.tab, 4, "still on Controls");
     // Escape closes the list, not the window.
     click_at(&mut h, &state, r.x + 10.0, r.y + r.h / 2.0);
     assert!(h.ui.windows.options_page.menu.is_some());
@@ -1330,11 +1337,22 @@ fn renderers(
     }
 }
 
-/// The Client page scrolled to the end, where the renderer choice is.
+/// The Display page scrolled down to the renderer choice, with room for the line under it, or to
+/// the end where there is none.
 fn client_page_end(state: &GameState) -> Harness {
-    let mut h = options_on("Client", state);
-    h.ui.windows.options_page.scroll[2] = 1.0e6;
-    h.frame(state);
+    let mut h = options_on("Display", state);
+    for _ in 0..200 {
+        let list = control(&h, "list");
+        let page = &h.ui.windows.options_page;
+        if page
+            .control(dereth_client_contract::options::renderer::CAPTION)
+            .is_some_and(|r| r.y >= list.y && r.bottom() + r.h + 8.0 <= list.bottom())
+        {
+            break;
+        }
+        h.ui.windows.options_page.scroll[page.tab] += 20.0;
+        h.frame(state);
+    }
     h.frame(state);
     h
 }

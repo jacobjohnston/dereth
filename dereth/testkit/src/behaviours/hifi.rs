@@ -277,18 +277,6 @@ pub static ROWS: &[Behaviour] = &[
         tier: Tier::Cpu,
     },
     behaviour! {
-        id: "hifi.options.every-fidelity-option-is-off-by-default",
-        says: "Every high-fidelity option is off in a fresh profile, and none is in effect \
-               unless the Horizon interface is shown: a profile that ticks every box and starts \
-               in the classic or the modern interface has nothing in effect. An older build's \
-               levels and options this build does not have are not read, and are no error.",
-        since: THIS_CLIENT,
-        divergence: "CD-037",
-        evidence: Evidence::Private("AC-EVID-HIFI-PREFS-DEFAULT"),
-        station: "dereth-client-runtime::lib::render_prefs::tests::every_fidelity_option_is_off_by_default_and_none_is_in_effect_outside_horizon",
-        tier: Tier::Cpu,
-    },
-    behaviour! {
         id: "hifi.options.no-combination-of-the-boxes-draws-what-cannot-draw",
         says: "Of every combination of the seven boxes, on a device with ray tracing and without, \
                each box draws exactly when it is ticked and the options page does not grey it: \
@@ -316,16 +304,32 @@ pub static ROWS: &[Behaviour] = &[
         tier: Tier::Gpu,
     },
     behaviour! {
-        id: "hifi.options.the-boxes-are-on-horizons-page-alone-each-off",
-        says: "The experimental rendering effects' seven boxes are on the Horizon interface's \
-               Client page alone, last, under a heading that calls them highly experimental, \
-               each off by default; the classic and the modern interfaces' pages are exactly \
-               what they are without the effects; and a build without the effects has no such \
-               heading.",
+        id: "hifi.options.the-boxes-are-on-horizons-page-alone-each-at-its-default",
+        says: "The experimental rendering effects' boxes are on the Horizon interface's Client \
+               page alone, last, under a heading of their own, each at its default: the effects \
+               on, and Keep Retail Look, the anti-aliasing's and the slope materials' boxes that \
+               turn something off, and HDR Output, off; the classic and the modern interfaces' \
+               pages are exactly what they are without the effects; and a build without the \
+               effects has no such heading.",
         since: THIS_CLIENT,
         divergence: "CD-037",
-        evidence: Evidence::Private("AC-EVID-HIFI-HORIZON-PAGE"),
-        station: "dereth-client-contract::lib::options::sheet::tests::the_effects_boxes_are_on_horizons_client_page_alone_each_off",
+        evidence: Evidence::Private("AC-EVID-HIFI-HORIZON-PAGE-DEFAULTS"),
+        station: "dereth-client-contract::lib::options::sheet::tests::the_effects_boxes_are_on_horizons_client_page_alone_each_at_its_default",
+        tier: Tier::Cpu,
+    },
+    behaviour! {
+        id: "hifi.options.the-effects-start-on-and-none-is-in-effect-outside-horizon",
+        says: "A profile that names no high-fidelity option starts with the effects and VSync on \
+               and Keep Retail Look, the switches that turn something off and HDR Output off, as \
+               the Medium quality preset has them; a box the profile turns off stays off. None \
+               is in effect unless the Horizon interface is shown: a profile that ticks every box \
+               and starts in the classic or the modern interface has nothing in effect. An older \
+               build's levels and options this build does not have are not read, which leaves \
+               each option at its default, and are no error.",
+        since: THIS_CLIENT,
+        divergence: "CD-037",
+        evidence: Evidence::Private("AC-EVID-HIFI-PREFS-START-ON"),
+        station: "dereth-client-runtime::lib::render_prefs::tests::a_profile_naming_nothing_has_the_effects_on_and_none_is_in_effect_outside_horizon",
         tier: Tier::Cpu,
     },
     behaviour! {

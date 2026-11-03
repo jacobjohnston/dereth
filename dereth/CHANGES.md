@@ -14,6 +14,14 @@ pre-release leaves it for the final release, and its notes show it as it is);
 
 ## Unreleased
 
+- Settings: Client is now Display and Sound. Display opens with a Graphics menu, Standard or Enhanced, each showing what applies to it, and options now use the names games usually use.
+- Better Lighting is now Enhanced Graphics Mode, and its effects start on. Under Standard, the page offers only Ambient Occlusion and Atmospheric Sky.
+- Retail Look is now Keep Retail Look: the game's own models and ground or the enhanced ones, all or nothing. What it rules out leaves the page.
+- No Anti-Aliasing and No Slope Materials are now Anti-Aliasing and Slope Materials, ticked when they are on.
+- Enhanced Graphics: a Quality Preset menu, from a light Low to a full Ultra, and the settings start at Medium. VSync and HDR Output are new.
+- Enhanced Graphics Mode: it always draws the best texture filtering and detail, models that hold their detail, and frames on the display's refresh unless VSync is off, whatever the Graphics settings say.
+- Enhanced Graphics Mode: Screen Brightness scales the whole picture alike.
+
 ## 0.4.12 (2026-11-03)
 
 - Launcher: you can add a world by its address in Auberean's realm too.

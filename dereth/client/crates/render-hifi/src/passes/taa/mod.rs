@@ -123,12 +123,13 @@ pub fn jitter(n: u32, viewport: [u32; 4]) -> (Vec2, f32) {
 }
 
 /// `block` drawn shifted by `jitter` (normalised device coordinates), with the frame's place
-/// `dither` in the dither of the edges of cut-outs.
+/// `dither` in the dither of the edges of cut-outs. The brightness is left to the finished picture.
 pub fn jitter_block(block: &mut PerFrameConstants, jitter: Vec2, dither: f32) {
     // The block holds the rows of the column-vector transform.
     let to_clip = Mat4::from_cols_array(&block.view_proj).transpose();
     let shifted = Mat4::from_translation(jitter.extend(0.0)) * to_clip;
     block.view_proj = shifted.transpose().to_cols_array();
+    block.screen[0] = 0.0;
     block.screen[2] = dither;
 }
 
@@ -1114,6 +1115,7 @@ mod tests {
             * Mat4::look_at_lh(Vec3::new(1.0, 2.0, -5.0), Vec3::ZERO, Vec3::Y);
         let mut block = PerFrameConstants {
             view_proj: to_clip.transpose().to_cols_array(),
+            screen: [0.5, 0.0, 0.0, 0.0],
             ..PerFrameConstants::default()
         };
         let j = Vec2::new(0.002, -0.001);
@@ -1127,6 +1129,10 @@ mod tests {
             assert!((b.z / b.w - a.z / a.w).abs() < 1e-7, "the depth is kept");
         }
         assert_eq!(block.screen[2], 1.5);
+        assert_eq!(
+            block.screen[0], 0.0,
+            "the brightness is the finished picture's"
+        );
     }
 
     fn id(vertices: u32) -> Identity {

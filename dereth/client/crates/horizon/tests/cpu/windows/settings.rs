@@ -1,6 +1,7 @@
-//! The Client page of the settings ends, in a build with the experimental rendering effects, with
-//! their ten boxes under a heading of their own: a box whose prerequisite is off is greyed and
-//! cannot be ticked, and the rest tick as any other.
+//! The Display page of the settings opens, in a build with the experimental rendering effects, with
+//! a Graphics menu choosing standard or enhanced graphics, and ends with their boxes under a
+//! heading of their own: a box another box's choice rules out leaves the page, one the device rules
+//! out is greyed and cannot be ticked, and the rest tick as any other.
 //!
 //! Behaviour: none (experimental Horizon interface)
 #![cfg_attr(not(feature = "hifi"), allow(unused_imports, dead_code))]
@@ -16,9 +17,12 @@ use dereth_horizon::ui::panels::WindowId;
 
 use crate::Harness;
 
-/// The Client page, scrolled to its end, with the device `hifi` reports.
+/// The Display page, scrolled to its end, with the device `hifi` reports and every box off.
 fn client_page(#[cfg(feature = "hifi")] hifi: Availability) -> (Harness, GameState) {
     store::init();
+    for o in &fidelity::OPTIONS {
+        store::set_value(o.name, PrefValue::Bool(false));
+    }
     #[allow(unused_mut)]
     let mut state = GameState {
         in_world: true,
@@ -32,9 +36,9 @@ fn client_page(#[cfg(feature = "hifi")] hifi: Availability) -> (Harness, GameSta
     let mut h = Harness::new(Default::default());
     h.frame(&state);
     h.ui.windows.open(WindowId::Options, 0.0);
-    h.ui.windows.options_page.tab = tab::CLIENT;
+    h.ui.windows.options_page.tab = tab::DISPLAY;
     h.frame(&state);
-    h.ui.windows.options_page.scroll[tab::CLIENT] = 1.0e6;
+    h.ui.windows.options_page.scroll[tab::DISPLAY] = 1.0e6;
     h.frame(&state);
     h.frame(&state);
     (h, state)
@@ -54,20 +58,49 @@ fn show(h: &mut Harness, state: &GameState, caption: &str) -> bool {
     if whole(h) {
         return true;
     }
-    h.ui.windows.options_page.scroll[tab::CLIENT] = 0.0;
+    h.ui.windows.options_page.scroll[tab::DISPLAY] = 0.0;
     h.frame(state);
     for _ in 0..2000 {
         if whole(h) {
             return true;
         }
-        h.ui.windows.options_page.scroll[tab::CLIENT] += 6.0;
+        h.ui.windows.options_page.scroll[tab::DISPLAY] += 6.0;
         h.frame(state);
     }
     false
 }
 
+/// Choose Enhanced in the Graphics menu, and what that asked the game for. Where the effects are
+/// not offered it shows no list to choose in.
+#[cfg(feature = "hifi")]
+fn choose_enhanced(h: &mut Harness, state: &GameState) -> Vec<UiRequest> {
+    assert!(show(h, state, fidelity::MODE_CAPTION), "no Graphics row");
+    let r =
+        h.ui.windows
+            .options_page
+            .control(fidelity::MODE_CAPTION)
+            .expect("its box");
+    h.move_to(r.x + 10.0, r.y + r.h / 2.0);
+    h.press();
+    let mut out = h.frame(state).requests;
+    h.release();
+    out.extend(h.frame(state).requests);
+    h.ui.windows.options_page.choose_in_open_list(1);
+    out.extend(h.frame(state).requests);
+    for r in &out {
+        if let UiRequest::SetPreference(name, value) = r {
+            store::set_value(name, value.clone());
+        }
+    }
+    out
+}
+
 /// Click the box of the row captioned `caption`, and what the click asked the game for.
 fn tick(h: &mut Harness, state: &GameState, caption: &str) -> Vec<UiRequest> {
+    #[cfg(feature = "hifi")]
+    if caption == fidelity::find(names::LIGHTING).expect("its box").caption {
+        return choose_enhanced(h, state);
+    }
     assert!(show(h, state, caption), "no {caption} row");
     let r =
         h.ui.windows
@@ -102,45 +135,51 @@ fn without_the_effects_the_client_page_has_none_of_their_boxes() {
     }
 }
 
+/// Whether the page has a row captioned `caption`, wherever it is scrolled to.
+fn on_the_page(h: &mut Harness, state: &GameState, caption: &str) -> bool {
+    show(h, state, caption)
+}
+
+#[cfg(feature = "hifi")]
+const READY: Availability = Availability {
+    built: true,
+    wgpu: true,
+    widened: true,
+    supported: true,
+    rays: Some(false),
+    active: false,
+    failed: None,
+    wgpu_next: None,
+};
+
 #[test]
 #[cfg(feature = "hifi")]
-fn the_effects_boxes_end_the_client_page_greyed_until_what_they_need_is_ticked() {
-    let ready = Availability {
-        built: true,
-        wgpu: true,
-        widened: true,
-        supported: true,
-        rays: Some(false),
-        active: false,
-        failed: None,
-        wgpu_next: None,
-    };
-    let (mut h, state) = client_page(ready);
+fn a_new_player_starts_with_the_effects_on() {
+    store::init();
     for o in &fidelity::OPTIONS {
-        assert!(
-            show(&mut h, &state, o.caption),
-            "{} is not on the page",
+        assert_eq!(
+            store::inq_value(o.name),
+            Some(PrefValue::Bool(o.on_by_default)),
+            "{}",
+            o.name
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "hifi")]
+fn with_enhanced_graphics_off_only_the_occlusion_and_the_sky_stay_with_its_box() {
+    let (mut h, state) = client_page(READY);
+    for o in &fidelity::OPTIONS {
+        let stays = [names::AMBIENT_OCCLUSION, names::SKY].contains(&o.name);
+        assert_eq!(
+            on_the_page(&mut h, &state, o.caption),
+            stays,
+            "{}",
             o.caption
         );
-        assert_eq!(store::inq_value(o.name), Some(PrefValue::Bool(false)));
     }
-    // With the better lighting off, the shadows' and the weather's boxes are greyed: a click asks
-    // for nothing.
-    let asked = tick(&mut h, &state, caption(names::SHADOWS));
-    assert_eq!(sets(&asked, names::SHADOWS), None, "{asked:?}");
-    let asked = tick(&mut h, &state, caption(names::WEATHER));
-    assert_eq!(sets(&asked, names::WEATHER), None, "{asked:?}");
-    // The lighting ticks, and then the shadows and the weather do.
-    let asked = tick(&mut h, &state, caption(names::LIGHTING));
-    assert_eq!(sets(&asked, names::LIGHTING), Some(PrefValue::Bool(true)));
-    let asked = tick(&mut h, &state, caption(names::SHADOWS));
-    assert_eq!(sets(&asked, names::SHADOWS), Some(PrefValue::Bool(true)));
-    let asked = tick(&mut h, &state, caption(names::WEATHER));
-    assert_eq!(sets(&asked, names::WEATHER), Some(PrefValue::Bool(true)));
-    // On a device without ray tracing the lamps stay greyed, the lighting ticked or not.
-    let asked = tick(&mut h, &state, caption(names::LAMPS));
-    assert_eq!(sets(&asked, names::LAMPS), None, "{asked:?}");
-    // The occlusion and the sky stand on their own.
+    // They tick on their own.
     let asked = tick(&mut h, &state, caption(names::SKY));
     assert_eq!(sets(&asked, names::SKY), Some(PrefValue::Bool(true)));
     let asked = tick(&mut h, &state, caption(names::AMBIENT_OCCLUSION));
@@ -148,6 +187,17 @@ fn the_effects_boxes_end_the_client_page_greyed_until_what_they_need_is_ticked()
         sets(&asked, names::AMBIENT_OCCLUSION),
         Some(PrefValue::Bool(true))
     );
+    // Ticked, the rest come back and tick as any other.
+    let asked = tick(&mut h, &state, caption(names::LIGHTING));
+    assert_eq!(sets(&asked, names::LIGHTING), Some(PrefValue::Bool(true)));
+    h.frame(&state);
+    let asked = tick(&mut h, &state, caption(names::SHADOWS));
+    assert_eq!(sets(&asked, names::SHADOWS), Some(PrefValue::Bool(true)));
+    let asked = tick(&mut h, &state, caption(names::WEATHER));
+    assert_eq!(sets(&asked, names::WEATHER), Some(PrefValue::Bool(true)));
+    // On a device without ray tracing the lamps stay, greyed.
+    let asked = tick(&mut h, &state, caption(names::LAMPS));
+    assert_eq!(sets(&asked, names::LAMPS), None, "{asked:?}");
     // The bounced light ticked leaves the occlusion's box free: indoors it is the only effect.
     let asked = tick(&mut h, &state, caption(names::GLOBAL_ILLUMINATION));
     assert_eq!(
@@ -163,31 +213,129 @@ fn the_effects_boxes_end_the_client_page_greyed_until_what_they_need_is_ticked()
 
 #[test]
 #[cfg(feature = "hifi")]
+fn keep_retail_look_takes_what_an_art_pack_draws_off_the_page() {
+    let (mut h, state) = client_page(READY);
+    tick(&mut h, &state, caption(names::LIGHTING));
+    h.frame(&state);
+    let pack = [names::NO_SLOPE_MATERIALS];
+    for name in pack {
+        assert!(on_the_page(&mut h, &state, caption(name)), "{name}");
+    }
+    let asked = tick(&mut h, &state, caption(names::RETAIL_LOOK));
+    assert_eq!(
+        sets(&asked, names::RETAIL_LOOK),
+        Some(PrefValue::Bool(true))
+    );
+    h.frame(&state);
+    for name in pack {
+        assert!(!on_the_page(&mut h, &state, caption(name)), "{name}");
+    }
+    assert!(on_the_page(&mut h, &state, caption(names::SHADOWS)));
+}
+
+/// Open the Quality Preset menu's list: its names, and the one the box shows. The list is closed
+/// again with that one chosen, which changes nothing.
+#[cfg(feature = "hifi")]
+fn presets_shown(h: &mut Harness, state: &GameState) -> (Vec<String>, usize) {
+    assert!(
+        show(h, state, fidelity::PRESET_CAPTION),
+        "no Quality Preset row"
+    );
+    let r =
+        h.ui.windows
+            .options_page
+            .control(fidelity::PRESET_CAPTION)
+            .expect("its box");
+    h.move_to(r.x + 10.0, r.y + r.h / 2.0);
+    h.press();
+    h.frame(state);
+    h.release();
+    h.frame(state);
+    let menu = h.ui.windows.options_page.menu.as_ref().expect("its list");
+    let shown = (menu.names.clone(), menu.at);
+    h.ui.windows.options_page.choose_in_open_list(shown.1);
+    h.frame(state);
+    shown
+}
+
+#[test]
+#[cfg(feature = "hifi")]
+fn a_quality_preset_sets_its_values_and_shows_until_a_box_changes() {
+    let (mut h, state) = client_page(READY);
+    tick(&mut h, &state, caption(names::LIGHTING));
+    h.frame(&state);
+    // Every box off is no preset's.
+    let (shown, at) = presets_shown(&mut h, &state);
+    assert_eq!(shown, ["Low", "Medium", "High", "Ultra", "Custom"]);
+    assert_eq!(at, 4);
+    // High chosen: what it sets is set, and it is shown, though Medium sets the same.
+    let r =
+        h.ui.windows
+            .options_page
+            .control(fidelity::PRESET_CAPTION)
+            .expect("its box");
+    h.move_to(r.x + 10.0, r.y + r.h / 2.0);
+    h.press();
+    h.frame(&state);
+    h.release();
+    h.frame(&state);
+    h.ui.windows.options_page.choose_in_open_list(2);
+    let asked = h.frame(&state).requests;
+    for (name, value) in fidelity::PRESETS[2].values() {
+        assert_eq!(sets(&asked, name), Some(value), "{name}");
+    }
+    let (shown, at) = presets_shown(&mut h, &state);
+    assert_eq!(shown, ["Low", "Medium", "High", "Ultra"]);
+    assert_eq!(at, 2);
+    // A box of the preset's changed: the player's own settings.
+    let asked = tick(&mut h, &state, caption(names::SKY));
+    assert_eq!(sets(&asked, names::SKY), Some(PrefValue::Bool(false)));
+    assert_eq!(presets_shown(&mut h, &state).1, 4);
+}
+
+#[test]
+#[cfg(feature = "hifi")]
+fn anti_aliasing_and_slope_materials_are_ticked_while_their_preferences_are_off() {
+    let (mut h, state) = client_page(READY);
+    tick(&mut h, &state, caption(names::LIGHTING));
+    h.frame(&state);
+    for name in [names::NO_ANTI_ALIASING, names::NO_SLOPE_MATERIALS] {
+        store::set_value(name, PrefValue::Bool(false));
+        h.frame(&state);
+        assert_eq!(store::inq_value(name), Some(PrefValue::Bool(false)));
+        let asked = tick(&mut h, &state, caption(name));
+        assert_eq!(
+            sets(&asked, name),
+            Some(PrefValue::Bool(true)),
+            "unticked: off"
+        );
+        h.frame(&state);
+        let asked = tick(&mut h, &state, caption(name));
+        assert_eq!(
+            sets(&asked, name),
+            Some(PrefValue::Bool(false)),
+            "ticked: on"
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "hifi")]
 fn a_device_with_ray_tracing_lets_the_lamps_be_ticked_with_the_lighting() {
     let (mut h, state) = client_page(Availability {
-        built: true,
-        wgpu: true,
-        widened: true,
-        supported: true,
         rays: Some(true),
-        active: false,
-        failed: None,
-        wgpu_next: None,
+        ..READY
     });
-    let asked = tick(&mut h, &state, caption(names::LAMPS));
-    assert_eq!(
-        sets(&asked, names::LAMPS),
-        None,
-        "greyed without the lighting"
-    );
+    assert!(!on_the_page(&mut h, &state, caption(names::LAMPS)));
     let asked = tick(&mut h, &state, caption(names::LIGHTING));
     assert_eq!(sets(&asked, names::LIGHTING), Some(PrefValue::Bool(true)));
+    h.frame(&state);
     let asked = tick(&mut h, &state, caption(names::LAMPS));
     assert_eq!(sets(&asked, names::LAMPS), Some(PrefValue::Bool(true)));
 }
 
-/// On a renderer the effects do not draw on, every box is shown greyed and none can be ticked:
-/// the status line says how to get them.
+/// On a renderer the effects do not draw on, every box the page shows is greyed and none can be
+/// ticked: the status line says how to get them.
 #[test]
 #[cfg(feature = "hifi")]
 fn on_a_renderer_other_than_wgpu_every_box_is_greyed() {
@@ -203,15 +351,10 @@ fn on_a_renderer_other_than_wgpu_every_box_is_greyed() {
     };
     assert!(!native.offered());
     let (mut h, state) = client_page(native);
-    for o in &fidelity::OPTIONS {
-        assert!(
-            show(&mut h, &state, o.caption),
-            "{} is not on the page",
-            o.caption
-        );
-        let asked = tick(&mut h, &state, o.caption);
-        assert_eq!(sets(&asked, o.name), None, "{}: {asked:?}", o.name);
-        assert_eq!(store::inq_value(o.name), Some(PrefValue::Bool(false)));
+    for name in [names::LIGHTING, names::AMBIENT_OCCLUSION, names::SKY] {
+        let asked = tick(&mut h, &state, caption(name));
+        assert_eq!(sets(&asked, name), None, "{name}: {asked:?}");
+        assert_eq!(store::inq_value(name), Some(PrefValue::Bool(false)));
     }
 }
 
@@ -433,7 +576,7 @@ fn an_effect_s_note_is_drawn_over_every_row_of_the_page() {
         wgpu_next: None,
     });
     // The first box, with the others in the rows under it.
-    let o = &fidelity::OPTIONS[0];
+    let o = fidelity::find(names::AMBIENT_OCCLUSION).expect("its box");
     assert!(show(&mut h, &state, o.caption), "the first effect's box");
     let page = &h.ui.windows.options_page;
     let list = page.control("list").expect("the page's list");
@@ -474,14 +617,14 @@ fn an_effect_s_note_shows_only_over_the_part_of_its_row_the_list_shows() {
         failed: None,
         wgpu_next: None,
     });
-    let o = &fidelity::OPTIONS[0];
+    let o = fidelity::find(names::AMBIENT_OCCLUSION).expect("its box");
     assert!(show(&mut h, &state, o.caption), "the first effect's box");
     let page = &h.ui.windows.options_page;
     let list = page.control("list").expect("the page's list");
     let r = page.control(o.caption).expect("the first effect's box");
     // Scrolled back until the row's top is ten pixels above the list's foot.
     let row_top = r.y - 3.0;
-    h.ui.windows.options_page.scroll[tab::CLIENT] -= list.bottom() - 10.0 - row_top;
+    h.ui.windows.options_page.scroll[tab::DISPLAY] -= list.bottom() - 10.0 - row_top;
     h.frame(&state);
     let r =
         h.ui.windows
@@ -498,6 +641,68 @@ fn an_effect_s_note_shows_only_over_the_part_of_its_row_the_list_shows() {
     h.move_to(list.x + 40.0, list.bottom() - 4.0);
     h.frame(&state);
     assert_eq!(h.ui.windows.tip().map(|(t, _)| t.as_str()), Some(o.caption));
+}
+
+/// The Sound tab, every sound on.
+fn sound_tab() -> (Harness, GameState) {
+    store::init();
+    let state = GameState {
+        in_world: true,
+        name: "Tester".into(),
+        ..GameState::default()
+    };
+    let mut h = Harness::new(Default::default());
+    h.frame(&state);
+    h.ui.windows.open(WindowId::Options, 0.0);
+    h.ui.windows.options_page.tab = tab::SOUND;
+    h.frame(&state);
+    h.frame(&state);
+    (h, state)
+}
+
+/// The Sound tab has the Client page's sounds and nothing of the Display tab's, and the Display tab
+/// none of its sounds.
+#[test]
+fn the_client_page_is_a_display_tab_and_a_sound_tab() {
+    let (mut h, state) = sound_tab();
+    let page = &h.ui.windows.options_page;
+    for row in ["Ambient Sounds", "Interface Sounds"] {
+        assert!(page.control(row).is_some(), "{row}");
+    }
+    for row in ["Full Screen", "Interface Scale"] {
+        assert!(page.control(row).is_none(), "{row}");
+    }
+    h.ui.windows.options_page.tab = tab::DISPLAY;
+    h.frame(&state);
+    h.frame(&state);
+    let page = &h.ui.windows.options_page;
+    assert!(page.control("Full Screen").is_some());
+    assert!(page.control("Ambient Sounds").is_none());
+}
+
+/// Defaults on the Sound tab puts back its sounds alone, and on the Display tab everything else.
+#[test]
+fn each_tab_s_defaults_put_back_its_own_rows() {
+    let (mut h, state) = sound_tab();
+    let r =
+        h.ui.windows
+            .options_page
+            .control("Defaults")
+            .expect("Defaults");
+    h.move_to(r.x + 10.0, r.y + r.h / 2.0);
+    h.press();
+    let mut out = h.frame(&state).requests;
+    h.release();
+    out.extend(h.frame(&state).requests);
+    let named: Vec<&str> = out
+        .iter()
+        .filter_map(|r| match r {
+            UiRequest::SetPreference(n, _) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    assert!(named.iter().all(|n| n.starts_with("Sound.")), "{named:?}");
+    assert!(!named.is_empty());
 }
 
 /// Not a claim: draws the Client page scrolled to the renderer choice and the experimental
@@ -622,11 +827,11 @@ fn draw_the_effects_section_for_a_person_to_look_at() {
         };
         h.frame(&state);
         h.ui.windows.open(WindowId::Options, 0.0);
-        h.ui.windows.options_page.tab = tab::CLIENT;
+        h.ui.windows.options_page.tab = tab::DISPLAY;
         for _ in 0..3 {
             h.frame(&state);
         }
-        h.ui.windows.options_page.scroll[tab::CLIENT] = 1.0e6;
+        h.ui.windows.options_page.scroll[tab::DISPLAY] = 1.0e6;
         for _ in 0..30 {
             h.frame(&state);
         }
@@ -636,8 +841,8 @@ fn draw_the_effects_section_for_a_person_to_look_at() {
             Pointer::Away => {}
             Pointer::OverNote => {
                 let r = page
-                    .control(fidelity::OPTIONS[0].caption)
-                    .expect("the first effect's box");
+                    .control(fidelity::OPTIONS[fidelity::OPTIONS.len() - 1].caption)
+                    .expect("the last effect's box");
                 h.move_to(list.x + 120.0, r.y + r.h / 2.0);
             }
             Pointer::ListOpen => {

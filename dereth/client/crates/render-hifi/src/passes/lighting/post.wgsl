@@ -5,7 +5,8 @@ struct Post {
     // x the sun and sky's exposure (the exposure in force is the exposure pass's), y bloom
     // strength, z 1 for AgX (else ACES), w the bloom levels.
     tone: vec4<f32>,
-    // The source texel size (for the bloom passes); z the slope of the tone map's toe, w unused.
+    // The source texel size (for the bloom passes); z the slope of the tone map's toe, w what
+    // Screen Brightness scales the finished picture by.
     texel: vec4<f32>,
     // x saturation, y contrast, z vignette, w 1 on the first downsample.
     grade: vec4<f32>,
@@ -14,7 +15,8 @@ struct Post {
     // (nought: not at all).
     balance: vec4<f32>,
     // x how far the tone curve keeps each colour's hue and saturation, from the curve taken
-    // channel by channel (nought) to the curve taken on brightness alone (one).
+    // channel by channel (nought) to the curve taken on brightness alone (one); y how many times
+    // brighter than white the display can show, 1 for no more.
     hue: vec4<f32>,
 };
 
@@ -159,13 +161,17 @@ fn fs_tonemap(i: VsOut) -> @location(0) vec4<f32> {
             m = mix(m, kept, clamp(post.hue.x, 0.0, 1.0));
         }
     }
+    // On a display with headroom, what the tone map held to white rises past it, the brightest
+    // light most.
+    m = m * mix(1.0, post.hue.y, smoothstep(1.0, 6.0, luminance(x)));
     // Grade: a little saturation and contrast about middle grey, in display space.
     var g = linear_to_srgb(m);
     let l = luminance(g);
     g = mix(vec3<f32>(l), g, post.grade.x);
-    g = (g - 0.5) * post.grade.y + 0.5;
+    g = ((g - 0.5) * post.grade.y + 0.5) * post.texel.w;
     // A dither of a quarter level, so the gradients of the sky do not band.
     let n = fract(52.9829189 * fract(dot(i.pos.xy, vec2<f32>(0.06711056, 5.83715e-3)))) - 0.5;
     g = g + vec3<f32>(n / 255.0);
-    return vec4<f32>(clamp(g, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    let most = max(linear_to_srgb(vec3<f32>(post.hue.y)).x, 1.0) * post.texel.w;
+    return vec4<f32>(clamp(g, vec3<f32>(0.0), vec3<f32>(max(most, 1.0))), 1.0);
 }

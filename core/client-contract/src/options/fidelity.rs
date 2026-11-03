@@ -589,6 +589,8 @@ mod tests {
 
     #[test]
     fn a_box_whose_prerequisite_is_off_or_covered_says_why() {
+        // With an art pack open, which draws what every box asks for.
+        let blocked = |name, ticked, rays| blocked_with(name, ticked, rays, true);
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         use fidelity::{
             AMBIENT_OCCLUSION, GLOBAL_ILLUMINATION, LAMPS, LIGHTING, NO_SLOPE_MATERIALS,

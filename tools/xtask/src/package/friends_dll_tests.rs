@@ -65,13 +65,20 @@ fn both_launcher_packages_carry_the_library_beside_the_launcher() {
             // The AppImage's contents are checked as built, not listed.
             Os::Linux => None,
         };
-        for (required, package) in [
-            (dereth::contents(t).0, "dereth"),
+        let (dereth_required, dereth_optional) = dereth::contents(t);
+        // A Dereth macOS package may leave it out (`--no-friends-dll`).
+        let dereth_listed = if t.os == Os::Mac {
+            dereth_optional
+        } else {
+            dereth_required
+        };
+        for (listed, package) in [
+            (dereth_listed, "dereth"),
             (auberean::contents(t).0, "auberean"),
         ] {
             match &want {
-                Some(name) => assert!(required.contains(name), "{package} {}", t.triple),
-                None => assert!(required.is_empty(), "{package} {}", t.triple),
+                Some(name) => assert!(listed.contains(name), "{package} {}", t.triple),
+                None => assert!(listed.is_empty(), "{package} {}", t.triple),
             }
         }
     }

@@ -263,10 +263,10 @@ fn the_launchers_release_configuration_names_no_machine_folder() {
     let beside: [&std::path::Path; 2] = [&client, &tool];
     let notices = stage.join("notices");
     let library = stage.join("auberean_friends.dll");
-    let win = dereth::bundle_config(target(WINDOWS), &app, &beside, &notices, &library).unwrap();
+    let win = dereth::bundle_config(target(WINDOWS), &app, &beside, &notices, Some(&library)).unwrap();
     assert_eq!(win, serde_json::json!({ "createUpdaterArtifacts": false }));
     for t in [target(MAC_ARM), target(LINUX)] {
-        let c = dereth::bundle_config(t, &app, &beside, &notices, &library).unwrap();
+        let c = dereth::bundle_config(t, &app, &beside, &notices, Some(&library)).unwrap();
         assert_eq!(
             c["externalBin"],
             serde_json::json!([

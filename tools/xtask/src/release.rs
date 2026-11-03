@@ -519,7 +519,9 @@ fn run(
     match product {
         Product::Empyrean => package::build_packages(&ws, &[host], None, false),
         // A macOS host needs MoltenVK for these, named as the package command takes it.
-        Product::Dereth => package::dereth::build_packages(&ws, &[host], None, false, None, None),
+        Product::Dereth => {
+            package::dereth::build_packages(&ws, &[host], None, false, None, Some(None))
+        }
         Product::Lyceum => package::lyceum::build_packages(&ws, &[host], None, false, None),
         Product::Auberean => {
             package::auberean::build_packages(&ws, &[host], None, false, None, None)

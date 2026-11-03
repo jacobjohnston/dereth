@@ -266,9 +266,10 @@ pub fn contents(target: Target) -> (Vec<String>, Vec<String>) {
                 "Contents/MacOS/dereth-client",
                 "Contents/Frameworks/libMoltenVK.dylib",
             ]));
-            required.push(format!("Contents/Resources/{}", super::friends_dll::FILE));
             required.push(tool_in_release(target));
             required.extend(notices_in("Contents/Resources/"));
+            // Optional: a build with --no-friends-dll leaves it out.
+            optional.push(format!("Contents/Resources/{}", super::friends_dll::FILE));
             optional.extend(own(&[
                 "Contents/PkgInfo",
                 "Contents/Resources/Assets.car",
@@ -361,9 +362,10 @@ struct Options {
     allow_dirty: bool,
     moltenvk: Option<PathBuf>,
     friends_dll: Option<PathBuf>,
+    no_friends_dll: bool,
 }
 
-pub const USAGE: &str = "usage: cargo xtask package dereth [--target <triple>]... [--out <dir>] [--allow-dirty] [--moltenvk <dir>] [--friends-dll <file>]
+pub const USAGE: &str = "usage: cargo xtask package dereth [--target <triple>]... [--out <dir>] [--allow-dirty] [--moltenvk <dir>] [--friends-dll <file> | --no-friends-dll]
        cargo xtask package dereth --gather <dir>";
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
@@ -381,15 +383,22 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "--gather" => o.gather = Some(PathBuf::from(value()?)),
             "--moltenvk" => o.moltenvk = Some(PathBuf::from(value()?)),
             "--friends-dll" => o.friends_dll = Some(PathBuf::from(value()?)),
+            "--no-friends-dll" => o.no_friends_dll = true,
             "--allow-dirty" => o.allow_dirty = true,
             other => return Err(format!("unexpected argument `{other}`\n{USAGE}")),
         }
+    }
+    if o.no_friends_dll && o.friends_dll.is_some() {
+        return Err(format!(
+            "--no-friends-dll and --friends-dll are each other's opposite\n{USAGE}"
+        ));
     }
     if o.gather.is_some()
         && (!o.targets.is_empty()
             || o.out.is_some()
             || o.moltenvk.is_some()
-            || o.friends_dll.is_some())
+            || o.friends_dll.is_some()
+            || o.no_friends_dll)
     {
         return Err(format!(
             "--gather builds nothing: it takes no --target, --out, --moltenvk or --friends-dll\n{USAGE}"
@@ -428,7 +437,7 @@ pub fn package(args: &[String]) -> i32 {
                 options.out.as_deref(),
                 options.allow_dirty,
                 options.moltenvk.as_deref(),
-                options.friends_dll.as_deref(),
+                (!options.no_friends_dll).then_some(options.friends_dll.as_deref()),
             )
         }
     };
@@ -493,14 +502,14 @@ pub(super) fn succeeds(program: &str, args: &[&str]) -> bool {
 
 /// Build, check and write every target's files, then the index. The folder they are in. The
 /// retail client's friends library is `friends_dll` when given, else built here
-/// ([`super::friends_dll::find`]).
+/// ([`super::friends_dll::find`]); `None` leaves it out, which only macOS packages may.
 pub fn build_packages(
     ws: &Path,
     triples: &[String],
     out: Option<&Path>,
     allow_dirty: bool,
     moltenvk: Option<&Path>,
-    friends_dll: Option<&Path>,
+    friends_dll: Option<Option<&Path>>,
 ) -> Result<PathBuf, String> {
     let version = Product::Dereth.version(ws)?;
     version::parse_release_version(&version)?;
@@ -529,8 +538,20 @@ pub fn build_packages(
                 .to_owned(),
         );
     }
-    if let Some(why) = super::friends_dll::refusal(friends_dll, &host) {
-        refusals.push(format!("  {why}"));
+    match friends_dll {
+        Some(given) => {
+            if let Some(why) = super::friends_dll::refusal(given, &host) {
+                refusals.push(format!("  {why}"));
+            }
+        }
+        None => {
+            for t in plans.iter().filter(|t| t.os != Os::Mac) {
+                refusals.push(format!(
+                    "  {}: only a macOS package may leave out the friends library",
+                    t.triple
+                ));
+            }
+        }
     }
     let mut moltenvk_found = None;
     if plans.iter().any(|t| t.os == Os::Mac) {
@@ -573,12 +594,15 @@ pub fn build_packages(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| base.join(format!("dereth-{version}")));
     std::fs::create_dir_all(&out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
-    let library = super::friends_dll::find(
-        ws,
-        &facts,
-        friends_dll,
-        &base.join("stage").join("friends-dll"),
-    )?;
+    let library = match friends_dll {
+        Some(given) => Some(super::friends_dll::find(
+            ws,
+            &facts,
+            given,
+            &base.join("stage").join("friends-dll"),
+        )?),
+        None => None,
+    };
     for target in plans {
         println!("\n=== dereth {version} for {}", target.triple);
         let job = Job {
@@ -590,7 +614,7 @@ pub fn build_packages(
             stage: &launcher_stage(&base, target),
             signer: signer.as_ref(),
             moltenvk: moltenvk_found.as_ref(),
-            library: &library,
+            library: library.as_deref(),
         };
         job.run()?;
     }
@@ -776,7 +800,7 @@ pub(crate) fn build_launcher_as_dereth(
         stage,
         signer: None,
         moltenvk,
-        library,
+        library: Some(library),
     };
     fresh_dir(stage)?;
     let client = job.build_client()?;
@@ -809,8 +833,8 @@ struct Job<'a> {
     signer: Option<&'a Signer>,
     /// MoltenVK's dylib and licence (macOS).
     moltenvk: Option<&'a (PathBuf, PathBuf)>,
-    /// The retail client's friends library, checked ([`super::friends_dll`]).
-    library: &'a Path,
+    /// The retail client's friends library, checked ([`super::friends_dll`]); `None` leaves it out.
+    library: Option<&'a Path>,
 }
 
 impl Job<'_> {
@@ -828,7 +852,9 @@ impl Job<'_> {
                     (tool_in_release(self.target), tool.clone()),
                     (
                         super::friends_dll::FILE.to_owned(),
-                        self.library.to_path_buf(),
+                        self.library
+                            .ok_or("a Windows package carries the friends library")?
+                            .to_path_buf(),
                     ),
                 ];
                 members.extend(NOTICES.iter().map(|n| ((*n).to_owned(), notices.join(n))));
@@ -1707,7 +1733,7 @@ pub fn bundle_config(
     app_dir: &Path,
     beside: &[&Path],
     notices: &Path,
-    library: &Path,
+    library: Option<&Path>,
 ) -> Result<serde_json::Value, String> {
     if target.os == Os::Windows {
         return Ok(serde_json::json!({ "createUpdaterArtifacts": false }));
@@ -1719,10 +1745,12 @@ pub fn bundle_config(
             serde_json::Value::from(*n),
         );
     }
-    resources.insert(
-        relative_to(app_dir, library)?,
-        serde_json::Value::from(super::friends_dll::FILE),
-    );
+    if let Some(library) = library {
+        resources.insert(
+            relative_to(app_dir, library)?,
+            serde_json::Value::from(super::friends_dll::FILE),
+        );
+    }
     let programs = beside
         .iter()
         .map(|p| relative_to(app_dir, p))

@@ -68,7 +68,7 @@ fn draw_every_options_tab_and_dropdown_for_a_person_to_look_at() {
             wgpu: true,
             widened: true,
             supported: true,
-            rays: Some(false),
+            rays: Some(true),
             active: true,
             ..Availability::default()
         },

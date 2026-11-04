@@ -21,6 +21,9 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Enhanced Graphics: a Quality Preset menu, from a light Low to a full Ultra, and the settings start at Medium. VSync and HDR Output are new.
 - Enhanced Graphics Mode: it always draws the best texture filtering and detail, models that hold their detail, and frames on the display's refresh unless VSync is off, whatever the Graphics settings say.
 - Enhanced Graphics Mode: Screen Brightness scales the whole picture alike.
+- Horizon: two settings under Display: Status Bar Colors gives the health, stamina and mana bars the
+  original game's red, amber and blue, and unticking Large Status Bar Numbers draws their numbers
+  smaller, clear of the bars' titles.
 
 ## 0.4.12 (2026-11-03)
 

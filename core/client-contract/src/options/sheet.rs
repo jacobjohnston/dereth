@@ -1074,7 +1074,7 @@ const FIDELITY_ROWS: [Row; 17] = [
     ),
     fidelity_box(12),
     fidelity_box(9),
-    fidelity_box(12),
+    fidelity_box(13),
     only(
         Shown::Only(Interface::Horizon),
         noted(

@@ -1,4 +1,4 @@
-//! The words and rules of the optional high-fidelity presentation's options: thirteen check boxes
+//! The words and rules of the optional high-fidelity presentation's options: fourteen check boxes
 //! and the Depth Mapping ([`super::depth_mapping`]), Tree Draw Distance and Ground Cover
 //! ([`super::draw_distance`]) menus on the Horizon interface's Display page, under a heading of
 //! their own, below a Graphics menu that chooses standard or enhanced graphics.
@@ -63,8 +63,8 @@ pub struct FidelityOption {
     pub on_by_default: bool,
 }
 
-/// The thirteen boxes, each above the boxes it can take off the page.
-pub const OPTIONS: [FidelityOption; 13] = [
+/// The fourteen boxes, each above the boxes it can take off the page.
+pub const OPTIONS: [FidelityOption; 14] = [
     FidelityOption {
         name: fidelity::LIGHTING,
         caption: "Enhanced Graphics",

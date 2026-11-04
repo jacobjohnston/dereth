@@ -266,8 +266,8 @@ mod tests {
             "@clouds shadows <0 to 1> - Forces how much they shade the land.\n",
             "@clouds <option> reset - Restores one option.\n",
             "@clouds reset - Restores them all.\n",
-            "These change the clouds of the Remastered sky, which needs an art pack and Better \
-             Lighting, with Retail Look off.\n",
+            "These change the clouds of the Remastered sky, which needs Better Lighting and \
+             Reflective Water or an art pack, with Retail Look off.\n",
         );
         let c = crate::cmd::CommandInterp::new();
         for name in ["clouds", "@clouds", "/clouds"] {

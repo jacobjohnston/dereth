@@ -26,7 +26,7 @@ struct Frame {
     // The ambient light as the old light took it.
     amb_legacy: vec4<f32>,
     // x the frame's place in the anti-aliasing's dither of the edges of cut-outs (1 and over),
-    // nought on a frame drawn without it.
+    // nought on a frame drawn without it; y how many levels finer a model's pictures are read.
     taa: vec4<f32>,
     // The ambient light the world's objects took from the old light: the landscape's and a share
     // of the sun's more.
@@ -252,15 +252,15 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> Out {
     if (fading < in.keep.x || fading >= in.keep.y) {
         discard;
     }
-    let base = textureSample(base_tex, samp, in.uv) * material.base_color * in.color;
+    let base = textureSampleBias(base_tex, samp, in.uv, frame.taa.y) * material.base_color * in.color;
     // Cut before the other pictures are read: a cut pixel reads them only as a helper of the
     // pixels round it.
     if (material.flags.x > 0.0 && dithered_alpha(base.a, in.position.xy) < material.flags.x) {
         discard;
     }
-    let m = textureSample(normal_tex, samp, in.uv).xyz * 2.0 - vec3<f32>(1.0);
-    let mr = textureSample(metal_rough_tex, samp, in.uv);
-    let ao = textureSample(occlusion_tex, samp, in.uv).r;
+    let m = textureSampleBias(normal_tex, samp, in.uv, frame.taa.y).xyz * 2.0 - vec3<f32>(1.0);
+    let mr = textureSampleBias(metal_rough_tex, samp, in.uv, frame.taa.y);
+    let ao = textureSampleBias(occlusion_tex, samp, in.uv, frame.taa.y).r;
     let foliage = material.flags.y > 0.5;
     var n = normalize(in.normal);
     var t = in.tangent.xyz - n * dot(n, in.tangent.xyz);

@@ -1843,7 +1843,7 @@ fn frame_constants(frame: &HifiFrame, clip_from_render: Mat4, wind: bool) -> Vec
     c.extend([l.x, l.y, l.z, frame.pack_light.glow]);
     c.extend([sun[0], sun[1], sun[2], 0.0]);
     c.extend([amb[0], amb[1], amb[2], 0.0]);
-    c.extend([cam.dither, 0.0, 0.0, 0.0]);
+    c.extend([cam.dither, cam.mip_bias, 0.0, 0.0]);
     c.extend([objects[0], objects[1], objects[2], 0.0]);
     let origin = render_origin(frame).unwrap_or(Vec2::ZERO);
     // LINT-OK: the clock wraps every hour and a bit, where a skip in the swaying goes unseen.

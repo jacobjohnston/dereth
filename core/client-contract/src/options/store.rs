@@ -398,7 +398,7 @@ const CUSTOM_ENUMS: &[CustomEnum] = &[
         choices: super::renderer::choice_rows,
     },
     CustomEnum {
-        recognizes: |name| name.eq_ignore_ascii_case(super::render_scale::RENDER_SCALE),
+        recognizes: super::render_scale::is_a_scale,
         parse: super::render_scale::parse_value,
         format: super::render_scale::convert_to_string,
         choices: super::render_scale::choice_rows,
@@ -408,6 +408,12 @@ const CUSTOM_ENUMS: &[CustomEnum] = &[
         parse: super::draw_distance::parse_value,
         format: super::draw_distance::convert_to_string,
         choices: super::draw_distance::choice_rows,
+    },
+    CustomEnum {
+        recognizes: super::dynamic_resolution::is_dynamic_resolution,
+        parse: super::dynamic_resolution::parse_value,
+        format: super::dynamic_resolution::convert_to_string,
+        choices: super::dynamic_resolution::choice_rows,
     },
 ];
 

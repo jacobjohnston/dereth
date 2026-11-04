@@ -1045,13 +1045,35 @@ const CLIENT: [Heading; 6] = {
     ]
 };
 
-/// The thirteen boxes and the two draw distances, each at its default and on the Horizon page
-/// alone: the two switches, then how frames reach the display, then the effects, with what an art
-/// pack draws last.
+/// The thirteen boxes, the render scale's two menus and the two draw distances, each at its
+/// default and on the Horizon page alone: the two switches, then the render scale, then how frames
+/// reach the display, then the effects, with what an art pack draws last.
 #[cfg(feature = "hifi")]
-const FIDELITY_ROWS: [Row; 15] = [
+const FIDELITY_ROWS: [Row; 17] = [
     fidelity_box(0),
     fidelity_box(1),
+    only(
+        Shown::Only(Interface::Horizon),
+        noted(
+            super::fidelity::SCALE_NOTE,
+            pref(
+                super::fidelity::SCALE_CAPTION,
+                Value::Menu(crate::options::names::fidelity::RENDER_SCALE),
+                Int(super::fidelity::SCALE_DEFAULT as i32),
+            ),
+        ),
+    ),
+    only(
+        Shown::Only(Interface::Horizon),
+        noted(
+            super::dynamic_resolution::NOTE,
+            pref(
+                super::dynamic_resolution::CAPTION,
+                Value::Menu(crate::options::names::fidelity::DYNAMIC_RESOLUTION),
+                Int(super::dynamic_resolution::DEFAULT),
+            ),
+        ),
+    ),
     fidelity_box(8),
     fidelity_box(10),
     fidelity_box(11),
@@ -1380,6 +1402,15 @@ mod tests {
             // The two switches first.
             assert_eq!(rows[0].value, Value::Check(fidelity::OPTIONS[0].name));
             assert_eq!(rows[1].value, Value::Check(fidelity::OPTIONS[1].name));
+            // The render scale's menus after them, at their defaults.
+            for (row, (name, _)) in rows[2..4].iter().zip(fidelity::MENUS) {
+                assert_eq!(row.value, Value::Menu(name));
+                assert_eq!(row.shown, Shown::Only(Interface::Horizon));
+            }
+            assert_eq!(
+                rows[2].default,
+                Some(Int(crate::options::render_scale::DYNAMIC as i32))
+            );
             for name in [
                 crate::options::names::fidelity::TREE_DRAW_DISTANCE,
                 crate::options::names::fidelity::GROUND_COVER_DRAW_DISTANCE,

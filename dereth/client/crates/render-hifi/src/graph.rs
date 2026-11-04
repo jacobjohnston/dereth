@@ -117,6 +117,8 @@ pub struct EncodeCx<'a, 's> {
     pub timer: &'a mut GpuTimer,
     /// The pipelines derived from the recorded ones, those built so far.
     pub pipelines: &'a PipelineCache,
+    /// A pass that wants the picture upscaled here says so: the frame goes on at its full size.
+    pub upscale: &'a mut Option<crate::passes::taa::UpscaleRequest>,
 }
 
 /// One pass of the presentation.

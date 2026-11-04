@@ -39,7 +39,7 @@ wgpu = [
 # The high-fidelity seam of the `wgpu` device (`src/wgpu/sidecar.rs`, `src/hifi_mark.rs`): an
 # optional second presentation of the world drawn from the frame's recording. Off unless a build
 # asks for it; without it the device builds no seam and behaves exactly as before.
-hifi = ["wgpu"]
+hifi = ["wgpu", "dep:objc2", "dep:objc2-metal", "dep:objc2-metal-fx"]
 # The Direct3D 12 device (`src/d3d12.rs`).
 # Windows only: the module itself is `cfg(all(windows, feature = "d3d12"))`, and the feature only
 # turns on more of the `windows` crate, which is already a Windows-only dependency of this crate.
@@ -90,6 +90,13 @@ raw-window-handle.workspace = true
 gpu-allocator = { version = "0.28", optional = true, default-features = false, features = ["vulkan", "std"] }
 naga = { version = "30", optional = true, features = ["wgsl-in", "spv-out"] }
 
+# MetalFX's upscaling of the high-fidelity presentation (`src/wgpu/metalfx.rs`), at the versions
+# `wgpu`'s Metal backend hands its objects over in.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-metal = { version = "0.3", optional = true, default-features = false, features = ["std", "MTLAllocation", "MTLCommandBuffer", "MTLDevice", "MTLPixelFormat", "MTLResource", "MTLTexture"] }
+objc2-metal-fx = { version = "0.3", optional = true, default-features = false, features = ["std", "MTLFXTemporalScaler"] }
+
 # Native backend support is Windows-only.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
@@ -99,7 +106,7 @@ windows = { version = "0.62", features = [
 ] }
 
 # This crate is allowed unsafe (Vulkan and Win32 interop). It does NOT inherit the workspace
-# lints, because those forbid unsafe outright. Unsafe is isolated in `src/vulkan.rs` and the Win32 modules with a SAFETY
+# lints, because those forbid unsafe outright. Unsafe is isolated in `src/vulkan.rs`, the Win32 modules and `src/wgpu/metalfx.rs` with a SAFETY
 # comment per block; see `src/lib.rs`'s module documentation.
 [lints.rust]
 missing_debug_implementations = "warn"

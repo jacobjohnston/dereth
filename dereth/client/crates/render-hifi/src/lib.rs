@@ -329,6 +329,8 @@ pub struct HifiRenderer {
     /// The size the world was last drawn at, pixels: the frame's, or a share of it at a render
     /// scale.
     drawn_size: (u32, u32),
+    /// The texture MetalFX last wrote its picture into.
+    upscaled_output: Option<wgpu::Texture>,
     /// How many frames a pass has let the blocks' retained geometry go on and wanted every
     /// resident block's handed over again.
     feed_requests: u64,
@@ -365,6 +367,7 @@ impl HifiRenderer {
             cpu_prepare: Vec::new(),
             cpu_encode: Vec::new(),
             drawn_size: (0, 0),
+            upscaled_output: None,
             feed_requests: 0,
         }
     }
@@ -641,7 +644,7 @@ impl HifiRenderer {
             .ok_or(HifiError::NotReady("the frame was not prepared"))?;
         let watch = timing::Stopwatch::start();
         let targets = Compositor::targets(cx, &mut self.resources)?;
-        let rt = match &self.plan {
+        let mut rt = match &self.plan {
             Some(_) => Some(ReshadeTargets::new(cx, &mut self.resources)?),
             None => None,
         };
@@ -655,6 +658,8 @@ impl HifiRenderer {
         let mut unstamped = None;
         let mut resolved = rt.is_none();
         let mut enlarged = None;
+        let mut upscale = None;
+        let mut upscaled_depth = None;
         self.compositor.begin_frame();
         // Empty on a frame drawn without the anti-aliasing, or not re-shaded.
         self.compositor.jitter_with(&self.jittered_frames);
@@ -1075,9 +1080,28 @@ impl HifiRenderer {
                     resolved: &mut resolved,
                     timer,
                     pipelines: &self.pipelines,
+                    upscale: &mut upscale,
                 };
                 pass.encode(&mut ecx)?;
                 timing::add_ms(&mut self.cpu_encode, pass.name(), watch.ms());
+                // The picture rebuilt at the frame's size: the frame goes on there.
+                if let (Some(request), Some(targets)) = (upscale.take(), rt.as_mut()) {
+                    let (hdr, picture, seen) = upscale_world(
+                        &mut self.compositor,
+                        &mut self.resources,
+                        &mut self.upscaled_output,
+                        cx,
+                        encoder,
+                        &request,
+                        (&colour, &world_depth),
+                        (frame.camera.near, frame.camera.far),
+                    )?;
+                    targets.hdr = hdr;
+                    colour = picture;
+                    depth.clone_from(&seen);
+                    world_depth.clone_from(&seen);
+                    upscaled_depth = Some(seen);
+                }
             }
             if slot == Slot::Hdr && !resolved {
                 if let Some(rt) = &rt {
@@ -1121,9 +1145,93 @@ impl HifiRenderer {
         timer.resolve(encoder);
         // What the interface drawn over the world tests against: the world's depth, enlarged to
         // the frame where the world was drawn at fewer pixels.
-        self.world_depth = Some(enlarged.unwrap_or(targets.depth));
+        self.world_depth = Some(enlarged.or(upscaled_depth).unwrap_or(targets.depth));
         Ok(())
     }
+}
+
+/// Rebuild the world's picture at the frame's size with MetalFX: `wgpu` allows no raw commands in
+/// an encoder of its own, so what is recorded so far is submitted, the scale after it, and the
+/// frame goes on in a new encoder. The frame's picture, tone mapped target and depth at that size.
+#[allow(clippy::too_many_arguments)]
+fn upscale_world(
+    compositor: &mut Compositor,
+    resources: &mut resources::Resources,
+    held: &mut Option<wgpu::Texture>,
+    cx: &mut SidecarContext<'_>,
+    encoder: &mut wgpu::CommandEncoder,
+    request: &passes::taa::UpscaleRequest,
+    (colour, depth): (&wgpu::TextureView, &wgpu::TextureView),
+    near_far: (f32, f32),
+) -> Result<(wgpu::TextureView, wgpu::TextureView, wgpu::TextureView), HifiError> {
+    let (width, height) = cx.output_size();
+    let target = |resources: &mut resources::Resources, name, format, usage| {
+        resources.texture(
+            cx.device(),
+            name,
+            resources::TextureSpec {
+                width,
+                height,
+                format,
+                usage,
+            },
+        )
+    };
+    let drawn_into = wgpu::TextureUsages::RENDER_ATTACHMENT
+        | wgpu::TextureUsages::TEXTURE_BINDING
+        | wgpu::TextureUsages::COPY_SRC;
+    let hdr = target(
+        resources,
+        resources::ResourceName::UpscaledHdr,
+        dereth_render::wgpu::metalfx::COLOUR_FORMAT,
+        drawn_into | wgpu::TextureUsages::STORAGE_BINDING,
+    )?;
+    let picture = target(
+        resources,
+        resources::ResourceName::UpscaledColour,
+        cx.surface_format(),
+        drawn_into,
+    )?;
+    let seen = compositor
+        .enlarge_depth(cx, resources, encoder, colour, depth, near_far)?
+        .ok_or(HifiError::NotReady("the composite is not built"))?;
+    // `wgpu` cannot see MetalFX write a texture, and would clear one it thinks was never written,
+    // over the picture: a new texture is written here first.
+    let output = hdr.texture();
+    if held.as_ref() != Some(output) {
+        drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("MetalFX output"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &hdr,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        }));
+        cx.count_pass();
+        *held = Some(output.clone());
+    }
+    let next = cx
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("high-fidelity frame, upscaled"),
+        });
+    cx.queue()
+        .submit([std::mem::replace(encoder, next).finish()]);
+    if !request.encode(cx.device(), cx.queue(), output) {
+        return Err(HifiError::Device(
+            "MetalFX did not take the frame".to_owned(),
+        ));
+    }
+    cx.upscaled_to_output();
+    Ok((hdr, picture, seen))
 }
 
 impl FrameSidecar for HifiRenderer {
@@ -1152,12 +1260,21 @@ impl FrameSidecar for HifiRenderer {
             }
             let (jitter, dither) = if passes::taa::wanted(&self.settings) {
                 self.jitter_count = self.jitter_count.wrapping_add(1);
-                passes::taa::jitter(self.jitter_count, frame.camera.viewport)
+                passes::taa::jitter_over(
+                    self.jitter_count,
+                    passes::taa::phases(cx.surface_size(), cx.output_size()),
+                    frame.camera.viewport,
+                )
             } else {
                 (glam::Vec2::ZERO, 0.0)
             };
             frame.camera.jitter = jitter;
             frame.camera.dither = dither;
+            frame.camera.mip_bias = if dither > 0.0 {
+                passes::taa::mip_bias(cx.surface_size(), cx.output_size())
+            } else {
+                0.0
+            };
         }
         let Some(frame) = self.frame.as_ref() else {
             return Ok(SidecarFrame::Plain);
@@ -1279,6 +1396,7 @@ impl FrameSidecar for HifiRenderer {
                     &mut Chain(filters),
                     frame.camera.jitter,
                     frame.camera.dither,
+                    frame.camera.mip_bias,
                 );
             }
         }

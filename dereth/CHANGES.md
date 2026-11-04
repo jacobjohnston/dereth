@@ -23,7 +23,8 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Enhanced Graphics Mode: Screen Brightness scales the whole picture alike.
 - Better Lighting: a Depth Mapping menu, Off to High, gives walls, floors and roofs the relief an art pack has for them: bump and normal maps, parallax, self-shadows and a damp shine in dungeons. In rooms and dungeons the relief casts its small shadows away from the room's own lights.
 - Depth Mapping: roads have relief, their stones standing above sunken joints.
-- No Damp and Slime turns off the wet sheen Depth Mapping lays on dungeon walls and floors, and the slime in the Olthoi's lairs.
+- Damp and Slime keeps the wet sheen Depth Mapping lays on dungeon walls and floors, and the slime in the Olthoi's lairs; untick it to turn them off.
+- Enhanced Graphics: Depth Mapping starts at High, as the Medium preset has it, and the Low preset turns it and Damp and Slime off. Keep Retail Look takes both off the page.
 - Art packs: a material for a retail picture may keep drawing the player's own retail picture (`keep_retail_picture = true`), adding only its relief; its base color stays, for a client that draws none.
 - Art packs: a material for a retail picture may name a height picture, so that near the viewer its crevices sink into the surface and shade themselves from the light.
 - Art packs: a material for a retail picture may be damp, so that in a room it catches the light of the room's lamps and candles; a damp map says where it is wet, and it may be wet on floors too.

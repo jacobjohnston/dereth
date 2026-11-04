@@ -294,6 +294,9 @@ pub fn init() -> usize {
     // The optional high-fidelity presentation's options, in a build that has it.
     #[cfg(feature = "hifi")]
     super::fidelity::register();
+    // The weather's own sound, which only the high-fidelity presentation's weather makes.
+    #[cfg(feature = "hifi")]
+    super::weather_sound::register();
     // The landscape's detail texture: registered by retail's renderer with no options row, and
     // given one by both interfaces' pages here.
     register_preference(
@@ -1208,7 +1211,7 @@ mod tests {
         // ...beside this client's three presentation options from another era, its interface, its
         // performance panel, its background slow-down, the classic interface's six, the renderer
         // and the landscape detail texture, and in a build with the high-fidelity presentation its
-        // options too.
+        // options and the weather sound's two too.
         #[cfg(not(feature = "hifi"))]
         assert_eq!(len(), 48);
         #[cfg(feature = "hifi")]

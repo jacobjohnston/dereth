@@ -6,6 +6,8 @@
 //! - `DERETH_UI_SET`: preferences set first, `name=value` with `;` between (`true`, `false`, an
 //!   integer or a number).
 //! - `DERETH_UI_TABS`: a comma list of the tab indices to draw (default all of them).
+//! - `DERETH_UI_MENUS`: more dropdowns to open, by caption, `;` between.
+//! - `DERETH_UI_LIST`: when set, prints every control's caption on each picture's page.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -81,10 +83,17 @@ fn draw_every_options_tab_and_dropdown_for_a_person_to_look_at() {
         input: InputFrame::default(),
         screen: (W as f32, H as f32),
     };
+    let extra: Vec<String> = std::env::var("DERETH_UI_MENUS")
+        .unwrap_or_default()
+        .split(';')
+        .map(|m| m.trim().to_owned())
+        .filter(|m| !m.is_empty())
+        .collect();
     let menus: Vec<&str> = sheet::rows_for(PageId::Client, Interface::Horizon)
         .filter(|r| matches!(r.value, Value::Menu(_)))
         .map(|r| r.caption)
         .chain(OWN_MENUS)
+        .chain(extra.iter().map(String::as_str))
         .collect();
     h.frame(&state);
     h.ui.windows.open(WindowId::Options, 0.0);
@@ -106,6 +115,16 @@ fn draw_every_options_tab_and_dropdown_for_a_person_to_look_at() {
             }
             last = scroll;
             write(&dir.join(format!("tab{tab}-{step:02}.png")), &h, &art);
+            if std::env::var_os("DERETH_UI_LIST").is_some() {
+                let names: Vec<&str> =
+                    h.ui.windows
+                        .options_page
+                        .controls
+                        .iter()
+                        .map(|(c, _)| c.as_str())
+                        .collect();
+                println!("tab{tab}-{step:02}: {}", names.join(" | "));
+            }
             let Some(list) = h.ui.windows.options_page.control("list") else {
                 break;
             };

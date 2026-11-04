@@ -32,8 +32,8 @@ pub const CHOICES: [u32; 8] = [50, 75, 100, 150, 200, 300, 400, 500];
 /// The distance the pack draws to with nothing changed.
 pub const WHOLE: u32 = 100;
 
-/// The trees' share until the player changes it: the whole distance.
-pub const TREE_DEFAULT: i32 = 100;
+/// The trees' share until the player changes it, as the Medium preset has it.
+pub const TREE_DEFAULT: i32 = 150;
 
 /// The ground cover's share until the player changes it: the whole distance.
 pub const GROUND_COVER_DEFAULT: i32 = 100;
@@ -175,8 +175,9 @@ mod tests {
                 assert_eq!((rows[0].label.as_str(), rows[0].value), ("Off", OFF));
             }
             assert_eq!(shares[off..], [50, 75, 100, 150, 200, 300, 400, 500]);
-            // Each holds the whole distance until changed.
-            assert_eq!(rows[2 + off].label, "1x (Default)", "{name}");
+            // The trees hold Medium's 1.5x until changed, the ground cover 1x.
+            let default = if off == 1 { 2 } else { 3 };
+            assert!(rows[default + off].label.ends_with("(Default)"), "{name}");
         }
         assert!(choice_rows("Fidelity.GodRays").is_none());
     }
@@ -196,7 +197,7 @@ mod tests {
         assert_eq!(parse_value("Fidelity.GodRays", "100"), None);
         assert_eq!(
             convert_to_string(TREE_DRAW_DISTANCE, &PrefValue::Int(150)).as_deref(),
-            Some("1.5x")
+            Some("1.5x (Default)")
         );
         assert_eq!(
             convert_to_string(GROUND_COVER_DRAW_DISTANCE, &PrefValue::Int(OFF)).as_deref(),

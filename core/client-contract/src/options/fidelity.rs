@@ -25,7 +25,7 @@
 //! them in its `[Fidelity]` section. Without it nothing here is registered and no page shows them.
 
 use super::names::fidelity;
-use crate::PrefValue;
+use crate::PrefValue::{self, Int};
 
 /// What a box needs before it draws anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,16 +171,27 @@ pub const OPTIONS: [FidelityOption; 13] = [
     },
     FidelityOption {
         name: fidelity::NO_WIND,
-        caption: "No Wind",
-        note: "Holds an art pack's trees and plants still instead of letting the wind move them. \
-               It changes at once.",
-        needs: Needs::Lighting,
+        caption: "Foliage Wind",
+        note: "Lets the wind move an art pack's trees and plants; off, they hold still. It \
+               changes at once.",
+        needs: Needs::LightingWithoutRetailLook,
+        inverted: true,
+        on_by_default: false,
     },
 ];
 
 /// The menus among the effects' rows, each with what it needs. A menu's own module registers it
 /// and gives its choices; a row here gives it the boxes' rules.
-pub const MENUS: &[(&str, Needs)] = &[];
+pub const MENUS: &[(&str, Needs)] = &[
+    (
+        fidelity::TREE_DRAW_DISTANCE,
+        Needs::LightingWithoutRetailLook,
+    ),
+    (
+        fidelity::GROUND_COVER_DRAW_DISTANCE,
+        Needs::LightingWithoutRetailLook,
+    ),
+];
 
 /// The heading's caption.
 pub const HEADING: &str = "Enhanced Graphics";
@@ -216,6 +227,15 @@ pub const PRESET_VALUES: &[(&str, [PrefValue; PRESET_NAMES.len()])] = &[
     (fidelity::WEATHER, [OFF, ON, ON, ON]),
     (fidelity::NO_ANTI_ALIASING, [ON, OFF, OFF, OFF]),
     (fidelity::NO_SLOPE_MATERIALS, [OFF, OFF, OFF, OFF]),
+    (fidelity::NO_WIND, [ON, OFF, OFF, OFF]),
+    (
+        fidelity::TREE_DRAW_DISTANCE,
+        [Int(100), Int(150), Int(300), Int(500)],
+    ),
+    (
+        fidelity::GROUND_COVER_DRAW_DISTANCE,
+        [Int(super::draw_distance::OFF), Int(100), Int(300), Int(500)],
+    ),
 ];
 
 /// One quality preset, by its place in [`PRESET_NAMES`].
@@ -628,8 +648,9 @@ mod tests {
     #[test]
     fn what_the_lighting_and_the_retail_look_rule_out_leaves_the_page() {
         use fidelity::{
-            AMBIENT_OCCLUSION, GLOBAL_ILLUMINATION, HDR, LAMPS, LIGHTING, NO_ANTI_ALIASING,
-            NO_SLOPE_MATERIALS, RETAIL_LOOK, SHADOWS, SKY, VSYNC, WEATHER,
+            AMBIENT_OCCLUSION, GLOBAL_ILLUMINATION, GROUND_COVER_DRAW_DISTANCE, HDR, LAMPS,
+            LIGHTING, NO_ANTI_ALIASING, NO_SLOPE_MATERIALS, NO_WIND, RETAIL_LOOK, SHADOWS, SKY,
+            TREE_DRAW_DISTANCE, VSYNC, WEATHER,
         };
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         let left = |name: &str, on: &'static [&'static str]| {
@@ -647,14 +668,25 @@ mod tests {
             WEATHER,
             NO_ANTI_ALIASING,
             NO_SLOPE_MATERIALS,
+            NO_WIND,
             VSYNC,
             HDR,
+            TREE_DRAW_DISTANCE,
+            GROUND_COVER_DRAW_DISTANCE,
         ] {
             assert!(left(name, &[]), "{name}");
         }
         // The retail look takes off what an art pack draws, and only that.
-        assert!(left(NO_SLOPE_MATERIALS, &[LIGHTING, RETAIL_LOOK]));
-        for o in OPTIONS.iter().filter(|o| o.name != NO_SLOPE_MATERIALS) {
+        let packs = [
+            NO_SLOPE_MATERIALS,
+            NO_WIND,
+            TREE_DRAW_DISTANCE,
+            GROUND_COVER_DRAW_DISTANCE,
+        ];
+        for name in packs {
+            assert!(left(name, &[LIGHTING, RETAIL_LOOK]), "{name}");
+        }
+        for o in OPTIONS.iter().filter(|o| !packs.contains(&o.name)) {
             assert!(!left(o.name, &[LIGHTING, RETAIL_LOOK]), "{}", o.name);
         }
         // A device without rays stays, with its reason.
@@ -672,6 +704,7 @@ mod tests {
                 fidelity::RETAIL_LOOK
                     | fidelity::NO_ANTI_ALIASING
                     | fidelity::NO_SLOPE_MATERIALS
+                    | fidelity::NO_WIND
                     | fidelity::HDR
             );
             assert_eq!(o.on_by_default, draws, "{}", o.name);
@@ -697,7 +730,10 @@ mod tests {
             .filter(|o| o.inverted)
             .map(|o| o.caption)
             .collect();
-        assert_eq!(inverted, ["Anti-Aliasing", "Slope Materials"]);
+        assert_eq!(
+            inverted,
+            ["Anti-Aliasing", "Slope Materials", "Foliage Wind"]
+        );
     }
 
     #[test]
@@ -711,12 +747,21 @@ mod tests {
         let low = PRESETS[0].values();
         assert!(low.contains(&(fidelity::GLOBAL_ILLUMINATION, PrefValue::Bool(false))));
         assert!(low.contains(&(fidelity::NO_ANTI_ALIASING, PrefValue::Bool(true))));
+        assert!(low.contains(&(fidelity::NO_WIND, PrefValue::Bool(true))));
+        assert!(low.contains(&(
+            fidelity::GROUND_COVER_DRAW_DISTANCE,
+            Int(super::super::draw_distance::OFF)
+        )));
         let ultra = PRESETS[3].values();
-        assert!(ultra
-            .iter()
-            .all(|(name, v)| *v == PrefValue::Bool(!find(name).unwrap().inverted)));
-        // The boxes' defaults are the Medium preset's.
-        let defaults = |name: &str| find(name).map(|o| PrefValue::Bool(o.on_by_default));
+        assert!(ultra.iter().all(|(name, v)| match find(name) {
+            Some(o) => *v == PrefValue::Bool(!o.inverted),
+            None => *v == Int(500),
+        }));
+        // The defaults of the boxes and the menus are the Medium preset's.
+        let defaults = |name: &str| match find(name) {
+            Some(o) => Some(PrefValue::Bool(o.on_by_default)),
+            None => is_a_menu(name).then(|| Int(super::super::draw_distance::default_of(name))),
+        };
         assert_eq!(preset_in_use(defaults), Some(PRESETS[1]));
         // Each preset is in use once set, and a value of the player's own is none.
         for p in PRESETS {
@@ -735,20 +780,26 @@ mod tests {
     }
 
     #[test]
-    fn the_wind_box_and_the_draw_distances_need_the_better_lighting() {
-        use fidelity::{GROUND_COVER_DRAW_DISTANCE, LIGHTING, NO_WIND, TREE_DRAW_DISTANCE};
+    fn the_wind_box_and_the_draw_distances_need_the_better_lighting_without_the_retail_look() {
+        use fidelity::{
+            GROUND_COVER_DRAW_DISTANCE, LIGHTING, NO_WIND, RETAIL_LOOK, TREE_DRAW_DISTANCE,
+        };
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         for name in [NO_WIND, TREE_DRAW_DISTANCE, GROUND_COVER_DRAW_DISTANCE] {
             assert_eq!(blocked(name, with(&[]), None), Some(Blocked::NeedsLighting));
             assert_eq!(blocked(name, with(&[LIGHTING]), Some(false)), None);
+            assert_eq!(
+                blocked(name, with(&[LIGHTING, RETAIL_LOOK]), None),
+                Some(Blocked::RetailLook)
+            );
         }
         assert!(find(TREE_DRAW_DISTANCE).is_none(), "the menu is no box");
     }
 
-    /// The draw distances are registered at the whole distance, and the save leaves them out
-    /// until they are changed.
+    /// The draw distances start as the Medium preset has them, and the save leaves them out until
+    /// they are changed.
     #[test]
-    fn the_draw_distances_are_whole_and_left_out_of_the_profile_until_chosen() {
+    fn the_draw_distances_start_at_medium_and_are_left_out_of_the_profile_until_chosen() {
         use super::super::draw_distance::{default_of, OFF};
         use crate::persist::preferences::UserPreferences;
         let empty = UserPreferences::parse("").expect("an empty profile");
@@ -756,9 +807,8 @@ mod tests {
             fidelity::TREE_DRAW_DISTANCE,
             fidelity::GROUND_COVER_DRAW_DISTANCE,
         ] {
-            let whole = PrefValue::Int(default_of(name));
-            assert_eq!(whole, PrefValue::Int(100));
-            assert!(left_out_of_save(name, &whole, &empty), "{name}");
+            let medium = PrefValue::Int(default_of(name));
+            assert!(left_out_of_save(name, &medium, &empty), "{name}");
             assert!(!left_out_of_save(name, &PrefValue::Int(300), &empty));
         }
         assert!(!left_out_of_save(
@@ -766,10 +816,13 @@ mod tests {
             &PrefValue::Int(OFF),
             &empty
         ));
-        let named = UserPreferences::parse("[Fidelity]\r\nTreeDrawDistance=1x\r\n").expect("reads");
+        assert_eq!(default_of(fidelity::TREE_DRAW_DISTANCE), 150);
+        assert_eq!(default_of(fidelity::GROUND_COVER_DRAW_DISTANCE), 100);
+        let named =
+            UserPreferences::parse("[Fidelity]\r\nTreeDrawDistance=1.5x\r\n").expect("reads");
         assert!(!left_out_of_save(
             fidelity::TREE_DRAW_DISTANCE,
-            &PrefValue::Int(100),
+            &PrefValue::Int(150),
             &named
         ));
     }

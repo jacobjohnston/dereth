@@ -339,6 +339,18 @@ impl RenderPreferences {
         }
     }
 
+    /// What the scene draws with: while Enhanced Graphics Mode draws, the whole of every texture,
+    /// and meshes that hold their detail.
+    #[must_use]
+    pub fn drawn_with(mut self, enhanced: bool) -> Self {
+        if enhanced {
+            self.landscape_texture_detail = 0;
+            self.environment_texture_detail = 0;
+            self.automatic_degrades = false;
+        }
+        self
+    }
+
     /// Landscape and clipmap texture scales both use `max(detail, 1) - 1`.
     #[must_use]
     pub const fn image_scale(detail: u32) -> u32 {
@@ -549,6 +561,14 @@ pub enum FidelityFeature {
     NoAntiAliasing,
     /// `Fidelity.NoSlopeMaterials`.
     NoSlopeMaterials,
+    /// `Fidelity.VSync`.
+    VSync,
+    /// `Fidelity.Hdr`.
+    Hdr,
+    /// `Fidelity.DynamicResolution`.
+    DynamicResolution,
+    /// `Fidelity.RenderScale`.
+    RenderScale,
     /// `Fidelity.Debug`.
     Debug,
 }
@@ -556,7 +576,7 @@ pub enum FidelityFeature {
 #[cfg(feature = "hifi")]
 impl FidelityFeature {
     /// Every option, in the order the names list them.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 15] = [
         Self::Lighting,
         Self::Shadows,
         Self::GlobalIllumination,
@@ -567,6 +587,10 @@ impl FidelityFeature {
         Self::RetailLook,
         Self::NoAntiAliasing,
         Self::NoSlopeMaterials,
+        Self::VSync,
+        Self::Hdr,
+        Self::DynamicResolution,
+        Self::RenderScale,
         Self::Debug,
     ];
 
@@ -584,27 +608,71 @@ impl FidelityFeature {
             Self::RetailLook => fidelity::RETAIL_LOOK,
             Self::NoAntiAliasing => fidelity::NO_ANTI_ALIASING,
             Self::NoSlopeMaterials => fidelity::NO_SLOPE_MATERIALS,
+            Self::VSync => fidelity::VSYNC,
+            Self::Hdr => fidelity::HDR,
+            Self::DynamicResolution => fidelity::DYNAMIC_RESOLUTION,
+            Self::RenderScale => fidelity::RENDER_SCALE,
             Self::Debug => fidelity::DEBUG,
         }
     }
 
+    /// Whether the option chooses how frames reach the screen, or how many of the frame's pixels
+    /// the world is drawn at, rather than asking for an effect, so that alone it asks nothing of
+    /// the device.
+    #[must_use]
+    pub const fn is_presentation_choice(self) -> bool {
+        matches!(
+            self,
+            Self::VSync | Self::Hdr | Self::DynamicResolution | Self::RenderScale
+        )
+    }
+
     /// The highest value the option takes: 4 for an effect (Ultra), 1 for the switches that
-    /// turn something off (the retail look's, the anti-aliasing's, the slope materials'), the last
-    /// view for the diagnostic views.
+    /// turn something off (the retail look's, the anti-aliasing's, the slope materials') and the
+    /// presentation choices, the last view for the diagnostic views, the highest frame rate for
+    /// Dynamic Resolution, and under a hundred for the render scale.
     #[must_use]
     pub const fn max(self) -> u32 {
         match self {
             Self::Debug => 7,
-            Self::RetailLook | Self::NoAntiAliasing | Self::NoSlopeMaterials => 1,
+            Self::RenderScale => 99,
+            Self::DynamicResolution => 120,
+            Self::RetailLook
+            | Self::NoAntiAliasing
+            | Self::NoSlopeMaterials
+            | Self::VSync
+            | Self::Hdr => 1,
             _ => 4,
         }
     }
 
+    /// What the option holds where the profile names nothing, when it is not 0: a box's default,
+    /// or the render scale's or Dynamic Resolution's.
+    #[must_use]
+    pub fn default_value(self) -> Option<u32> {
+        use dereth_client_contract::options as o;
+        match self {
+            Self::RenderScale => Some(o::fidelity::SCALE_DEFAULT),
+            Self::DynamicResolution => u32::try_from(o::dynamic_resolution::DEFAULT).ok(),
+            _ => o::fidelity::find(self.name())
+                .filter(|b| b.on_by_default)
+                .map(|_| 1),
+        }
+    }
+
     /// `raw` as this option stores it: an effect past Ultra is Ultra; a diagnostic view past the
-    /// last is off.
+    /// last is off; a render scale that is neither Dynamic nor a share under the whole frame is
+    /// all of its pixels, 0.
     #[must_use]
     pub const fn clamp(self, raw: u32) -> u32 {
-        if raw <= self.max() {
+        if matches!(self, Self::RenderScale) {
+            use dereth_client_contract::options::render_scale::{DYNAMIC, LEAST};
+            if raw == DYNAMIC || (raw >= LEAST && raw <= self.max()) {
+                raw
+            } else {
+                0
+            }
+        } else if raw <= self.max() {
             raw
         } else if matches!(self, Self::Debug) {
             0
@@ -616,13 +684,14 @@ impl FidelityFeature {
 
 /// The `[Fidelity]` section: what the player asked of the optional high-fidelity presentation,
 /// and whether the Horizon interface is shown, the only one it draws under. Plain data, all off
-/// by default; the scene maps it onto the presentation's own settings.
+/// until read from a profile, which starts each box at its default; the scene maps it onto the
+/// presentation's own settings.
 #[cfg(feature = "hifi")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct FidelityPreferences {
     /// Each option's stored value, in [`FidelityFeature::ALL`] order. 0 is off for every one; a
     /// ticked box is 1.
-    pub values: [u32; 11],
+    pub values: [u32; FidelityFeature::ALL.len()],
     /// Whether the interface shown is Horizon. Never kept in the profile: it is read from the
     /// interface choice at start-up and follows the interface shown after that. Off, every option
     /// is off in effect, whatever it stores.
@@ -631,8 +700,8 @@ pub struct FidelityPreferences {
 
 #[cfg(feature = "hifi")]
 impl FidelityPreferences {
-    /// The section from the profile: a box the file does not tick is off, and the interface
-    /// flag is the interface the profile starts in.
+    /// The section from the profile: what the file does not name stands at its default, and the
+    /// interface flag is the interface the profile starts in.
     #[must_use]
     pub fn from_preferences(prefs: &Preferences) -> Self {
         let mut f = Self::default();
@@ -640,11 +709,31 @@ impl FidelityPreferences {
             let raw = match feature {
                 // The view a diagnostic run asks for, by number.
                 FidelityFeature::Debug => prefs.u32(feature.name()),
+                // The share the page chose, or Dynamic, in its words.
+                FidelityFeature::RenderScale => prefs
+                    .get(feature.name())
+                    .and_then(|v| {
+                        dereth_client_contract::options::render_scale::parse_value(
+                            feature.name(),
+                            v,
+                        )
+                    })
+                    .and_then(|v| u32::try_from(v).ok()),
+                // A frame rate in its words.
+                FidelityFeature::DynamicResolution => prefs
+                    .get(feature.name())
+                    .and_then(|v| {
+                        dereth_client_contract::options::dynamic_resolution::parse_value(
+                            feature.name(),
+                            v,
+                        )
+                    })
+                    .and_then(|v| u32::try_from(v).ok()),
                 // A box the page ticked; a number the file holds otherwise (from an older
                 // build) is not read, as the page does not read it.
                 _ => prefs.bool(feature.name()).map(u32::from),
             };
-            if let Some(raw) = raw {
+            if let Some(raw) = raw.or_else(|| feature.default_value()) {
                 f.values[i] = feature.clamp(raw);
             }
         }
@@ -684,26 +773,43 @@ impl FidelityPreferences {
 
     /// Whether any option is on in effect. Without one the presentation is not installed. The
     /// switches that turn something off (the retail look's, the anti-aliasing's, the slope
-    /// materials') draw nothing of their own, so they alone are none.
+    /// materials') and the presentation choices draw nothing of their own, so they alone are none.
     #[must_use]
     pub fn any_effective(&self) -> bool {
         FidelityFeature::ALL
             .into_iter()
             .filter(|f| {
-                !matches!(
-                    f,
-                    FidelityFeature::RetailLook
-                        | FidelityFeature::NoAntiAliasing
-                        | FidelityFeature::NoSlopeMaterials
-                )
+                !f.is_presentation_choice()
+                    && !matches!(
+                        f,
+                        FidelityFeature::RetailLook
+                            | FidelityFeature::NoAntiAliasing
+                            | FidelityFeature::NoSlopeMaterials
+                    )
             })
             .any(|f| self.effective(f) != 0)
     }
 
-    /// Whether any option is stored on, whatever the interface.
+    /// These preferences with the presentation choices taken out, the render scale among them: a
+    /// change to one alone needs no new start.
+    #[must_use]
+    pub fn without_presentation_choices(mut self) -> Self {
+        for (i, f) in FidelityFeature::ALL.iter().enumerate() {
+            if f.is_presentation_choice() {
+                self.values[i] = 0;
+            }
+        }
+        self
+    }
+
+    /// Whether any option is stored on, whatever the interface; the presentation choices alone
+    /// are none.
     #[must_use]
     pub fn any_stored(&self) -> bool {
-        self.values.iter().any(|v| *v != 0)
+        FidelityFeature::ALL
+            .iter()
+            .zip(&self.values)
+            .any(|(f, v)| *v != 0 && !f.is_presentation_choice())
     }
 
     /// The settings a capture or a test names, as the Horizon interface draws them: a comma list
@@ -782,18 +888,61 @@ impl FidelityPreferences {
 mod tests {
     use super::*;
 
-    /// Behaviour: hifi.options.every-fidelity-option-is-off-by-default
+    #[test]
+    fn enhanced_graphics_mode_draws_whole_textures_and_steady_meshes_and_leaves_the_preferences() {
+        let asked = RenderPreferences {
+            landscape_texture_detail: 3,
+            environment_texture_detail: 2,
+            automatic_degrades: true,
+            ..RenderPreferences::default()
+        };
+        let drawn = asked.drawn_with(true);
+        assert_eq!(drawn.landscape_texture_detail, 0);
+        assert_eq!(drawn.environment_texture_detail, 0);
+        assert!(!drawn.automatic_degrades);
+        assert_eq!(
+            asked.landscape_texture_detail, 3,
+            "the preference keeps its value"
+        );
+        assert_eq!(asked.drawn_with(false), asked);
+    }
+
+    /// Behaviour: hifi.options.the-effects-start-on-and-none-is-in-effect-outside-horizon
     #[test]
     #[cfg(feature = "hifi")]
-    fn every_fidelity_option_is_off_by_default_and_none_is_in_effect_outside_horizon() {
-        let d = FidelityPreferences::default();
+    fn a_profile_naming_nothing_has_the_effects_on_and_none_is_in_effect_outside_horizon() {
+        assert!(FidelityFeature::ALL
+            .into_iter()
+            .all(|f| FidelityPreferences::default().value(f) == 0));
+        let d = FidelityPreferences::from_preferences(&Preferences::parse(""));
         assert!(!d.interface);
-        assert!(FidelityFeature::ALL.into_iter().all(|f| d.value(f) == 0));
         assert!(!d.any_effective());
-        assert_eq!(
-            FidelityPreferences::from_preferences(&Preferences::parse("")),
-            d
-        );
+        for f in FidelityFeature::ALL {
+            let on = matches!(
+                f,
+                FidelityFeature::Lighting
+                    | FidelityFeature::Shadows
+                    | FidelityFeature::GlobalIllumination
+                    | FidelityFeature::AmbientOcclusion
+                    | FidelityFeature::Lamps
+                    | FidelityFeature::Sky
+                    | FidelityFeature::Weather
+                    | FidelityFeature::VSync
+            );
+            let at = match f {
+                FidelityFeature::RenderScale => {
+                    dereth_client_contract::options::render_scale::DYNAMIC
+                }
+                FidelityFeature::DynamicResolution => 60,
+                _ => u32::from(on),
+            };
+            assert_eq!(d.value(f), at, "{f:?}");
+        }
+        // A box the profile turned off stays off.
+        let off = FidelityPreferences::from_preferences(&Preferences::parse(
+            "[Fidelity]\nLighting=False\n",
+        ));
+        assert_eq!(off.value(FidelityFeature::Lighting), 0);
         // Every box ticked, under the classic or the modern interface: nothing in effect.
         for interface in [
             "",
@@ -818,18 +967,18 @@ mod tests {
         }
         // Under Horizon the ticked boxes are in effect.
         let horizon = FidelityPreferences::from_preferences(&Preferences::parse(
-            "[UI]\nInterface=Horizon\n[Fidelity]\nAmbientOcclusion=True\n",
+            "[UI]\nInterface=Horizon\n[Fidelity]\nAmbientOcclusion=True\nLighting=False\n",
         ));
         assert!(horizon.interface);
         assert_eq!(horizon.effective(FidelityFeature::AmbientOcclusion), 1);
         assert_eq!(horizon.effective(FidelityFeature::Lighting), 0);
         // An older build's levels, and the names of options this build does not have, are not
-        // read; neither is an error.
+        // read, which leaves each at its default; neither is an error.
         let old = FidelityPreferences::from_preferences(&Preferences::parse(
             "[UI]\nInterface=2\n[Fidelity]\nEnabled=1\nPreset=2\nWater=3\nLighting=3\n",
         ));
         assert!(old.interface);
-        assert!(!old.any_effective());
+        assert_eq!(old.effective(FidelityFeature::Lighting), 1);
         // Every option has its name, and every name its option.
         assert_eq!(fidelity::NAMES.len(), FidelityFeature::ALL.len());
         for f in FidelityFeature::ALL {
@@ -868,6 +1017,39 @@ mod tests {
             4,
             "the stored value is kept"
         );
+    }
+
+    /// Behaviour: none (the experimental render scale; visual only)
+    #[test]
+    #[cfg(feature = "hifi")]
+    fn the_render_scale_holds_dynamic_or_a_share_under_the_whole_frame_and_draws_nothing_itself() {
+        use dereth_client_contract::PrefValue;
+        let mut q = FidelityPreferences {
+            interface: true,
+            ..FidelityPreferences::default()
+        };
+        assert!(q.set_named(fidelity::RENDER_SCALE, &PrefValue::Int(67)));
+        assert_eq!(q.effective(FidelityFeature::RenderScale), 67);
+        assert!(!q.any_effective(), "a scale alone draws nothing");
+        assert!(!q.any_stored());
+        assert_eq!(
+            q.without_presentation_choices(),
+            FidelityPreferences {
+                interface: true,
+                ..FidelityPreferences::default()
+            }
+        );
+        for (raw, stored) in [(100, 0), (49, 0), (2, 0), (1, 1), (50, 50), (99, 99)] {
+            assert!(q.set_named(fidelity::RENDER_SCALE, &PrefValue::Int(raw)));
+            assert_eq!(q.value(FidelityFeature::RenderScale), stored, "{raw}");
+        }
+        let q = FidelityPreferences::parse_switch("Lighting=1,RenderScale=75").unwrap();
+        assert_eq!(q.effective(FidelityFeature::RenderScale), 75);
+        let read = FidelityPreferences::from_preferences(&Preferences::parse(
+            "[UI]\nInterface=Horizon\n[Fidelity]\nRenderScale=0.5x\nDynamicResolution=90 FPS\n",
+        ));
+        assert_eq!(read.effective(FidelityFeature::RenderScale), 50);
+        assert_eq!(read.effective(FidelityFeature::DynamicResolution), 90);
     }
 
     /// Behaviour: hifi.options.the-fidelity-section-reaches-the-render-preferences

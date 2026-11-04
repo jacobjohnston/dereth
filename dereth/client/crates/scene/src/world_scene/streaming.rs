@@ -123,17 +123,20 @@ impl SceneDraw {
         // shift. Both live for the session, not for one `load`: the scene builds blocks as
         // the viewer walks and two neighbouring blocks share most of their merge keys.
         let mut merge = TerrainMergeCache::new();
-        merge.shift = land_texture_scale_shift(cfg.render.landscape_texture_detail);
+        let enhanced = enhanced_draws(&cfg.render, gpu);
+        gpu.set_enhanced(enhanced, vsync_asked(&cfg.render));
+        let render_drawn = cfg.render.drawn_with(enhanced);
+        merge.shift = land_texture_scale_shift(render_drawn.landscape_texture_detail);
         let bake = BakeCache {
             surface_translucency: cfg.surface_translucency,
             // `Render.EnvironmentTextureDetail`, the same
             // `max(v, 1) - 1` the poll writes into.
             image_scale: dereth_render::texture::image_scale_from_shift(
                 dereth_client_runtime::render_prefs::RenderPreferences::image_scale(
-                    cfg.render.environment_texture_detail,
+                    render_drawn.environment_texture_detail,
                 ),
             ),
-            environment_texture_detail: cfg.render.environment_texture_detail,
+            environment_texture_detail: render_drawn.environment_texture_detail,
             ..BakeCache::default()
         };
         // The objects' look: the world's own, or another era's (`[Render] Objects`). A style
@@ -264,7 +267,8 @@ impl SceneDraw {
             // Leaves every shadow at the value
             // the first preference-update poll installs, so the frame after a load does
             // no work: seeded from the profile that was just applied, not from the defaults.
-            render_shadow: cfg.render,
+            render_shadow: render_drawn,
+            enhanced_shadow: enhanced,
             #[cfg(feature = "hifi")]
             hifi: RefCell::new(hifi_bridge::Shadow::default()),
             #[cfg(feature = "hifi")]
@@ -333,7 +337,7 @@ impl SceneDraw {
             // The default device states' fog quartet, until the first tick writes
             // the region's: colour `0x00AAAAAA`, 400..2000, disabled.
             fog: dereth_render::camera::FogParams::default(),
-            degrade: DegradeState::new(cfg.auto_degrades),
+            degrade: DegradeState::new(cfg.auto_degrades && !enhanced),
             // The palette-shift landscape has no splat form (`splat` already says so).
             terrain_splat: splat,
             stats: SceneStats::default(),
@@ -865,6 +869,10 @@ impl SceneDraw {
         gpu: &mut Gpu,
     ) -> Result<RenderPrefWork, WorldError> {
         let was = self.render_shadow;
+        let enhanced = enhanced_draws(&self.cfg.render, gpu);
+        gpu.set_enhanced(enhanced, vsync_asked(&self.cfg.render));
+        let switched = enhanced != self.enhanced_shadow;
+        self.enhanced_shadow = enhanced;
         let mut work = RenderPrefWork::default();
         // This client's landscape options first. A style whose files are not here is refused
         // and the option goes back to the one drawn.
@@ -905,7 +913,7 @@ impl SceneDraw {
         if work.ground_changed || work.objects_changed {
             work.blocks_rebuilt = self.blocks.len();
         }
-        let live = self.cfg.render;
+        let live = self.cfg.render.drawn_with(enhanced);
         // `Render.AutomaticDegrades` turns the governor on or off from the next frame; off,
         // the detail bias is the manual one.
         if live.automatic_degrades != was.automatic_degrades {
@@ -915,7 +923,21 @@ impl SceneDraw {
         // graphics-resource flush.
         let land_detail = live.landscape_texture_detail != was.landscape_texture_detail;
         let env_detail = live.environment_texture_detail != was.environment_texture_detail;
-        work.flushed = land_detail || env_detail;
+        // Switching Enhanced Graphics Mode reloads nothing: the blocks loaded from now on have its
+        // detail.
+        work.flushed = (land_detail || env_detail) && !switched;
+        if work.flushed || switched {
+            // The landscape texture scale consumed by terrain texture generation.
+            self.land.merge.shift = land_texture_scale_shift(live.landscape_texture_detail);
+            self.land.bake.environment_texture_detail = live.environment_texture_detail;
+            // The environment texture scale shared by clip-map, RGBA, and indexed uploads;
+            // the preference poll copies this into the current scale used by texture creation.
+            self.land.bake.image_scale = dereth_render::texture::image_scale_from_shift(
+                dereth_client_runtime::render_prefs::RenderPreferences::image_scale(
+                    live.environment_texture_detail,
+                ),
+            );
+        }
         // The landscape draw-distance comparison, which reaches `set_mid_radius`.
         work.mid_radius_changed = live.landscape_draw_distance != was.landscape_draw_distance;
         // The environment-detail-textures compare against its shadow, and the
@@ -957,15 +979,6 @@ impl SceneDraw {
             return Ok(work);
         }
         if work.flushed {
-            // The landscape texture scale consumed by terrain texture generation.
-            self.land.merge.shift = land_texture_scale_shift(live.landscape_texture_detail);
-            // The environment texture scale shared by clip-map, RGBA, and indexed uploads;
-            // the preference poll copies this into the current scale used by texture creation.
-            self.land.bake.image_scale = dereth_render::texture::image_scale_from_shift(
-                dereth_client_runtime::render_prefs::RenderPreferences::image_scale(
-                    live.environment_texture_detail,
-                ),
-            );
             self.flush_graphics_resources(ws, gpu);
         }
         // Changing the middle radius releases the whole
@@ -1436,7 +1449,7 @@ impl SceneDraw {
             let files = detail_files.as_ref().unwrap_or(store);
             let textures = TextureStore::with_environment_texture_detail(
                 files,
-                self.cfg.render.environment_texture_detail,
+                self.render_shadow.environment_texture_detail,
             );
             // The combined-texture cache: the two live classes name
             // the *same* `SurfaceTexture` in the shipped region, so this is one upload and one
@@ -2375,5 +2388,40 @@ impl SceneDraw {
         // needs the same two predecessors -- the bias `calc_deg_level` just produced and the
         // part frames `advance_objects` just wrote.
         self.stats.part_degrade_switches += u64::from(self.refresh_part_levels(ws));
+    }
+}
+
+/// Whether Enhanced Graphics Mode asks for frames on the refresh.
+fn vsync_asked(render: &dereth_client_runtime::render_prefs::RenderPreferences) -> bool {
+    #[cfg(feature = "hifi")]
+    {
+        use dereth_client_runtime::render_prefs::FidelityFeature;
+        render.fidelity.value(FidelityFeature::VSync) != 0
+    }
+    #[cfg(not(feature = "hifi"))]
+    {
+        let _ = render;
+        true
+    }
+}
+
+/// Whether Enhanced Graphics Mode draws: its box ticked, on a device that draws it.
+fn enhanced_draws(
+    render: &dereth_client_runtime::render_prefs::RenderPreferences,
+    gpu: &Gpu,
+) -> bool {
+    #[cfg(feature = "hifi")]
+    {
+        hifi_bridge::settings(&render.fidelity, false)
+            .lighting
+            .is_on()
+            && gpu.hifi_requested()
+            && gpu.hifi_supported()
+            && gpu.hifi_failed().is_none()
+    }
+    #[cfg(not(feature = "hifi"))]
+    {
+        let _ = (render, gpu);
+        false
     }
 }

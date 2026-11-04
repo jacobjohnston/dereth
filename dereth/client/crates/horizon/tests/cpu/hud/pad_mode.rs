@@ -52,7 +52,7 @@ fn a_shoulder_button_turns_the_tab_of_the_window_the_focus_is_in() {
     h.input.pad.tab_step = Some((bar, -1));
     h.frame(&state);
     assert_eq!(
-        h.ui.windows.options_page.tab, 4,
+        h.ui.windows.options_page.tab, 5,
         "round from the first tab to the last"
     );
 }
@@ -64,7 +64,7 @@ fn the_focus_reaches_a_slider_and_knows_where_its_knob_is() {
     h.ui.windows.open(WindowId::Options, -1.0);
     h.frame(&state);
     // The Controls tab, where the camera's sliders are.
-    h.ui.windows.options_page.tab = 3;
+    h.ui.windows.options_page.tab = 4;
     h.frame(&state);
     h.frame(&state);
     let snap = h.input.nav.last.clone();

@@ -161,6 +161,98 @@ fn table(art: &dereth_horizon::art::Art, list: &DrawList, path: &str) {
     }
 }
 
+/// The settings window's Display and Sound tabs, standard and enhanced, as a player finds them.
+#[test]
+#[cfg(feature = "hifi")]
+#[ignore = "instrument: writes PNGs; run with DERETH_TEST_HORIZON_DUMP set and --ignored"]
+fn render_the_settings_pages() {
+    use dereth_client_contract::options::fidelity::Availability;
+    use dereth_client_contract::options::names::fidelity as names;
+    use dereth_client_contract::options::store;
+    use dereth_client_contract::PrefValue;
+    use dereth_horizon::ui::panels::options::tab;
+    let _gpu = crate::common::gpu_lock();
+    let dir = out_dir();
+    std::fs::create_dir_all(&dir).expect("the dump folder");
+    let store_dats = crate::common::dats();
+    let (w, h) = (1600, 1800);
+    let mut r = Renderer::new(None, w, h).expect("a device");
+    store::init();
+    let art = Arc::new(dereth_horizon::art::Art::new(Arc::new(
+        dereth_horizon::pieces::Pieces::built_in().expect("the pieces built in"),
+    )));
+    art.set_ac_store(Arc::clone(&store_dats));
+    let state = dereth_horizon::ui::game::GameState {
+        in_world: true,
+        name: "Tester".into(),
+        hifi: Availability {
+            built: true,
+            wgpu: true,
+            widened: true,
+            supported: true,
+            rays: Some(true),
+            active: true,
+            failed: None,
+            wgpu_next: None,
+        },
+        ..Default::default()
+    };
+    #[allow(clippy::cast_precision_loss)]
+    let screen = (w as f32, h as f32);
+    for (name, tab_at, enhanced, scrolled) in [
+        ("display-standard", tab::DISPLAY, false, 0.0),
+        ("display-standard-lower", tab::DISPLAY, false, 1.0e6),
+        ("display-enhanced", tab::DISPLAY, true, 0.0),
+        ("display-enhanced-lower", tab::DISPLAY, true, 1.0e6),
+        ("sound", tab::SOUND, false, 0.0),
+    ] {
+        store::set_value(names::LIGHTING, PrefValue::Bool(enhanced));
+        let mut ui = dereth_horizon::ui::HorizonUi::new(
+            Arc::clone(&art),
+            HorizonOptions {
+                scale: Some(1.0),
+                ..HorizonOptions::default()
+            },
+        );
+        ui.windows
+            .open(dereth_horizon::ui::panels::WindowId::Options, 0.0);
+        ui.windows.options_page.tab = tab_at;
+        ui.windows.options_page.scroll[tab_at] = scrolled;
+        let mut list = DrawList::default();
+        let mut input = dereth_horizon::ui::input::InputFrame {
+            mouse: (-100.0, -100.0),
+            ..Default::default()
+        };
+        let mut overlay = Overlay::default();
+        for _ in 0..FRAMES {
+            ui.frame(&mut list, screen, 1.0 / 60.0, &state, &mut input);
+            input.next_frame();
+            input.mouse = (-100.0, -100.0);
+            overlay.compose(&mut r, &art, &list, false, &[]);
+        }
+        Presentation::start_frame(&mut r).expect("the frame starts");
+        overlay.draw(&mut r).expect("the interface is drawn");
+        Presentation::end_frame(&mut r).expect("the frame ends");
+        let (cw, ch, bgra) = r.capture_bgra().expect("the frame is read back");
+        overlay.release(&mut r);
+        let rgba: Vec<u8> = bgra
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|p| [p[2], p[1], p[0], 255])
+            .collect();
+        let f = std::fs::File::create(format!("{dir}/settings-{name}.png")).expect("the PNG");
+        let mut enc = png::Encoder::new(std::io::BufWriter::new(f), cw, ch);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header()
+            .expect("its header")
+            .write_image_data(&rgba)
+            .expect("its pixels");
+    }
+    store::clear();
+}
+
 #[test]
 #[ignore = "instrument: writes PNGs; run with DERETH_TEST_HORIZON_DUMP set and --ignored"]
 fn render_the_horizon_frames() {

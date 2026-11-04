@@ -182,6 +182,17 @@ mod imp {
             )?)
         }
 
+        /// The share of the frame's pixels the high-fidelity presentation draws its world at now,
+        /// percent, while it draws.
+        #[cfg(feature = "hifi")]
+        #[must_use]
+        pub fn render_scale_in_use(&self) -> Option<u32> {
+            self.gpu
+                .hifi_report()
+                .is_some_and(|r| r.composited)
+                .then(|| self.gpu.hifi_render_scale())
+        }
+
         /// Where the optional high-fidelity presentation stands on this device, for the options
         /// page.
         #[cfg(feature = "hifi")]
@@ -709,6 +720,12 @@ mod imp {
         #[must_use]
         pub fn gamma(&self) -> f32 {
             self.gpu.gamma()
+        }
+
+        /// Whether Enhanced Graphics Mode draws, which has the device read every picture with the
+        /// best filtering, and whether it asks for frames on the refresh.
+        pub fn set_enhanced(&mut self, on: bool, vsync: bool) {
+            self.gpu.set_enhanced(on, vsync);
         }
 
         /// Apply the presentation's logical full-screen/vsync pair to the next swap-chain flip.

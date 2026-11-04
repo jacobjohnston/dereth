@@ -374,6 +374,8 @@ impl<H: Host> App<H> {
             cause: "graphics engine: this build compiled no backend".to_string(),
         })?;
         let (wanted, hifi) = startup_device(cfg, fallback, cfg!(feature = "hifi"));
+        #[cfg(feature = "hifi")]
+        dereth_render::wgpu::ask_for_hdr(hdr_asked(cfg));
         let make = |backend: Backend| {
             // Asked for only on the device that can draw it.
             let hifi = hifi && backend == Backend::Wgpu;
@@ -977,6 +979,15 @@ fn horizon_with_a_box(cfg: &Config) -> bool {
     cfg.render.fidelity.interface && cfg.render.fidelity.any_stored()
 }
 
+/// Whether `cfg` starts in enhanced graphics with HDR Output ticked.
+#[cfg(feature = "hifi")]
+#[cfg_attr(not(gpu), allow(dead_code))]
+fn hdr_asked(cfg: &Config) -> bool {
+    use dereth_client_runtime::render_prefs::FidelityFeature as F;
+    let f = &cfg.render.fidelity;
+    f.effective(F::Lighting) != 0 && f.effective(F::Hdr) != 0
+}
+
 /// A build without the presentation reads no `[Fidelity]`.
 #[cfg(not(feature = "hifi"))]
 #[cfg_attr(not(gpu), allow(dead_code))]
@@ -1094,8 +1105,8 @@ mod tests {
                 vulkan,
                 true
             ),
-            (Backend::Wgpu, false),
-            "Horizon on the named wgpu renderer, nothing ticked"
+            (Backend::Wgpu, true),
+            "Horizon on the named wgpu renderer, the effects on as they start"
         );
         assert_eq!(
             startup_device(
@@ -1147,7 +1158,11 @@ mod tests {
             renderer::RENDERER,
             PrefValue::Int(renderer::value(RendererChoice::Wgpu))
         ));
-        // The Client page, scrolled to the effects.
+        assert!(store::set_value(
+            dereth_client_contract::options::names::fidelity::LIGHTING,
+            PrefValue::Bool(false)
+        ));
+        // The Display page.
         let mut ui = dereth_horizon::ui::HorizonUi::new(
             std::sync::Arc::new(dereth_horizon::art::Art::empty()),
             dereth_horizon::options::HorizonOptions::default(),
@@ -1163,31 +1178,35 @@ mod tests {
             };
         frame(&mut ui, &mut input);
         ui.windows.open(WindowId::Options, 0.0);
-        ui.windows.options_page.tab = tab::CLIENT;
+        ui.windows.options_page.tab = tab::DISPLAY;
         frame(&mut ui, &mut input);
-        // A click on the better lighting's box, once the list is scrolled down to show its row
-        // whole: the page's rows are more than the list shows at once.
+        // Enhanced chosen in the Graphics menu, first on the Display tab.
         let lighting = fidelity::find(dereth_client_contract::options::names::fidelity::LIGHTING)
             .expect("the lighting's box");
         let mut shown = None;
         for _ in 0..2000 {
             let page = &ui.windows.options_page;
-            if let (Some(list), Some(r)) = (page.control("list"), page.control(lighting.caption)) {
+            if let (Some(list), Some(r)) =
+                (page.control("list"), page.control(fidelity::MODE_CAPTION))
+            {
                 if r.y >= list.y && r.bottom() <= list.bottom() {
                     shown = Some(r);
                     break;
                 }
             }
-            ui.windows.options_page.scroll[tab::CLIENT] += 6.0;
+            ui.windows.options_page.scroll[tab::DISPLAY] += 6.0;
             frame(&mut ui, &mut input);
         }
-        let r = shown.expect("the lighting's row");
+        let r = shown.expect("the Graphics row");
         input.mouse = (r.x + 10.0, r.y + r.h / 2.0);
+        frame(&mut ui, &mut input);
         input.down[0] = true;
         input.pressed[0] = true;
         let mut asked = frame(&mut ui, &mut input);
         input.down[0] = false;
         input.released[0] = true;
+        asked.extend(frame(&mut ui, &mut input));
+        ui.windows.options_page.choose_in_open_list(1);
         asked.extend(frame(&mut ui, &mut input));
         assert!(
             asked.iter().any(|r| matches!(

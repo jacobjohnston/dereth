@@ -28,6 +28,8 @@ pub mod compiler;
 #[cfg(feature = "test-support")]
 mod digest;
 mod levels;
+#[cfg(feature = "hifi")]
+pub mod metalfx;
 mod probes;
 #[cfg(feature = "hifi")]
 pub mod sidecar;
@@ -470,6 +472,30 @@ async fn prepare_window(
     if let Some(f) = caps.formats.iter().find(|f| !f.is_srgb()) {
         config.format = *f;
     }
+    // Extended sRGB keeps the encoding the frame is already drawn in: the interface reads as it
+    // always has, and only what the presentation writes past white uses the display's headroom.
+    let headroom = surface
+        .display_hdr_info(&adapter)
+        .headroom
+        .and_then(|h| h.potential.or(h.current))
+        .unwrap_or(1.0);
+    let hdr = HDR_ASKED.load(std::sync::atomic::Ordering::Relaxed)
+        && headroom > 1.0
+        && caps
+            .color_spaces(wgpu::TextureFormat::Rgba16Float)
+            .contains(wgpu::SurfaceColorSpaces::EXTENDED_SRGB);
+    if hdr {
+        config.format = wgpu::TextureFormat::Rgba16Float;
+        config.color_space = wgpu::SurfaceColorSpace::ExtendedSrgb;
+        HDR_HEADROOM.store(headroom.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+    if HDR_ASKED.load(std::sync::atomic::Ordering::Relaxed) {
+        tracing::info!(
+            target: "dereth::render",
+            "HDR output asked for: {}, the display showing {headroom}x white",
+            if hdr { "on" } else { "off" }
+        );
+    }
     // At once, as the other devices present a windowed frame, until the presentation-sync
     // preference asks for the refresh (`Gpu::set_presentation_sync`).
     let modes = caps.present_modes.clone();
@@ -489,6 +515,24 @@ async fn prepare_window(
         format,
         (width, height),
     ))
+}
+
+/// Whether the next device asks its surface for the display's extended range.
+static HDR_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The headroom of the surface in use, as the bits of a multiple of white; nought for none.
+static HDR_HEADROOM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Have the next device's surface use the display's extended range, where it has one.
+pub fn ask_for_hdr(on: bool) {
+    HDR_ASKED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How many times brighter than white the surface in use can show; 1 for a surface with no
+/// extended range.
+#[must_use]
+pub fn hdr_headroom() -> f32 {
+    f32::from_bits(HDR_HEADROOM.load(std::sync::atomic::Ordering::Relaxed)).max(1.0)
 }
 
 /// The present mode a surface offering `offered` is configured with for the sync interval
@@ -655,6 +699,12 @@ pub struct Gpu {
     /// How many dynamic draws this device has issued.
     pub draw_calls: u64,
     gamma: f32,
+    /// Whether Enhanced Graphics Mode draws: see [`Self::set_enhanced`].
+    enhanced: bool,
+    /// Whether it asks for frames on the refresh.
+    enhanced_vsync: bool,
+    /// The interval the full-screen and refresh-sync preferences ask for.
+    asked_sync_interval: u32,
     present_sync_interval: u32,
     last_present_sync_interval: Option<u32>,
     sampler_binds: Cell<[u64; SAMPLER_COUNT as usize]>,
@@ -908,6 +958,9 @@ impl Gpu {
             portal_stamps: 0,
             draw_calls: 0,
             gamma: 0.0,
+            enhanced: false,
+            enhanced_vsync: true,
+            asked_sync_interval: 0,
             present_sync_interval: 0,
             last_present_sync_interval: None,
             sampler_binds: Cell::new([0; SAMPLER_COUNT as usize]),
@@ -952,7 +1005,7 @@ impl Gpu {
         }
         self.frame_open = true;
         self.reset_viewport();
-        self.sharp_lod_bias = self.texture_filtering == 2;
+        self.sharp_lod_bias = self.drawn_filtering() == 2;
         Ok(())
     }
 
@@ -1265,7 +1318,26 @@ impl Gpu {
     /// frame is presented at once: the window's surface is configured again when that changes.
     /// A browser always presents on its refresh.
     pub fn set_presentation_sync(&mut self, full_screen: bool, sync_to_refresh: bool) {
-        self.present_sync_interval = u32::from(full_screen && sync_to_refresh);
+        self.asked_sync_interval = u32::from(full_screen && sync_to_refresh);
+        self.apply_presentation_sync();
+    }
+
+    /// While Enhanced Graphics Mode draws, every picture is read with the best filtering whatever
+    /// the preference asks for, and frames follow its own `vsync`.
+    pub fn set_enhanced(&mut self, on: bool, vsync: bool) {
+        if (self.enhanced, self.enhanced_vsync) != (on, vsync) {
+            self.enhanced = on;
+            self.enhanced_vsync = vsync;
+            self.apply_presentation_sync();
+        }
+    }
+
+    fn apply_presentation_sync(&mut self) {
+        self.present_sync_interval = u32::from(if self.enhanced {
+            self.enhanced_vsync
+        } else {
+            self.asked_sync_interval == 1
+        });
         if let Target::Surface {
             surface,
             config,
@@ -1996,6 +2068,15 @@ impl Gpu {
         self.texture_filtering
     }
 
+    /// The filtering drawn with: the preference, or the best while Enhanced Graphics Mode draws.
+    fn drawn_filtering(&self) -> u32 {
+        if self.enhanced {
+            3
+        } else {
+            self.texture_filtering
+        }
+    }
+
     /// Start drawing with the sharp bank, where the preference allows it. `true` when it changed,
     /// in which case [`Self::end_preview_sharp`] ends it.
     pub fn begin_preview_sharp(&mut self, enabled: bool) -> bool {
@@ -2012,7 +2093,7 @@ impl Gpu {
     }
 
     fn sampler_descriptor_index(&self, which: u32) -> u32 {
-        sampler::bank(self.texture_filtering, self.sharp_lod_bias) * BANK_STRIDE + which
+        sampler::bank(self.drawn_filtering(), self.sharp_lod_bias) * BANK_STRIDE + which
     }
 
     fn sampler_pair(&self, s0: u32, s1: u32) -> wgpu::BindGroup {
@@ -2452,6 +2533,27 @@ pub(super) mod tests {
             adapter_label("GPU", wgpu::Backend::Vulkan, None),
             "GPU on Vulkan"
         );
+    }
+
+    #[test]
+    fn enhanced_graphics_mode_draws_the_best_filtering_on_the_refresh_and_gives_them_back() {
+        let Some(mut gpu) = device(64, 64) else {
+            return;
+        };
+        gpu.set_texture_filtering(0);
+        let bilinear = gpu.sampler_descriptor_index(0);
+        gpu.set_enhanced(true, true);
+        assert_eq!(gpu.present_sync_interval(), 1);
+        assert_eq!(gpu.texture_filtering(), 0, "the preference keeps its value");
+        assert_eq!(
+            gpu.sampler_descriptor_index(0),
+            sampler::bank(3, false) * BANK_STRIDE
+        );
+        gpu.set_enhanced(true, false);
+        assert_eq!(gpu.present_sync_interval(), 0, "its own box says no");
+        gpu.set_enhanced(false, true);
+        assert_eq!(gpu.present_sync_interval(), 0);
+        assert_eq!(gpu.sampler_descriptor_index(0), bilinear);
     }
 
     /// Off screen nothing is presented, so no present interval is recorded, whatever the

@@ -149,7 +149,7 @@ impl SceneDraw {
     ) -> Result<Vec<PartLevels>, WorldError> {
         let mut textures = TextureStore::with_environment_texture_detail(
             store,
-            self.cfg.render.environment_texture_detail,
+            self.render_shadow.environment_texture_detail,
         );
         if let Some((look, ranges)) = colours {
             textures = textures.with_colours_from(look, ranges);

@@ -14,6 +14,10 @@ use glam::{Mat4, Quat, Vec2, Vec3};
 /// The snapshot of one frame.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HifiFrame {
+    /// The player's Screen Brightness, which the presentation applies to its finished picture.
+    pub brightness: f32,
+    /// How many times brighter than white the display can show; 1 or less for no more.
+    pub hdr_headroom: f32,
     /// The device's frame stamp of the frame this snapshot describes. A snapshot whose stamp is
     /// not the frame being ended is not used for it.
     pub stamp: u64,
@@ -483,6 +487,9 @@ pub struct HifiCamera {
     /// it dithers so that frames of them average to soft edges: 1 and over (the fraction is the
     /// place), nought on a frame drawn without the anti-aliasing.
     pub dither: f32,
+    /// How many levels finer the world's pictures are read: what the anti-aliasing rebuilds the
+    /// full frame from has the pixels of the frame, not the fewer it draws. Set with the jitter.
+    pub mip_bias: f32,
 }
 
 impl HifiCamera {

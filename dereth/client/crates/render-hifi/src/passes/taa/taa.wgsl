@@ -214,6 +214,23 @@ fn fs_sharpen(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
     return vec4<f32>(unsqueeze(clamp(sharp, lo, hi)), 1.0);
 }
 
+struct UpscaleInputs {
+    @location(0) motion: vec4<f32>,
+    @location(1) reactive: vec4<f32>,
+};
+
+// What MetalFX reads in place of the blend: every pixel's motion, and where a translucent draw
+// changed the picture, whose history it should not trust.
+@fragment
+fn fs_upscale_inputs(@builtin(position) p: vec4<f32>) -> UpscaleInputs {
+    let px = vec2<i32>(p.xy);
+    var out: UpscaleInputs;
+    out.motion = vec4<f32>(motion_at(px), 0.0, 0.0);
+    let translucent = textureLoad(motion, px, 0).z;
+    out.reactive = vec4<f32>(clamp(translucent * taa.tune.w, 0.0, 1.0), 0.0, 0.0, 0.0);
+    return out;
+}
+
 // Where a translucent draw changed the picture since the opaque world was lit: written into the
 // motion target's third channel.
 @fragment

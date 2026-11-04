@@ -67,6 +67,11 @@ const WEATHER_WGSL: &str = include_str!("weather.wgsl");
 const BLOCK: f32 = 192.0;
 /// The constant block's size, bytes: the weather's own, the storm's and the bolt's points.
 const CONSTANTS_SIZE: usize = (100 + 4 + 4 * storm::BOLT_POINTS) * 4;
+/// Where the constants hold the world's viewport, in floats: after the two transforms.
+const VIEWPORT_AT: usize = 32;
+/// Where the constants hold how many of the frame's pixels a texel of the world's depth covers, in
+/// floats.
+const DEPTH_STEP_AT: usize = 62;
 /// Where the flag for the frame's normals, with each surface's class, sits in the constants.
 const CLASSES_AT: usize = 63;
 /// Where the flag for linear light in and out sits in the constants, in floats.
@@ -610,6 +615,20 @@ impl HifiPass for Weather {
         for (i, v) in self.placement.constants(sheltered).iter().enumerate() {
             constants[at(72 + i)].copy_from_slice(&v.to_le_bytes());
         }
+        // An upscaled frame draws the weather at the frame's size.
+        let viewport = cx
+            .seam
+            .world_viewport()
+            .filter(|_| cx.seam.upscaled())
+            .map_or(cx.frame.camera.viewport, |v| [v.x, v.y, v.width, v.height]);
+        for (i, v) in viewport.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)] // pixel counts
+            constants[at(VIEWPORT_AT + i)].copy_from_slice(&(*v as f32).to_le_bytes());
+        }
+        // How many of the frame's pixels each texel of the world's depth was drawn at.
+        #[allow(clippy::cast_precision_loss)] // pixel counts
+        let depth_step = viewport[3] as f32 / cx.frame.camera.viewport[3].max(1) as f32;
+        constants[at(DEPTH_STEP_AT)].copy_from_slice(&depth_step.to_le_bytes());
         if cx.reshade.is_some() {
             constants[at(CLASSES_AT)].copy_from_slice(&1.0f32.to_le_bytes());
         }
@@ -709,7 +728,7 @@ impl HifiPass for Weather {
             pass.set_pipeline(&gpu.pipeline);
             pass.draw(0..3, 0..1);
             // The falling rain and snow over it, in the world's viewport.
-            let [x, y, w, h] = cx.frame.camera.viewport;
+            let [x, y, w, h] = viewport;
             let (x, y) = (x.min(width), y.min(height));
             let (w, h) = (w.min(width - x), h.min(height - y));
             if self.particles > 0 && w > 0 && h > 0 {

@@ -21,7 +21,7 @@ pub fn all() -> Vec<(Slot, Box<dyn HifiPass>)> {
     let (sky_tables, sky, air) = atmosphere::passes();
     let (pack, pack_casters, far_cull) = art_pack::pass();
     let (drawn, drawn_casters) = drawn::pass();
-    let (taa_keep, taa_translucent, taa_resolve) = taa::passes();
+    let (taa_keep, taa_translucent, taa_resolve, taa_upscale) = taa::passes();
     vec![
         (Slot::Compute, Box::new(sky_tables)),
         // The far trees the view keeps, before the world is drawn.
@@ -61,6 +61,9 @@ pub fn all() -> Vec<(Slot, Box<dyn HifiPass>)> {
             Slot::Atmosphere,
             Box::new(lighting::OutdoorMeasure::default()),
         ),
+        // Once all of that has read the picture as drawn: what follows is drawn at the frame's
+        // size, the weather sharp over the rebuilt picture.
+        (Slot::Atmosphere, Box::new(taa_upscale)),
         (Slot::Atmosphere, Box::new(weather::Weather::default())),
         (Slot::Hdr, Box::new(lighting::LightingPost::default())),
     ]

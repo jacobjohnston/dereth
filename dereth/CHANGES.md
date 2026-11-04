@@ -16,6 +16,16 @@ pre-release leaves it for the final release, and its notes show it as it is);
 
 - Weather: about one rainy day in eight is now a thunderstorm on your screen, with lightning and its thunder rolling in a few seconds later, a gale that slants heavier rain across the sky, and darker clouds. It is drawn by this client alone; @weather storm (or /weather storm) brings one on at any time.
 - Weather Sounds: rain now patters and hisses, harder in a storm with the wind roaring in its gusts and muffled indoors, made as it plays so it never repeats. A new Weather Sounds row in the sound options sets how loud the rain, the wind and the thunder are.
+- Settings: Client is now Display and Sound. Display opens with a Graphics menu, Standard or Enhanced, each showing what applies to it, and options now use the names games usually use.
+- Better Lighting is now Enhanced Graphics Mode, and its effects start on. Under Standard, the page offers only Ambient Occlusion and Atmospheric Sky.
+- Retail Look is now Keep Retail Look: the game's own models and ground or the enhanced ones, all or nothing. What it rules out leaves the page.
+- No Anti-Aliasing and No Slope Materials are now Anti-Aliasing and Slope Materials, ticked when they are on.
+- Enhanced Graphics: a Quality Preset menu, from a light Low to a full Ultra, and the settings start at Medium. VSync and HDR Output are new.
+- Enhanced Graphics Mode: it always draws the best texture filtering and detail, models that hold their detail, and frames on the display's refresh unless VSync is off, whatever the Graphics settings say.
+- Enhanced Graphics Mode: Screen Brightness scales the whole picture alike.
+- Enhanced Graphics: a Render Scale menu draws the world at 85%, 75%, 67% or 50% of the screen's pixels each way, for a higher frame rate on large screens. On a Mac MetalFX rebuilds the picture at full size; elsewhere it is enlarged. Anti-Aliasing stays on below 100%, and pictures are read for the full frame.
+- Enhanced Graphics: Render Scale starts at Dynamic, as the Low, Medium and High presets have it (Ultra draws 100%): it lowers the render scale to hold the Dynamic Resolution Frame Rate (60 FPS unless chosen), shown only while Dynamic is chosen.
+- Performance Panel: SCALE shows the render scale drawn now, as a Dynamic render scale moves it.
 
 ## 0.4.12 (2026-11-03)
 

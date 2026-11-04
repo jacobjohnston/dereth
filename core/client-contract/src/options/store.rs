@@ -401,10 +401,16 @@ const CUSTOM_ENUMS: &[CustomEnum] = &[
         choices: super::renderer::choice_rows,
     },
     CustomEnum {
-        recognizes: |name| name.eq_ignore_ascii_case(super::render_scale::RENDER_SCALE),
+        recognizes: super::render_scale::is_a_scale,
         parse: super::render_scale::parse_value,
         format: super::render_scale::convert_to_string,
         choices: super::render_scale::choice_rows,
+    },
+    CustomEnum {
+        recognizes: super::dynamic_resolution::is_dynamic_resolution,
+        parse: super::dynamic_resolution::parse_value,
+        format: super::dynamic_resolution::convert_to_string,
+        choices: super::dynamic_resolution::choice_rows,
     },
 ];
 
@@ -1209,7 +1215,10 @@ mod tests {
         #[cfg(not(feature = "hifi"))]
         assert_eq!(len(), 48);
         #[cfg(feature = "hifi")]
-        assert_eq!(len(), 48 + super::super::fidelity::OPTIONS.len() + 2);
+        assert_eq!(
+            len(),
+            48 + super::super::fidelity::OPTIONS.len() + super::super::fidelity::MENUS.len() + 2
+        );
         // The registration defaults are in force before any file is read.
         assert_eq!(
             inq_value("Input.MouseLookSensitivity"),

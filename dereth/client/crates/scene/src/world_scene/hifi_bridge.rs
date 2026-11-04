@@ -57,6 +57,8 @@ pub(crate) struct Shadow {
     /// What that asks of the weather's sound.
     pub(super) weather_sound: dereth_audio::WeatherSound,
     applied: Option<(FidelityPreferences, bool)>,
+    /// Dynamic Resolution's state.
+    dynamic_scale: DynamicScale,
     pub(super) now: f64,
     previous_view_projection: Option<glam::Mat4>,
     sent: HashMap<u16, u32>,
@@ -676,11 +678,125 @@ pub(crate) fn settings(prefs: &FidelityPreferences, rays: bool) -> HifiSettings 
         // An art pack's models are drawn for the light per pixel, unless the retail look is
         // asked for; so is the anti-aliasing, unless it is turned off.
         art_pack: lit && raw(FidelityFeature::RetailLook) == 0,
-        anti_aliasing: lit && raw(FidelityFeature::NoAntiAliasing) == 0,
+        // Below the whole frame it is what rebuilds the picture, so it is not left out there.
+        anti_aliasing: lit
+            && (raw(FidelityFeature::NoAntiAliasing) == 0
+                || (1..100).contains(&raw(FidelityFeature::RenderScale))),
         // And the scree and rock an art pack's ground lays on steep slopes, until they are
         // turned off.
         slope_materials: lit && raw(FidelityFeature::NoSlopeMaterials) == 0,
         debug: DebugView::from_raw(raw(FidelityFeature::Debug)),
+    }
+}
+
+/// The share of the frame's pixels the world is drawn at, each way, percent: the player's choice
+/// while the better lighting it is offered for is drawn, and all of them otherwise. A Dynamic
+/// render scale starts from all of them ([`follow_the_frame_rate`]).
+pub(crate) fn render_scale(prefs: &FidelityPreferences) -> u32 {
+    match prefs.effective(FidelityFeature::RenderScale) {
+        _ if dynamic_render_scale(prefs) => 100,
+        scale @ 1.. if settings(prefs, false).lighting.is_on() => scale,
+        _ => 100,
+    }
+}
+
+/// Whether the render scale chosen is Dynamic: it moves to hold the frame rate chosen.
+fn dynamic_render_scale(prefs: &FidelityPreferences) -> bool {
+    prefs.effective(FidelityFeature::RenderScale)
+        == dereth_client_contract::options::render_scale::DYNAMIC
+}
+
+/// Dynamic Resolution: the render scale moves down the page's choices while the frame rate is under
+/// its target, and back up, never past the player's Render Scale, while there is room. A rise that
+/// the frame rate could not hold is tried again only after twice as long.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct DynamicScale {
+    /// The share drawn now, while it moves; nought while it follows the player's Render Scale.
+    share: u32,
+    /// Seconds the frame rate has been under, or over, its target.
+    under: f32,
+    over: f32,
+    /// Seconds to wait above the target before the next rise.
+    wait: f32,
+    /// Seconds since the last change, and whether it was a rise.
+    since: f32,
+    rose: bool,
+}
+
+impl DynamicScale {
+    /// How long under the target before a fall, and over it before the first rise, seconds.
+    const FALL_AFTER: f32 = 1.0;
+    const RISE_AFTER: f32 = 5.0;
+    /// How long after a rise a fall counts against it, seconds.
+    const RISE_TESTED: f32 = 3.0;
+
+    /// One frame of `dt` seconds at `fps`, for a `target` frame rate, with the player's `base`
+    /// Render Scale: the share to draw at when it changes.
+    pub(crate) fn step(&mut self, dt: f32, fps: f32, target: f32, base: u32) -> Option<u32> {
+        use dereth_client_contract::options::render_scale::{CHOICES, LEAST};
+        if self.share == 0 || self.share > base {
+            self.share = base;
+            self.wait = Self::RISE_AFTER;
+        }
+        self.since += dt;
+        if fps < target * 0.95 {
+            self.under += dt;
+            self.over = 0.0;
+        } else if fps >= target {
+            self.over += dt;
+            self.under = 0.0;
+        }
+        if self.under >= Self::FALL_AFTER && self.share > LEAST {
+            let lower = CHOICES.iter().copied().find(|c| *c < self.share)?;
+            if self.rose && self.since < Self::RISE_TESTED {
+                self.wait = (self.wait * 2.0).min(120.0);
+            }
+            self.share = lower;
+            self.under = 0.0;
+            self.since = 0.0;
+            self.rose = false;
+            return Some(lower);
+        }
+        if self.over >= self.wait && self.share < base {
+            let higher = CHOICES
+                .iter()
+                .rev()
+                .copied()
+                .find(|c| *c > self.share && *c <= base)?;
+            self.share = higher;
+            self.over = 0.0;
+            self.since = 0.0;
+            self.rose = true;
+            return Some(higher);
+        }
+        None
+    }
+}
+
+/// Keep the render scale to Dynamic Resolution's target, or back on the player's when it is off.
+fn follow_the_frame_rate(draw: &SceneDraw, sh: &mut Shadow, gpu: &mut Gpu) {
+    let prefs = &draw.cfg.render.fidelity;
+    // Only a Dynamic render scale moves, under 100%, to hold its frame rate.
+    let target = if dynamic_render_scale(prefs) {
+        prefs.effective(FidelityFeature::DynamicResolution)
+    } else {
+        0
+    };
+    let base = render_scale(prefs);
+    if target == 0 || !settings(prefs, false).lighting.is_on() {
+        if sh.dynamic_scale.share != 0 {
+            sh.dynamic_scale = DynamicScale::default();
+            gpu.hifi_set_render_scale(base);
+        }
+        return;
+    }
+    let fps = draw.degrade.frame_rate.fps();
+    #[allow(clippy::cast_precision_loss)] // a frame rate of 120 at most
+    let target = target as f32;
+    if fps > 0.0 {
+        if let Some(share) = sh.dynamic_scale.step(1.0 / fps, fps, target, base) {
+            gpu.hifi_set_render_scale(share);
+        }
     }
 }
 
@@ -720,7 +836,16 @@ pub(super) fn apply_preferences(
     // Before the first poll the presentation is off, as the default preferences have it.
     let last = sh.applied.unwrap_or((FidelityPreferences::default(), rays));
     sh.applied = Some((*prefs, rays));
-    if last == (*prefs, rays) {
+    // A new render scale needs no new start: it is the frame's size, and the next frame draws at it.
+    if render_scale(prefs) != render_scale(&last.0) {
+        gpu.hifi_set_render_scale(render_scale(prefs));
+    }
+    // How frames reach the display is the device's and the next start's, not the presentation's,
+    // and the share drawn is the frame's size; the settings, the anti-aliasing a render scale
+    // keeps on among them, are the presentation's.
+    let drawn =
+        |p: &FidelityPreferences, rays| (p.without_presentation_choices(), settings(p, rays));
+    if (drawn(&last.0, last.1), last.1) == (drawn(prefs, rays), rays) {
         return Applied::default();
     }
     // A new start: the presentation's retained copies go with its old settings.
@@ -833,6 +958,7 @@ pub(super) fn publish(draw: &SceneDraw, sh: &mut Shadow, ws: &WorldState, gpu: &
     if renderer(gpu).is_none() {
         return;
     }
+    follow_the_frame_rate(draw, sh, gpu);
     let stamp = gpu.frame_stamp();
     let (width, height) = gpu.size();
     // A presentation that let the blocks' retained geometry go is sent every block's again.
@@ -845,6 +971,8 @@ pub(super) fn publish(draw: &SceneDraw, sh: &mut Shadow, ws: &WorldState, gpu: &
     let reuse = renderer(gpu).and_then(HifiRenderer::recycle_frame);
     let mut frame = snapshot(draw, ws, stamp, (width, height), sh, reuse);
     sh.hear_weather(&frame);
+    frame.brightness = gpu.gamma();
+    frame.hdr_headroom = dereth_render::wgpu::hdr_headroom();
     // The slots holding the retail pictures the pack's materials stand for, as they are now.
     frame.material_slots.clear();
     if frame.materials.is_some() {
@@ -936,6 +1064,7 @@ fn snapshot(
         // The presentation sets its own jitter.
         jitter: glam::Vec2::ZERO,
         dither: 0.0,
+        mip_bias: 0.0,
     };
 
     // --- the sun, the fog and the sky -----------------------------------------------------
@@ -1391,7 +1520,11 @@ mod tests {
     use super::*;
 
     use dereth_client_contract::options::fidelity::{blocked, OPTIONS};
+    use dereth_client_contract::options::names::fidelity::{HDR, VSYNC};
     use dereth_render_hifi::composite::CompositeMode;
+
+    /// The boxes the settings do not carry: they reach the device instead.
+    const OWN_RULES: [&str; 2] = [VSYNC, HDR];
 
     /// The preferences with the boxes `ticked` (one bit each, in the page's order) under the
     /// Horizon interface.
@@ -1424,9 +1557,77 @@ mod tests {
             n::WEATHER => s.weather.is_on(),
             n::RETAIL_LOOK => s.lighting.is_on() && !s.art_pack,
             n::NO_ANTI_ALIASING => s.lighting.is_on() && !s.anti_aliasing,
-            n::NO_SLOPE_MATERIALS => s.lighting.is_on() && !s.slope_materials,
+            n::NO_SLOPE_MATERIALS => s.art_pack && !s.slope_materials,
             _ => unreachable!("{name}"),
         }
+    }
+
+    /// Behaviour: none (the experimental render scale)
+    #[test]
+    fn the_render_scale_is_drawn_only_inside_the_better_lighting() {
+        let lit = FidelityPreferences::parse_switch("Lighting=1,RenderScale=67").unwrap();
+        assert_eq!(render_scale(&lit), 67);
+        let unlit = FidelityPreferences::parse_switch("Sky=1,RenderScale=67").unwrap();
+        assert_eq!(render_scale(&unlit), 100);
+        let native = FidelityPreferences::parse_switch("Lighting=1").unwrap();
+        assert_eq!(render_scale(&native), 100);
+        let dynamic = FidelityPreferences::parse_switch("Lighting=1,RenderScale=1").unwrap();
+        assert_eq!(
+            render_scale(&dynamic),
+            100,
+            "Dynamic starts from the whole frame"
+        );
+        // Below the whole frame the anti-aliasing rebuilds the picture, so it stays on.
+        let off = FidelityPreferences::parse_switch("Lighting=1,NoAntiAliasing=1").unwrap();
+        assert!(!settings(&off, false).anti_aliasing);
+        let scaled =
+            FidelityPreferences::parse_switch("Lighting=1,NoAntiAliasing=1,RenderScale=67")
+                .unwrap();
+        assert!(settings(&scaled, false).anti_aliasing);
+    }
+
+    /// Behaviour: none (the experimental render scale)
+    #[test]
+    fn dynamic_resolution_falls_under_its_target_and_rises_back_no_higher_than_the_player_chose() {
+        let mut d = DynamicScale::default();
+        // Holding the target at the player's 75%: nothing moves.
+        for _ in 0..600 {
+            assert_eq!(d.step(1.0 / 60.0, 60.0, 60.0, 75), None);
+        }
+        // Under it for a second: one step down.
+        let mut changes = Vec::new();
+        for _ in 0..40 {
+            changes.extend(d.step(1.0 / 30.0, 30.0, 60.0, 75));
+        }
+        assert_eq!(changes, [67]);
+        // Well under it: on down to the least, and no lower.
+        for _ in 0..200 {
+            changes.extend(d.step(1.0 / 30.0, 30.0, 60.0, 75));
+        }
+        assert_eq!(changes, [67, 50]);
+        // Room again: back up, past nothing the player chose.
+        changes.clear();
+        for _ in 0..3000 {
+            changes.extend(d.step(1.0 / 60.0, 60.0, 60.0, 75));
+        }
+        assert_eq!(changes, [67, 75]);
+    }
+
+    /// Behaviour: none (the experimental render scale)
+    #[test]
+    fn a_rise_dynamic_resolution_could_not_hold_is_tried_again_later() {
+        let mut d = DynamicScale::default();
+        for _ in 0..31 {
+            d.step(1.0 / 30.0, 30.0, 60.0, 100);
+        }
+        assert_eq!(d.share, 85);
+        let before = d.wait;
+        // It rises, and falls straight back.
+        while d.step(1.0 / 60.0, 60.0, 60.0, 100).is_none() {}
+        assert_eq!(d.share, 100);
+        while d.step(1.0 / 30.0, 30.0, 60.0, 100).is_none() {}
+        assert_eq!(d.share, 85);
+        assert!(d.wait > before, "{} after {before}", d.wait);
     }
 
     /// Behaviour: none (experimental hi-fi art packs)
@@ -1542,7 +1743,7 @@ mod tests {
                         .position(|o| o.name == name)
                         .is_some_and(|i| ticked & (1 << i) != 0)
                 };
-                for o in &OPTIONS {
+                for o in OPTIONS.iter().filter(|o| !OWN_RULES.contains(&o.name)) {
                     let drawn = drawn(&s, o.name);
                     let greyed = blocked(o.name, is, Some(rays)).is_some();
                     assert_eq!(
@@ -1568,12 +1769,12 @@ mod tests {
             }
         }
         // Lighting off keeps the dependents' ticks; on again, they draw again.
-        let both = boxes(0b000_0011);
+        let both = boxes(0b000_0101);
         assert!(settings(&both, true).shadows.is_on());
-        let unlit = boxes(0b000_0010);
+        let unlit = boxes(0b000_0100);
         assert!(!settings(&unlit, true).shadows.is_on());
         assert_eq!(unlit.value(FidelityFeature::Shadows), 1);
-        assert_eq!(settings(&boxes(0b000_0011), true), settings(&both, true));
+        assert_eq!(settings(&boxes(0b000_0101), true), settings(&both, true));
     }
 
     /// An art pack's model is turned and placed exactly as the bake turns and places the object

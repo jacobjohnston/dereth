@@ -1,24 +1,33 @@
-//! The words and rules of the optional high-fidelity presentation's options: ten check boxes on
-//! the Horizon interface's Client page, under a heading of their own, each off until the player
-//! ticks it.
+//! The words and rules of the optional high-fidelity presentation's options: twelve check boxes on
+//! the Horizon interface's Display page, under a heading of their own, below a Graphics menu that
+//! chooses standard or enhanced graphics.
 //!
-//! Four of the effects are drawn inside the better lighting and draw nothing without it: the sun
-//! shadows, the bounced light, the lamps and the weather. The lamps also need a graphics device
-//! that traces rays. [`blocked`] says which of these holds for a box, and the presentation follows
-//! the same rules, so a box the page shows greyed draws nothing. (The bounced light darkens the
-//! creases itself, so the ambient occlusion stands aside in the outdoor frames it is drawn into;
-//! indoors and underground, where it draws nothing, the occlusion is drawn.) An art pack's models
-//! are drawn inside the better lighting too, and the retail look box draws the original models in
-//! their place. The better lighting smooths the world's edges with temporal anti-aliasing, which
-//! the ninth box turns off; an art pack's ground lays scree and rock on steep slopes, which the
-//! last box turns off.
+//! The first box is Enhanced Graphics Mode, the better lighting, which the Graphics menu sets. Four
+//! of the effects are drawn inside it and draw nothing without it: the sun shadows, the bounced
+//! light, the lamps and the weather. The lamps also need a graphics device that traces rays.
+//! [`blocked`] says which of these holds for a box, and the presentation follows the same rules,
+//! so a box the page leaves out or greys draws nothing. (The bounced light darkens the creases
+//! itself, so the ambient occlusion stands aside in the outdoor frames it is drawn into; indoors
+//! and underground, where it draws nothing, the occlusion is drawn.) An art pack's models and
+//! ground are drawn inside the better lighting too, and Keep Retail Look draws the game's own in
+//! their place, all of them or none. The better lighting smooths the world's edges with temporal
+//! anti-aliasing, which a box turns off; an art pack's ground lays scree and rock on steep slopes,
+//! which a box turns off; and the last two boxes choose how its frames reach the display.
+//!
+//! Two menus follow the switches: the Render Scale, the share of the frame's pixels the better
+//! lighting draws the world at, or Dynamic, and the frame rate a Dynamic render scale holds
+//! ([`super::dynamic_resolution`]). On macOS MetalFX rebuilds a picture drawn at fewer pixels at the
+//! frame's size; elsewhere it is enlarged.
+//!
+//! The effects start on. The enhanced graphics' quality presets set several of them at once
+//! ([`PRESET_VALUES`]), and the defaults of the boxes and the menus are the Medium preset's.
 //!
 //! In a build with the `hifi` feature the options are registered with the value store
 //! ([`register`]), so the page reads and writes them like any other option and the profile keeps
 //! them in its `[Fidelity]` section. Without it nothing here is registered and no page shows them.
 
 use super::names::fidelity;
-use crate::PrefValue;
+use crate::PrefValue::{self, Int};
 
 /// What a box needs before it draws anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +38,8 @@ pub enum Needs {
     Lighting,
     /// The better lighting, and a graphics device that traces rays.
     LightingAndRays,
+    /// The better lighting, and Keep Retail Look's box unticked.
+    LightingWithoutRetailLook,
 }
 
 /// One box as the page shows it.
@@ -42,85 +53,236 @@ pub struct FidelityOption {
     pub note: &'static str,
     /// What it needs.
     pub needs: Needs,
+    /// Whether the box is ticked while the preference is off: it names what stays on, and the
+    /// preference what is turned off.
+    pub inverted: bool,
+    /// The preference's value until the player changes it.
+    pub on_by_default: bool,
 }
 
-/// The ten boxes, in page order.
-pub const OPTIONS: [FidelityOption; 10] = [
+/// The twelve boxes, each above the boxes it can take off the page.
+pub const OPTIONS: [FidelityOption; 12] = [
     FidelityOption {
         name: fidelity::LIGHTING,
-        caption: "Better Lighting (HDR Sun and Sky Light)",
-        note: "Lights the outdoor world again per pixel, in high dynamic range, with bloom and \
-               exposure. The sun shadows, the bounced light, the lamps and the weather are drawn \
-               inside it.",
+        caption: "Enhanced Graphics",
+        note: "Lights the world again per pixel, in high dynamic range, with bloom and exposure, \
+               and with an art pack draws its enhanced models and ground. Off, only the ambient \
+               occlusion and the sky remain.",
         needs: Needs::Nothing,
+        inverted: false,
+        on_by_default: true,
+    },
+    FidelityOption {
+        name: fidelity::RETAIL_LOOK,
+        caption: "Keep Retail Look",
+        note: "Keeps the game's own models, plants and ground in place of the enhanced ones, \
+               all of them or none. What collides and everything the server sees are the same \
+               either way. It changes at once.",
+        needs: Needs::Lighting,
+        inverted: false,
+        on_by_default: false,
     },
     FidelityOption {
         name: fidelity::SHADOWS,
-        caption: "Real-Time Sun Shadows",
+        caption: "Sun Shadows",
         note: "Soft shadows from the sun, cast by the landscape, the buildings, the trees and the \
                scenery in view.",
         needs: Needs::Lighting,
+        inverted: false,
+        on_by_default: true,
     },
     FidelityOption {
         name: fidelity::GLOBAL_ILLUMINATION,
-        caption: "Global Illumination (Bounced Light)",
+        caption: "Global Illumination",
         note: "Light bounced from the surfaces around, which fills the shadows outdoors. It \
                darkens the creases itself, so outdoors the ambient occlusion stands aside while \
                it is on.",
         needs: Needs::Lighting,
+        inverted: false,
+        on_by_default: true,
     },
     FidelityOption {
         name: fidelity::AMBIENT_OCCLUSION,
         caption: "Ambient Occlusion",
         note: "Darkens the creases and corners the sky's light reaches less, indoors and out.",
         needs: Needs::Nothing,
+        inverted: false,
+        on_by_default: true,
     },
     FidelityOption {
         name: fidelity::LAMPS,
-        caption: "Lamps and Torches",
+        caption: "Dynamic Lights",
         note: "The outdoor lamps, lanterns, torches and braziers light the world after dusk, \
                stopped by the walls between.",
         needs: Needs::LightingAndRays,
+        inverted: false,
+        on_by_default: true,
     },
     FidelityOption {
         name: fidelity::SKY,
-        caption: "Sky and Atmosphere",
+        caption: "Atmospheric Sky",
         note: "A physical sky behind the authored clouds and sun, and air that blues the far \
                hills.",
         needs: Needs::Nothing,
+        inverted: false,
+        on_by_default: true,
     },
     FidelityOption {
         name: fidelity::WEATHER,
-        caption: "Weather (Rain, Wet Ground, Puddles, Snow)",
+        caption: "Weather Effects",
         note: "On the game's rainy days: rain that roofs keep off, wet ground and puddles, and \
                falling snow instead over snowy land. It replaces the game's own falling rain.",
         needs: Needs::Lighting,
-    },
-    FidelityOption {
-        name: fidelity::RETAIL_LOOK,
-        caption: "Retail Look (Original Models)",
-        note: "Draws the original models where an art pack has replacements for them. An art \
-               pack's models are drawn inside the better lighting.",
-        needs: Needs::Lighting,
+        inverted: false,
+        on_by_default: true,
     },
     FidelityOption {
         name: fidelity::NO_ANTI_ALIASING,
-        caption: "No Anti-Aliasing",
-        note: "Draws the better lighting without the temporal anti-aliasing that smooths the \
-               world's edges: a little sharper, but edges stair-step and shimmer in motion.",
+        caption: "Anti-Aliasing",
+        note: "Temporal anti-aliasing smooths the world's edges. Off, edges stair-step and \
+               shimmer in motion. It is always on below a Render Scale of 100%.",
         needs: Needs::Lighting,
+        inverted: true,
+        on_by_default: false,
     },
     FidelityOption {
         name: fidelity::NO_SLOPE_MATERIALS,
-        caption: "No Slope Materials",
-        note: "Lays an art pack's ground without the scree and rock it lays on steep slopes, \
-               to compare the two. It changes at once.",
+        caption: "Slope Materials",
+        note: "Lays scree and rock on an art pack's steep ground. It changes at once.",
+        needs: Needs::LightingWithoutRetailLook,
+        inverted: true,
+        on_by_default: false,
+    },
+    FidelityOption {
+        name: fidelity::VSYNC,
+        caption: "VSync",
+        note: "Presents each frame on the display's refresh: an even pace and a lower load, with \
+               a little more input delay.",
         needs: Needs::Lighting,
+        inverted: false,
+        on_by_default: true,
+    },
+    FidelityOption {
+        name: fidelity::HDR,
+        caption: "HDR Output",
+        note: "Lets lamps, portals and the sun's glints reach past white on a display that can \
+               show it. It takes effect at the next start.",
+        needs: Needs::Lighting,
+        inverted: false,
+        on_by_default: false,
     },
 ];
 
+/// The menus among the effects' rows, each with what it needs. A menu's own module registers it
+/// and gives its choices; a row here gives it the boxes' rules.
+pub const MENUS: &[(&str, Needs)] = &[
+    (fidelity::RENDER_SCALE, Needs::Lighting),
+    (fidelity::DYNAMIC_RESOLUTION, Needs::Lighting),
+];
+
+/// The render scale until the player changes it: Dynamic, as the Medium preset has it.
+pub const SCALE_DEFAULT: u32 = super::render_scale::DYNAMIC;
+
+/// The render scale menu's caption.
+pub const SCALE_CAPTION: &str = "Render Scale";
+
+/// What the render scale does, for the row's tooltip.
+#[cfg(target_os = "macos")]
+pub const SCALE_NOTE: &str = "Draws the world at this share of the screen's pixels and has \
+                              MetalFX rebuild the picture to fill the screen: faster, a little \
+                              softer. Dynamic lowers it to hold a frame rate. It changes at once.";
+
+/// What the render scale does, for the row's tooltip.
+#[cfg(not(target_os = "macos"))]
+pub const SCALE_NOTE: &str = "Draws the world at this share of the screen's pixels and enlarges \
+                              the picture to fill the screen: faster, softer. Dynamic lowers it \
+                              to hold a frame rate. It changes at once.";
+
+/// The render scale value of a Dynamic render scale.
+#[allow(clippy::cast_possible_wrap)] // a small constant
+const DYNAMIC: i32 = super::render_scale::DYNAMIC as i32;
+
 /// The heading's caption.
-pub const HEADING: &str = "Highly Experimental Rendering Effects";
+pub const HEADING: &str = "Enhanced Graphics";
+
+/// The heading over what stays on the page under standard graphics.
+pub const STANDARD_HEADING: &str = "Effects";
+
+/// The caption of the menu choosing standard or enhanced graphics.
+pub const MODE_CAPTION: &str = "Graphics";
+
+/// The menu's choices, in order: the second ticks Enhanced Graphics Mode's box.
+pub const MODES: [&str; 2] = ["Standard", "Enhanced"];
+
+/// The caption of the enhanced graphics' quality presets.
+pub const PRESET_CAPTION: &str = "Quality Preset";
+
+/// The quality presets' names, least first.
+pub const PRESET_NAMES: [&str; 4] = ["Low", "Medium", "High", "Ultra"];
+
+/// The name for settings that match no preset.
+pub const CUSTOM_PRESET: &str = "Custom";
+
+const ON: PrefValue = PrefValue::Bool(true);
+const OFF: PrefValue = PrefValue::Bool(false);
+
+/// What the quality presets set: each row a preference and its value in each preset, in
+/// [`PRESET_NAMES`] order. A box that names what stays on is off to keep it.
+pub const PRESET_VALUES: &[(&str, [PrefValue; PRESET_NAMES.len()])] = &[
+    (fidelity::GLOBAL_ILLUMINATION, [OFF, ON, ON, ON]),
+    (fidelity::LAMPS, [OFF, ON, ON, ON]),
+    (fidelity::AMBIENT_OCCLUSION, [OFF, ON, ON, ON]),
+    (fidelity::SKY, [OFF, ON, ON, ON]),
+    (fidelity::WEATHER, [OFF, ON, ON, ON]),
+    (fidelity::NO_ANTI_ALIASING, [ON, OFF, OFF, OFF]),
+    (fidelity::NO_SLOPE_MATERIALS, [OFF, OFF, OFF, OFF]),
+    (
+        fidelity::RENDER_SCALE,
+        [Int(DYNAMIC), Int(DYNAMIC), Int(DYNAMIC), Int(100)],
+    ),
+    (
+        fidelity::DYNAMIC_RESOLUTION,
+        [Int(60), Int(60), Int(60), Int(60)],
+    ),
+];
+
+/// One quality preset, by its place in [`PRESET_NAMES`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Preset(pub usize);
+
+/// The presets, least first.
+pub const PRESETS: [Preset; PRESET_NAMES.len()] = [Preset(0), Preset(1), Preset(2), Preset(3)];
+
+impl Preset {
+    /// The preset's name.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        PRESET_NAMES[self.0]
+    }
+
+    /// What the preset sets, as preferences.
+    #[must_use]
+    pub fn values(self) -> Vec<(&'static str, PrefValue)> {
+        PRESET_VALUES
+            .iter()
+            .map(|(name, values)| (*name, values[self.0].clone()))
+            .collect()
+    }
+
+    /// Whether `read` holds every value the preset sets.
+    #[must_use]
+    pub fn in_use(self, read: impl Fn(&str) -> Option<PrefValue>) -> bool {
+        PRESET_VALUES
+            .iter()
+            .all(|(name, values)| read(name).as_ref() == Some(&values[self.0]))
+    }
+}
+
+/// The first preset `read` matches; `None` for settings of the player's own.
+#[must_use]
+pub fn preset_in_use(read: impl Fn(&str) -> Option<PrefValue>) -> Option<Preset> {
+    PRESETS.into_iter().find(|p| p.in_use(&read))
+}
 
 /// The line under the heading.
 pub const WARNING: &str =
@@ -133,6 +295,8 @@ pub enum Blocked {
     NeedsLighting,
     /// The graphics device does not trace rays.
     NeedsRays,
+    /// Keep Retail Look's box leaves out what an art pack draws.
+    RetailLook,
 }
 
 impl Blocked {
@@ -140,11 +304,19 @@ impl Blocked {
     #[must_use]
     pub const fn reason(self) -> &'static str {
         match self {
-            Self::NeedsLighting => "Needs Better Lighting",
+            Self::NeedsLighting => "Needs Enhanced Graphics Mode",
             Self::NeedsRays => {
                 "Needs ray tracing, which this graphics card, driver or backend lacks"
             }
+            Self::RetailLook => "Off under Keep Retail Look",
         }
+    }
+
+    /// Whether the page leaves the row off altogether: another box's choice makes it mean
+    /// nothing. A device without ray tracing stays, greyed, with its reason: no box changes that.
+    #[must_use]
+    pub const fn hides_the_row(self) -> bool {
+        !matches!(self, Self::NeedsRays)
     }
 }
 
@@ -154,45 +326,91 @@ pub fn find(name: &str) -> Option<&'static FidelityOption> {
     OPTIONS.iter().find(|o| o.name.eq_ignore_ascii_case(name))
 }
 
-/// Why the box `name` draws nothing however it is ticked, with `ticked` saying which boxes are
-/// ticked and `rays` whether the graphics device traces rays (`None` while that is not known yet,
-/// which blocks nothing). `None` when it draws when ticked.
+/// Whether `name` is one of the effects' menus.
+#[must_use]
+pub fn is_a_menu(name: &str) -> bool {
+    MENUS.iter().any(|(m, _)| m.eq_ignore_ascii_case(name))
+}
+
+/// What the box or menu `name` needs.
+#[must_use]
+pub fn needs(name: &str) -> Option<Needs> {
+    MENUS
+        .iter()
+        .find(|(m, _)| m.eq_ignore_ascii_case(name))
+        .map(|(_, needs)| *needs)
+        .or_else(|| find(name).map(|o| o.needs))
+}
+
+/// Why the box or menu `name` draws nothing however it is set, with `ticked` saying which boxes
+/// are ticked (and which menus are off their first choice) and `rays` whether the graphics device
+/// traces rays (`None` while that is not known yet, which blocks nothing). `None` when it draws
+/// when ticked.
 #[must_use]
 pub fn blocked(name: &str, ticked: impl Fn(&str) -> bool, rays: Option<bool>) -> Option<Blocked> {
-    let o = find(name)?;
     let lighting = ticked(fidelity::LIGHTING);
-    match o.needs {
-        Needs::Lighting | Needs::LightingAndRays if !lighting => Some(Blocked::NeedsLighting),
+    match needs(name)? {
+        Needs::Lighting | Needs::LightingAndRays | Needs::LightingWithoutRetailLook
+            if !lighting =>
+        {
+            Some(Blocked::NeedsLighting)
+        }
         Needs::LightingAndRays if rays == Some(false) => Some(Blocked::NeedsRays),
+        Needs::LightingWithoutRetailLook if ticked(fidelity::RETAIL_LOOK) => {
+            Some(Blocked::RetailLook)
+        }
         _ => None,
     }
 }
 
-/// Register every box with the value store, each off. The store's load then reads the
-/// `[Fidelity]` section of the profile into them, and the page reads and writes them.
+/// What the menu `name` holds until the player changes it.
+fn menu_default(name: &str) -> Option<PrefValue> {
+    if name.eq_ignore_ascii_case(fidelity::RENDER_SCALE) {
+        i32::try_from(SCALE_DEFAULT).ok().map(Int)
+    } else if super::dynamic_resolution::is_dynamic_resolution(name) {
+        Some(Int(super::dynamic_resolution::DEFAULT))
+    } else {
+        None
+    }
+}
+
+/// Register every box and menu with the value store, each at its default. The store's load then
+/// reads the `[Fidelity]` section of the profile into them, and the page reads and writes them.
 pub fn register() -> usize {
-    OPTIONS
+    let boxes: usize = OPTIONS
         .iter()
         .map(|o| {
             usize::from(super::store::register_preference(
                 o.name,
-                PrefValue::Bool(false),
+                PrefValue::Bool(o.on_by_default),
                 super::store::DataType::Bool,
             ))
         })
-        .sum()
+        .sum();
+    let menus = [fidelity::RENDER_SCALE, fidelity::DYNAMIC_RESOLUTION]
+        .into_iter()
+        .filter_map(|name| Some((name, menu_default(name)?)))
+        .filter(|(name, value)| {
+            super::store::register_preference(name, value.clone(), super::store::DataType::UInt)
+        })
+        .count();
+    boxes + menus
 }
 
-/// Whether the store's save leaves `name` out of the profile: a box still off that the profile
-/// does not name, so a profile that never ticked one has no `[Fidelity]` section.
+/// Whether the store's save leaves `name` out of the profile: a box or a menu still at its default
+/// that the profile does not name, so a profile that never changed one has no `[Fidelity]`
+/// section.
 #[must_use]
 pub fn left_out_of_save(
     name: &str,
     value: &PrefValue,
     ini: &crate::persist::preferences::UserPreferences,
 ) -> bool {
-    find(name).is_some()
-        && *value == PrefValue::Bool(false)
+    let unchanged = match find(name) {
+        Some(o) => *value == PrefValue::Bool(o.on_by_default),
+        None => menu_default(name).as_ref() == Some(value),
+    };
+    unchanged
         && !ini
             .entries
             .iter()
@@ -279,7 +497,7 @@ const REASON_SHOWN: usize = 48;
 
 /// What the chat window tells a player who ticks a box while the client draws with a renderer
 /// other than `wgpu`.
-pub const REFUSED_RENDERER: &str = "The experimental rendering effects are off on this renderer: they draw only on the wgpu renderer (the Renderer choice on Horizon's Client page, or Renderer=wgpu), and a box first ticked takes effect at the next start.";
+pub const REFUSED_RENDERER: &str = "The experimental rendering effects are off on this renderer: they draw only on the wgpu renderer (the Renderer choice on Horizon's Display page, or Renderer=wgpu), and a box first ticked takes effect at the next start.";
 
 /// What the chat window tells a player who ticks a box on another renderer while `wgpu` is chosen
 /// for the next start: that start has them.
@@ -380,15 +598,22 @@ mod tests {
         for o in &OPTIONS {
             assert!(fidelity::NAMES.contains(&o.name), "{}", o.name);
             assert_eq!(find(&o.name.to_ascii_lowercase()), Some(o));
+            assert_eq!(needs(o.name), Some(o.needs));
+        }
+        for (name, _) in MENUS {
+            assert!(fidelity::NAMES.contains(name), "{name}");
+            assert!(find(name).is_none(), "{name} is a menu and a box");
         }
         assert!(find(fidelity::DEBUG).is_none(), "the debug view has no box");
+        assert_eq!(needs(fidelity::DEBUG), None);
     }
 
     #[test]
     fn a_box_whose_prerequisite_is_off_or_covered_says_why() {
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         use fidelity::{
-            AMBIENT_OCCLUSION, GLOBAL_ILLUMINATION, LAMPS, LIGHTING, SHADOWS, SKY, WEATHER,
+            AMBIENT_OCCLUSION, GLOBAL_ILLUMINATION, LAMPS, LIGHTING, NO_SLOPE_MATERIALS,
+            RETAIL_LOOK, SHADOWS, SKY, WEATHER,
         };
         for name in [SHADOWS, GLOBAL_ILLUMINATION, LAMPS, WEATHER] {
             assert_eq!(
@@ -420,6 +645,174 @@ mod tests {
         );
         assert_eq!(blocked(WEATHER, with(&[LIGHTING]), Some(false)), None);
         assert_eq!(blocked(LIGHTING, with(&[]), Some(false)), None);
+        // The slope materials are an art pack's ground's, which Keep Retail Look leaves out.
+        assert_eq!(
+            blocked(NO_SLOPE_MATERIALS, with(&[]), None),
+            Some(Blocked::NeedsLighting)
+        );
+        assert_eq!(blocked(NO_SLOPE_MATERIALS, with(&[LIGHTING]), None), None);
+        assert_eq!(
+            blocked(NO_SLOPE_MATERIALS, with(&[LIGHTING, RETAIL_LOOK]), None),
+            Some(Blocked::RetailLook)
+        );
+    }
+
+    #[test]
+    fn what_the_lighting_and_the_retail_look_rule_out_leaves_the_page() {
+        use fidelity::{
+            AMBIENT_OCCLUSION, DYNAMIC_RESOLUTION, GLOBAL_ILLUMINATION, HDR, LAMPS, LIGHTING,
+            NO_ANTI_ALIASING, NO_SLOPE_MATERIALS, RENDER_SCALE, RETAIL_LOOK, SHADOWS, SKY, VSYNC,
+            WEATHER,
+        };
+        let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
+        let left = |name: &str, on: &'static [&'static str]| {
+            blocked(name, with(on), Some(true)).is_some_and(Blocked::hides_the_row)
+        };
+        // With the lighting off, the occlusion and the sky alone stay.
+        for name in [AMBIENT_OCCLUSION, SKY, LIGHTING] {
+            assert!(!left(name, &[]), "{name}");
+        }
+        for name in [
+            RETAIL_LOOK,
+            SHADOWS,
+            GLOBAL_ILLUMINATION,
+            LAMPS,
+            WEATHER,
+            NO_ANTI_ALIASING,
+            NO_SLOPE_MATERIALS,
+            VSYNC,
+            HDR,
+            RENDER_SCALE,
+            DYNAMIC_RESOLUTION,
+        ] {
+            assert!(left(name, &[]), "{name}");
+        }
+        for name in [RENDER_SCALE, DYNAMIC_RESOLUTION] {
+            assert!(!left(name, &[LIGHTING, RETAIL_LOOK]), "{name}");
+        }
+        // The retail look takes off what an art pack draws, and only that.
+        assert!(left(NO_SLOPE_MATERIALS, &[LIGHTING, RETAIL_LOOK]));
+        for o in OPTIONS.iter().filter(|o| o.name != NO_SLOPE_MATERIALS) {
+            assert!(!left(o.name, &[LIGHTING, RETAIL_LOOK]), "{}", o.name);
+        }
+        // A device without rays stays, with its reason.
+        assert!(!blocked(LAMPS, with(&[LIGHTING]), Some(false))
+            .unwrap()
+            .hides_the_row());
+    }
+
+    #[test]
+    fn the_effects_start_on_and_a_box_at_its_default_stays_out_of_a_profile() {
+        let ini = crate::persist::preferences::UserPreferences::parse("").unwrap();
+        for o in &OPTIONS {
+            let draws = !matches!(
+                o.name,
+                fidelity::RETAIL_LOOK
+                    | fidelity::NO_ANTI_ALIASING
+                    | fidelity::NO_SLOPE_MATERIALS
+                    | fidelity::HDR
+            );
+            assert_eq!(o.on_by_default, draws, "{}", o.name);
+            assert!(
+                left_out_of_save(o.name, &PrefValue::Bool(draws), &ini),
+                "{}",
+                o.name
+            );
+            assert!(
+                !left_out_of_save(o.name, &PrefValue::Bool(!draws), &ini),
+                "{}",
+                o.name
+            );
+        }
+    }
+
+    #[test]
+    fn each_box_stands_above_the_boxes_it_can_take_off_the_page() {
+        assert_eq!(OPTIONS[0].name, fidelity::LIGHTING);
+        assert_eq!(OPTIONS[1].name, fidelity::RETAIL_LOOK);
+        let inverted: Vec<&str> = OPTIONS
+            .iter()
+            .filter(|o| o.inverted)
+            .map(|o| o.caption)
+            .collect();
+        assert_eq!(inverted, ["Anti-Aliasing", "Slope Materials"]);
+    }
+
+    #[test]
+    fn the_presets_go_from_a_light_low_to_a_full_ultra_and_the_boxes_start_at_medium() {
+        for (name, _) in PRESET_VALUES {
+            assert!(fidelity::NAMES.contains(name), "{name}");
+        }
+        let names: Vec<&str> = PRESETS.iter().map(|p| p.name()).collect();
+        assert_eq!(names, PRESET_NAMES);
+        // Low turns the costly effects off and the anti-aliasing with them; Ultra has them all.
+        let low = PRESETS[0].values();
+        assert!(low.contains(&(fidelity::GLOBAL_ILLUMINATION, PrefValue::Bool(false))));
+        assert!(low.contains(&(fidelity::NO_ANTI_ALIASING, PrefValue::Bool(true))));
+        assert!(low.contains(&(fidelity::RENDER_SCALE, Int(DYNAMIC))));
+        let ultra = PRESETS[3].values();
+        assert!(ultra.iter().all(|(name, v)| match find(name) {
+            Some(o) => *v == PrefValue::Bool(!o.inverted),
+            None => is_a_menu(name),
+        }));
+        assert!(ultra.contains(&(fidelity::RENDER_SCALE, Int(100))));
+        // The defaults of the boxes and the menus are the Medium preset's.
+        let defaults = |name: &str| match find(name) {
+            Some(o) => Some(PrefValue::Bool(o.on_by_default)),
+            None => menu_default(name),
+        };
+        assert_eq!(preset_in_use(defaults), Some(PRESETS[1]));
+        // Each preset is in use once set, and a value of the player's own is none.
+        for p in PRESETS {
+            let set = p.values();
+            let read = |name: &str| set.iter().find(|(n, _)| *n == name).map(|(_, v)| v.clone());
+            assert!(p.in_use(read), "{}", p.name());
+        }
+        let own = |name: &str| {
+            if name == fidelity::SKY {
+                Some(PrefValue::Bool(false))
+            } else {
+                defaults(name)
+            }
+        };
+        assert_eq!(preset_in_use(own), None);
+    }
+
+    #[test]
+    fn the_render_scale_needs_the_better_lighting_and_stays_out_of_a_profile_until_changed() {
+        let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
+        for name in [fidelity::RENDER_SCALE, fidelity::DYNAMIC_RESOLUTION] {
+            assert_eq!(blocked(name, with(&[]), None), Some(Blocked::NeedsLighting));
+            assert_eq!(blocked(name, with(&[fidelity::LIGHTING]), None), None);
+            assert!(find(name).is_none(), "{name} is no box");
+        }
+        let ini = crate::persist::preferences::UserPreferences::parse("").unwrap();
+        assert_eq!(SCALE_DEFAULT, super::super::render_scale::DYNAMIC);
+        assert!(left_out_of_save(
+            fidelity::RENDER_SCALE,
+            &Int(DYNAMIC),
+            &ini
+        ));
+        assert!(!left_out_of_save(fidelity::RENDER_SCALE, &Int(100), &ini));
+        assert!(left_out_of_save(
+            fidelity::DYNAMIC_RESOLUTION,
+            &Int(super::super::dynamic_resolution::DEFAULT),
+            &ini
+        ));
+        assert!(!left_out_of_save(
+            fidelity::DYNAMIC_RESOLUTION,
+            &Int(90),
+            &ini
+        ));
+        let named = crate::persist::preferences::UserPreferences::parse(
+            "[Fidelity]\r\nRenderScale=Dynamic\r\n",
+        )
+        .unwrap();
+        assert!(!left_out_of_save(
+            fidelity::RENDER_SCALE,
+            &Int(DYNAMIC),
+            &named
+        ));
     }
 
     #[test]

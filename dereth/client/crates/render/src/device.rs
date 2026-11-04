@@ -1249,6 +1249,14 @@ impl Gpu {
         }
     }
 
+    /// Whether Enhanced Graphics Mode draws, which only a `wgpu` device can.
+    pub fn set_enhanced(&mut self, on: bool, vsync: bool) {
+        #[allow(irrefutable_let_patterns)]
+        if let Gpu::Wgpu(g) = self {
+            g.set_enhanced(on, vsync);
+        }
+    }
+
     /// Whether the device has what the high-fidelity presentation draws with: a `wgpu` device
     /// with compute shaders, storage buffers and four colour targets.
     #[must_use]

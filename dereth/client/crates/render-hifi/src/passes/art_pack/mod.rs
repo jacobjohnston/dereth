@@ -13,8 +13,8 @@
 //!
 //! The models of the statics in the rooms the frame reached ([`HifiFrame::pack_rooms`]) are drawn
 //! at the frame's object passes: those of the rooms a frame seen from a room draws again after its
-//! indoor depth clear at its last, the rest at its first, with the outdoors. They are lit by the
-//! rooms' own light per pixel.
+//! indoor depth clear at its last, the rest at its first, with the outdoors, and those past the
+//! near buildings before their door stamps. They are lit by the rooms' own light per pixel.
 //!
 //! Only pixels change. What can be picked, where the camera may go and everything the game reads
 //! come from the ordinary frame, which draws the original objects whether or not the pack is
@@ -195,9 +195,11 @@ struct State {
     /// The models of the statics in the rooms the frame reached: drawn at the frame's last object
     /// pass, once a frame that steps indoors has cleared the depth and drawn its rooms.
     room_view: Vec<Batch>,
-    /// The runs of rooms the frame does not draw again after its indoor depth clear. They stand
-    /// with what is outdoors.
+    /// The runs of rooms the frame does not draw again after its indoor depth clear: past the
+    /// near buildings, and nearer. They stand with what is outdoors.
+    room_view_far: Vec<Batch>,
     room_view_outdoors: Vec<Batch>,
+    room_far_drawn: bool,
     room_active: bool,
     room_drawn: bool,
     /// How many object passes the frame holds, and how many have begun.
@@ -1786,8 +1788,8 @@ impl HifiPass for ArtPack {
                 }
                 Mark::Objects => {
                     s.far_mark.get_or_insert(*at);
+                    s.objects_total += 1;
                 }
-                Mark::Objects => s.objects_total += 1,
                 _ => {}
             }
         }
@@ -1849,9 +1851,15 @@ impl HifiPass for ArtPack {
             .unwrap_or_default();
         let (last, outdoors): (Vec<usize>, Vec<usize>) =
             (0..rooms.len()).partition(|i| cleared.is_none() || again.contains(&rooms[*i].1));
+        let nearest = stamps.map(|(.., nearest)| nearest);
+        let (close, past): (Vec<usize>, Vec<usize>) = outdoors.into_iter().partition(|i| {
+            nearest.is_none_or(|n| (rooms[*i].0.centre - cam.eye).truncate().length() < n)
+        });
         let placed: Vec<Placed> = rooms.into_iter().map(|(p, _)| p).collect();
         s.room_view = batches(&placed, last, &mut rows);
-        s.room_view_outdoors = batches(&placed, outdoors, &mut rows);
+        s.room_view_far = batches(&placed, past, &mut rows);
+        s.room_view_outdoors = batches(&placed, close, &mut rows);
+        s.room_far_drawn = false;
         if let Some(gpu) = s.gpu.as_mut() {
             write_instances(&device, &queue, &mut gpu.room_instances, &rows);
         }
@@ -1875,7 +1883,9 @@ impl HifiPass for ArtPack {
         s.far_drawn = false;
         s.room_active = s.gpu.is_some()
             && plan.is_some()
-            && !(s.room_view.is_empty() && s.room_view_outdoors.is_empty());
+            && !(s.room_view.is_empty()
+                && s.room_view_far.is_empty()
+                && s.room_view_outdoors.is_empty());
         s.room_drawn = false;
         s.objects_seen = 0;
     }
@@ -1938,6 +1948,10 @@ impl ReplayFilter for ArtPack {
                 s.view_far_drawn = true;
                 drew |= s.draw_view_far(pass);
             }
+            if s.room_active && !s.room_far_drawn {
+                s.room_far_drawn = true;
+                drew |= s.draw_room_runs(&s.room_view_far, pass);
+            }
             return drew;
         }
         if !matches!(mark, Mark::Objects) {
@@ -1948,6 +1962,10 @@ impl ReplayFilter for ArtPack {
         // at its last, over the rooms it has drawn.
         s.objects_seen += 1;
         if s.room_active && s.objects_seen == 1 {
+            if !s.room_far_drawn {
+                s.room_far_drawn = true;
+                drew |= s.draw_room_runs(&s.room_view_far, pass);
+            }
             drew |= s.draw_room_runs(&s.room_view_outdoors, pass);
         }
         if s.room_active && !s.room_drawn && s.objects_seen == s.objects_total {

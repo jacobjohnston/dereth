@@ -233,3 +233,105 @@ fn write(path: &Path, h: &Harness, art: &Art) {
         .and_then(|mut w| w.write_image_data(&rgb))
         .expect("the picture written");
 }
+
+/// Not a claim: the HUD with the character's vitals part spent, a party of three and the
+/// fellowship window open, into `<DERETH_UI_SHOTS>/<DERETH_UI_HUD_NAME>.png` (default `hud`).
+/// `DERETH_UI_HUD_LONG` gives the health a ten-digit value. `DERETH_UI_SET` sets preferences first.
+#[test]
+#[ignore = "an instrument: set DERETH_UI_SHOTS to a folder"]
+fn draw_the_hud_with_vitals_and_a_fellowship_for_a_person_to_look_at() {
+    use dereth_client_contract::view::{FellowEntry, FellowshipView};
+    use dereth_horizon::ui::game::Vital;
+    let Some(dir) = std::env::var_os("DERETH_UI_SHOTS") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).expect("the pictures' folder");
+    store::init();
+    for item in std::env::var("DERETH_UI_SET")
+        .unwrap_or_default()
+        .split(';')
+    {
+        let Some((name, v)) = item.split_once('=') else {
+            continue;
+        };
+        let v = v.trim();
+        let value = match v {
+            "true" => PrefValue::Bool(true),
+            "false" => PrefValue::Bool(false),
+            _ => v.parse::<i32>().map_or_else(
+                |_| PrefValue::Float(v.parse::<f32>().expect("a preference's value")),
+                PrefValue::Int,
+            ),
+        };
+        let _ = store::set_value(name.trim(), value);
+    }
+    let long = std::env::var_os("DERETH_UI_HUD_LONG").is_some();
+    let vital = |current, max| Vital { current, max };
+    let member =
+        |id: u32, name: &str, level, hp: (u32, u32), sp: (u32, u32), mp: (u32, u32)| FellowEntry {
+            id: dereth_primitives::ObjectId(id),
+            name: name.into(),
+            level,
+            xp_percent: 33,
+            current_health: hp.0,
+            max_health: hp.1,
+            current_stamina: sp.0,
+            max_stamina: sp.1,
+            current_mana: mp.0,
+            max_mana: mp.1,
+            ..FellowEntry::default()
+        };
+    let state = GameState {
+        in_world: true,
+        name: "Tester".into(),
+        health: if long {
+            vital(1_234_567_890, 2_000_000_000)
+        } else {
+            vital(287, 350)
+        },
+        stamina: vital(410, 410),
+        mana: vital(125, 300),
+        fellowship: vec![
+            (
+                "Aldren".into(),
+                vital(180, 240),
+                vital(300, 300),
+                vital(90, 200),
+                false,
+            ),
+            (
+                "Mirelle".into(),
+                vital(60, 200),
+                vital(150, 260),
+                vital(240, 320),
+                false,
+            ),
+        ],
+        fellowship_view: Some(FellowshipView {
+            name: "The Wanderers".into(),
+            leader: dereth_primitives::ObjectId(1),
+            members: vec![
+                member(1, "Tester", 60, (287, 350), (410, 410), (125, 300)),
+                member(2, "Aldren", 58, (180, 240), (300, 300), (90, 200)),
+                member(3, "Mirelle", 61, (60, 200), (150, 260), (240, 320)),
+            ],
+            ..FellowshipView::default()
+        }),
+        ..GameState::default()
+    };
+    let art = Arc::new(Art::new(Arc::new(
+        dereth_horizon::pieces::Pieces::built_in().expect("the pieces built in"),
+    )));
+    let mut h = Harness {
+        ui: HorizonUi::new(Arc::clone(&art), Default::default()),
+        list: DrawList::default(),
+        input: InputFrame::default(),
+        screen: (W as f32, H as f32),
+    };
+    h.frame(&state);
+    h.ui.windows.open(WindowId::Social, 0.0);
+    settle(&mut h, &state);
+    let name = std::env::var("DERETH_UI_HUD_NAME").unwrap_or_else(|_| "hud".into());
+    write(&dir.join(format!("{name}.png")), &h, &art);
+}

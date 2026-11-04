@@ -143,6 +143,9 @@ pub mod fidelity {
     pub const VSYNC: &str = "Fidelity.VSync";
     /// `Fidelity.Hdr`: the frame is presented with the display's extended range.
     pub const HDR: &str = "Fidelity.Hdr";
+    /// `Fidelity.GodRays`: how strongly the sunlit air shows shafts of light, a level: 0 Off,
+    /// 1 Low, 2 Medium, 3 High.
+    pub const GOD_RAYS: &str = "Fidelity.GodRays";
     /// `Fidelity.Debug`: a diagnostic view, set only by `--set-at`: 0 Off, 1 Passthrough,
     /// 2 Depth, 3 Normals, 4 AO, 5 Shadows, 6 Census, 7 Parity (re-shaded with no pass).
     pub const DEBUG: &str = "Fidelity.Debug";
@@ -155,7 +158,8 @@ pub mod fidelity {
     /// over it. No box sets it.
     pub const ART_PACK: &str = "Fidelity.ArtPack";
 
-    /// Every name the profile and `--set-at` may set, the twelve boxes first.
+    /// Every name the profile and `--set-at` may set, the twelve boxes first and the menu after
+    /// them.
     pub const NAMES: &[&str] = &[
         LIGHTING,
         SHADOWS,
@@ -169,6 +173,7 @@ pub mod fidelity {
         NO_SLOPE_MATERIALS,
         VSYNC,
         HDR,
+        GOD_RAYS,
         DEBUG,
     ];
 }

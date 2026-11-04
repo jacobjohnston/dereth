@@ -1,6 +1,6 @@
-//! The words and rules of the optional high-fidelity presentation's options: twelve check boxes on
-//! the Horizon interface's Display page, under a heading of their own, below a Graphics menu that
-//! chooses standard or enhanced graphics.
+//! The words and rules of the optional high-fidelity presentation's options: twelve check boxes
+//! and the God Rays menu ([`super::god_rays`]) on the Horizon interface's Display page, under a
+//! heading of their own, below a Graphics menu that chooses standard or enhanced graphics.
 //!
 //! The first box is Enhanced Graphics Mode, the better lighting, which the Graphics menu sets. Four
 //! of the effects are drawn inside it and draw nothing without it: the sun shadows, the bounced
@@ -12,7 +12,8 @@
 //! ground are drawn inside the better lighting too, and Keep Retail Look draws the game's own in
 //! their place, all of them or none. The better lighting smooths the world's edges with temporal
 //! anti-aliasing, which a box turns off; an art pack's ground lays scree and rock on steep slopes,
-//! which a box turns off; and the last two boxes choose how its frames reach the display.
+//! which a box turns off; and two boxes choose how its frames reach the display. God Rays shows
+//! the sunlight in the air, inside the better lighting.
 //!
 //! The effects start on. The enhanced graphics' quality presets set several of them at once
 //! ([`PRESET_VALUES`]), and the boxes' defaults are the Medium preset's.
@@ -310,8 +311,13 @@ pub fn needs(name: &str) -> Option<Needs> {
 /// when ticked.
 #[must_use]
 pub fn blocked(name: &str, ticked: impl Fn(&str) -> bool, rays: Option<bool>) -> Option<Blocked> {
+    let wants = if super::god_rays::is_god_rays(name) {
+        Needs::Lighting
+    } else {
+        needs(name)?
+    };
     let lighting = ticked(fidelity::LIGHTING);
-    match needs(name)? {
+    match wants {
         Needs::Lighting | Needs::LightingAndRays | Needs::LightingWithoutRetailLook
             if !lighting =>
         {
@@ -325,10 +331,11 @@ pub fn blocked(name: &str, ticked: impl Fn(&str) -> bool, rays: Option<bool>) ->
     }
 }
 
-/// Register every box with the value store, each at its default. The store's load then reads the
-/// `[Fidelity]` section of the profile into them, and the page reads and writes them.
+/// Register every box with the value store, each at its default, and the God Rays menu at its
+/// own. The store's load then reads the `[Fidelity]` section of the profile into them, and the
+/// page reads and writes them.
 pub fn register() -> usize {
-    OPTIONS
+    let boxes: usize = OPTIONS
         .iter()
         .map(|o| {
             usize::from(super::store::register_preference(
@@ -337,18 +344,30 @@ pub fn register() -> usize {
                 super::store::DataType::Bool,
             ))
         })
-        .sum()
+        .sum();
+    let rays = super::store::register_preference(
+        fidelity::GOD_RAYS,
+        PrefValue::Int(super::god_rays::DEFAULT),
+        super::store::DataType::UInt,
+    );
+    boxes + usize::from(rays)
 }
 
-/// Whether the store's save leaves `name` out of the profile: a box still at its default that the
-/// profile does not name, so a profile that never changed one has no `[Fidelity]` section.
+/// Whether the store's save leaves `name` out of the profile: a box or the God Rays menu still at
+/// its default that the profile does not name, so a profile that never changed one has no
+/// `[Fidelity]` section.
 #[must_use]
 pub fn left_out_of_save(
     name: &str,
     value: &PrefValue,
     ini: &crate::persist::preferences::UserPreferences,
 ) -> bool {
-    find(name).is_some_and(|o| *value == PrefValue::Bool(o.on_by_default))
+    let unchanged = if super::god_rays::is_god_rays(name) {
+        *value == PrefValue::Int(super::god_rays::DEFAULT)
+    } else {
+        find(name).is_some_and(|o| *value == PrefValue::Bool(o.on_by_default))
+    };
+    unchanged
         && !ini
             .entries
             .iter()
@@ -702,6 +721,36 @@ mod tests {
             }
         };
         assert_eq!(preset_in_use(own), None);
+    }
+
+    #[test]
+    fn the_god_rays_menu_needs_the_better_lighting() {
+        use fidelity::{GOD_RAYS, LIGHTING};
+        let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
+        assert_eq!(
+            blocked(GOD_RAYS, with(&[]), None),
+            Some(Blocked::NeedsLighting)
+        );
+        assert_eq!(blocked(GOD_RAYS, with(&[LIGHTING]), Some(false)), None);
+        assert!(find(GOD_RAYS).is_none(), "the menu is no box");
+    }
+
+    /// The God Rays menu is registered Off, and the save leaves it out until it is changed.
+    #[test]
+    fn the_god_rays_menu_is_off_and_left_out_of_the_profile_until_chosen() {
+        use super::super::god_rays::{DEFAULT, OFF};
+        use crate::persist::preferences::UserPreferences;
+        let empty = UserPreferences::parse("").expect("an empty profile");
+        assert_eq!(DEFAULT, OFF);
+        let off = PrefValue::Int(OFF);
+        assert!(left_out_of_save(fidelity::GOD_RAYS, &off, &empty));
+        assert!(!left_out_of_save(
+            fidelity::GOD_RAYS,
+            &PrefValue::Int(2),
+            &empty
+        ));
+        let named = UserPreferences::parse("[Fidelity]\r\nGodRays=Off\r\n").expect("reads");
+        assert!(!left_out_of_save(fidelity::GOD_RAYS, &off, &named));
     }
 
     #[test]

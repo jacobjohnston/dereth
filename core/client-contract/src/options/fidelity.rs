@@ -17,14 +17,14 @@
 //! flickers, which a box holds steady. Light Draw Distance chooses how far the lamps light.
 //!
 //! The effects start on. The enhanced graphics' quality presets set several of them at once
-//! ([`PRESET_VALUES`]), and the boxes' defaults are the Medium preset's.
+//! ([`PRESET_VALUES`]), and the defaults of the boxes and the menu are the Medium preset's.
 //!
 //! In a build with the `hifi` feature the options are registered with the value store
 //! ([`register`]), so the page reads and writes them like any other option and the profile keeps
 //! them in its `[Fidelity]` section. Without it nothing here is registered and no page shows them.
 
 use super::names::fidelity;
-use crate::PrefValue;
+use crate::PrefValue::{self, Int};
 
 /// What a box needs before it draws anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,16 +170,19 @@ pub const OPTIONS: [FidelityOption; 13] = [
     },
     FidelityOption {
         name: fidelity::NO_FLAME_FLICKER,
-        caption: "No Flame Flicker",
-        note: "Holds the light of torches, braziers and candles steady instead of letting it \
-               flicker and sway, for anyone bothered by flickering light. It changes at once.",
+        caption: "Flame Flicker",
+        note: "The light of torches, braziers and candles flickers and sways, and the shadows \
+               it throws move with it. Off, every flame's light holds steady, for anyone \
+               bothered by flickering light. It changes at once.",
         needs: Needs::Lighting,
+        inverted: true,
+        on_by_default: false,
     },
 ];
 
 /// The menus among the effects' rows, each with what it needs. A menu's own module registers it
 /// and gives its choices; a row here gives it the boxes' rules.
-pub const MENUS: &[(&str, Needs)] = &[];
+pub const MENUS: &[(&str, Needs)] = &[(fidelity::LIGHT_DRAW_DISTANCE, Needs::Lighting)];
 
 /// The heading's caption.
 pub const HEADING: &str = "Enhanced Graphics";
@@ -215,6 +218,10 @@ pub const PRESET_VALUES: &[(&str, [PrefValue; PRESET_NAMES.len()])] = &[
     (fidelity::WEATHER, [OFF, ON, ON, ON]),
     (fidelity::NO_ANTI_ALIASING, [ON, OFF, OFF, OFF]),
     (fidelity::NO_SLOPE_MATERIALS, [OFF, OFF, OFF, OFF]),
+    (
+        fidelity::LIGHT_DRAW_DISTANCE,
+        [Int(100), Int(150), Int(300), Int(500)],
+    ),
 ];
 
 /// One quality preset, by its place in [`PRESET_NAMES`].
@@ -319,13 +326,8 @@ pub fn needs(name: &str) -> Option<Needs> {
 /// when ticked.
 #[must_use]
 pub fn blocked(name: &str, ticked: impl Fn(&str) -> bool, rays: Option<bool>) -> Option<Blocked> {
-    let wants = if super::light_distance::is_light_distance(name) {
-        Needs::Lighting
-    } else {
-        needs(name)?
-    };
     let lighting = ticked(fidelity::LIGHTING);
-    match wants {
+    match needs(name)? {
         Needs::Lighting | Needs::LightingAndRays | Needs::LightingWithoutRetailLook
             if !lighting =>
         {
@@ -370,10 +372,9 @@ pub fn left_out_of_save(
     value: &PrefValue,
     ini: &crate::persist::preferences::UserPreferences,
 ) -> bool {
-    let unchanged = if super::light_distance::is_light_distance(name) {
-        *value == PrefValue::Int(super::light_distance::DEFAULT)
-    } else {
-        find(name).is_some_and(|o| *value == PrefValue::Bool(o.on_by_default))
+    let unchanged = match find(name) {
+        Some(o) => *value == PrefValue::Bool(o.on_by_default),
+        None => is_a_menu(name) && *value == Int(super::light_distance::DEFAULT),
     };
     unchanged
         && !ini
@@ -625,8 +626,9 @@ mod tests {
     #[test]
     fn what_the_lighting_and_the_retail_look_rule_out_leaves_the_page() {
         use fidelity::{
-            AMBIENT_OCCLUSION, GLOBAL_ILLUMINATION, HDR, LAMPS, LIGHTING, NO_ANTI_ALIASING,
-            NO_SLOPE_MATERIALS, RETAIL_LOOK, SHADOWS, SKY, VSYNC, WEATHER,
+            AMBIENT_OCCLUSION, GLOBAL_ILLUMINATION, HDR, LAMPS, LIGHTING, LIGHT_DRAW_DISTANCE,
+            NO_ANTI_ALIASING, NO_FLAME_FLICKER, NO_SLOPE_MATERIALS, RETAIL_LOOK, SHADOWS, SKY,
+            VSYNC, WEATHER,
         };
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         let left = |name: &str, on: &'static [&'static str]| {
@@ -646,9 +648,12 @@ mod tests {
             NO_SLOPE_MATERIALS,
             VSYNC,
             HDR,
+            NO_FLAME_FLICKER,
+            LIGHT_DRAW_DISTANCE,
         ] {
             assert!(left(name, &[]), "{name}");
         }
+        assert!(!left(LIGHT_DRAW_DISTANCE, &[LIGHTING, RETAIL_LOOK]));
         // The retail look takes off what an art pack draws, and only that.
         assert!(left(NO_SLOPE_MATERIALS, &[LIGHTING, RETAIL_LOOK]));
         for o in OPTIONS.iter().filter(|o| o.name != NO_SLOPE_MATERIALS) {
@@ -670,6 +675,7 @@ mod tests {
                     | fidelity::NO_ANTI_ALIASING
                     | fidelity::NO_SLOPE_MATERIALS
                     | fidelity::HDR
+                    | fidelity::NO_FLAME_FLICKER
             );
             assert_eq!(o.on_by_default, draws, "{}", o.name);
             assert!(
@@ -694,7 +700,10 @@ mod tests {
             .filter(|o| o.inverted)
             .map(|o| o.caption)
             .collect();
-        assert_eq!(inverted, ["Anti-Aliasing", "Slope Materials"]);
+        assert_eq!(
+            inverted,
+            ["Anti-Aliasing", "Slope Materials", "Flame Flicker"]
+        );
     }
 
     #[test]
@@ -708,12 +717,17 @@ mod tests {
         let low = PRESETS[0].values();
         assert!(low.contains(&(fidelity::GLOBAL_ILLUMINATION, PrefValue::Bool(false))));
         assert!(low.contains(&(fidelity::NO_ANTI_ALIASING, PrefValue::Bool(true))));
+        assert!(low.contains(&(fidelity::LIGHT_DRAW_DISTANCE, Int(100))));
         let ultra = PRESETS[3].values();
-        assert!(ultra
-            .iter()
-            .all(|(name, v)| *v == PrefValue::Bool(!find(name).unwrap().inverted)));
-        // The boxes' defaults are the Medium preset's.
-        let defaults = |name: &str| find(name).map(|o| PrefValue::Bool(o.on_by_default));
+        assert!(ultra.iter().all(|(name, v)| match find(name) {
+            Some(o) => *v == PrefValue::Bool(!o.inverted),
+            None => *v == Int(500),
+        }));
+        // The defaults of the boxes and the menu are the Medium preset's.
+        let defaults = |name: &str| match find(name) {
+            Some(o) => Some(PrefValue::Bool(o.on_by_default)),
+            None => is_a_menu(name).then_some(Int(super::super::light_distance::DEFAULT)),
+        };
         assert_eq!(preset_in_use(defaults), Some(PRESETS[1]));
         // Each preset is in use once set, and a value of the player's own is none.
         for p in PRESETS {
@@ -742,14 +756,14 @@ mod tests {
         assert!(find(LIGHT_DRAW_DISTANCE).is_none(), "the menu is no box");
     }
 
-    /// The Light Draw Distance is registered at the whole distance, and the save leaves it out
-    /// until it is changed.
+    /// The Light Draw Distance starts at 1.5x, as the Medium preset has it, and the save leaves it
+    /// out until it is changed.
     #[test]
-    fn the_light_draw_distance_is_whole_and_left_out_of_the_profile_until_chosen() {
+    fn the_light_draw_distance_starts_at_the_medium_presets_and_is_left_out_until_chosen() {
         use crate::persist::preferences::UserPreferences;
         let empty = UserPreferences::parse("").expect("an empty profile");
         let whole = PrefValue::Int(super::super::light_distance::DEFAULT);
-        assert_eq!(whole, PrefValue::Int(100));
+        assert_eq!(whole, PrefValue::Int(150));
         let name = fidelity::LIGHT_DRAW_DISTANCE;
         assert!(left_out_of_save(name, &whole, &empty));
         assert!(!left_out_of_save(name, &PrefValue::Int(300), &empty));

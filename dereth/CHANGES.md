@@ -14,6 +14,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 
 ## Unreleased
 
+- Enhanced Graphics: Light Draw Distance starts at 1.5x, as the Medium preset has it, and the Quality Presets set it from 1x on Low to 5x on Ultra. Flame Flicker stays on until you untick it. Both leave the page with Enhanced Graphics Mode off.
 - Settings: Client is now Display and Sound. Display opens with a Graphics menu, Standard or Enhanced, each showing what applies to it, and options now use the names games usually use.
 - Better Lighting is now Enhanced Graphics Mode, and its effects start on. Under Standard, the page offers only Ambient Occlusion and Atmospheric Sky.
 - Retail Look is now Keep Retail Look: the game's own models and ground or the enhanced ones, all or nothing. What it rules out leaves the page.

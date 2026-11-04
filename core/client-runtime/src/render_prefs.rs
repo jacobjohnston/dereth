@@ -616,11 +616,12 @@ impl FidelityFeature {
         }
     }
 
-    /// Whether the option chooses how frames reach the screen rather than asking for an effect, so
-    /// that alone it asks nothing of the device.
+    /// Whether the option chooses how frames reach the screen, or how the presentation draws what
+    /// it already draws, rather than asking for an effect, so that alone it asks nothing of the
+    /// device.
     #[must_use]
     pub const fn is_presentation_choice(self) -> bool {
-        matches!(self, Self::VSync | Self::Hdr)
+        matches!(self, Self::VSync | Self::Hdr | Self::NoFlameFlicker)
     }
 
     /// The highest value the option takes: 4 for an effect (Ultra), 1 for the switches that
@@ -642,12 +643,17 @@ impl FidelityFeature {
         }
     }
 
-    /// What the option holds where the profile names nothing, when it is not 0: a box's default.
+    /// What the option holds where the profile names nothing, when it is not 0: a box's default,
+    /// or the Light Draw Distance's.
     #[must_use]
     pub fn default_value(self) -> Option<u32> {
-        dereth_client_contract::options::fidelity::find(self.name())
-            .filter(|b| b.on_by_default)
-            .map(|_| 1)
+        use dereth_client_contract::options as o;
+        match self {
+            Self::LightDrawDistance => u32::try_from(o::light_distance::DEFAULT).ok(),
+            _ => o::fidelity::find(self.name())
+                .filter(|b| b.on_by_default)
+                .map(|_| 1),
+        }
     }
 
     /// `raw` as this option stores it: an effect past Ultra is Ultra; a diagnostic view past the
@@ -764,8 +770,8 @@ impl FidelityPreferences {
                         FidelityFeature::RetailLook
                             | FidelityFeature::NoAntiAliasing
                             | FidelityFeature::NoSlopeMaterials
-                        | FidelityFeature::NoFlameFlicker
-                        | FidelityFeature::LightDrawDistance
+                            | FidelityFeature::NoFlameFlicker
+                            | FidelityFeature::LightDrawDistance
                     )
             })
             .any(|f| self.effective(f) != 0)
@@ -910,7 +916,12 @@ mod tests {
                     | FidelityFeature::Weather
                     | FidelityFeature::VSync
             );
-            assert_eq!(d.value(f), u32::from(on), "{f:?}");
+            let at = if f == FidelityFeature::LightDrawDistance {
+                150
+            } else {
+                u32::from(on)
+            };
+            assert_eq!(d.value(f), at, "{f:?}");
         }
         // A box the profile turned off stays off.
         let off = FidelityPreferences::from_preferences(&Preferences::parse(
@@ -973,10 +984,12 @@ mod tests {
         assert_eq!(read("LightDrawDistance=150").effective(lights), 150);
         assert_eq!(
             read("LightDrawDistance=9x").effective(lights),
-            0,
-            "the whole"
+            lights.default_value().unwrap_or(0),
+            "a word it does not know leaves it at its default"
         );
-        assert!(!read("LightDrawDistance=5x\nNoFlameFlicker=True").any_effective());
+        let alone = FidelityPreferences::parse_switch("LightDrawDistance=500,NoFlameFlicker=1")
+            .expect("a switch");
+        assert!(!alone.any_effective());
         let switched = FidelityPreferences::parse_switch("Lighting=1,LightDrawDistance=200")
             .expect("a switch");
         assert_eq!(switched.effective(lights), 200);

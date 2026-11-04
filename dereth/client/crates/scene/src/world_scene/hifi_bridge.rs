@@ -1500,8 +1500,10 @@ mod tests {
                 };
                 for o in &OPTIONS {
                     let drawn = drawn(&s, &prefs, o.name);
-                    // With an art pack open, which draws what every box asks for.
-                    let greyed = blocked_with(o.name, is, Some(rays), true).is_some();
+                    // With an art pack open, which draws what every box asks for. The water's box
+                    // is the pack-less one's: a pack's ground always has it.
+                    let pack = o.name != dereth_client_contract::options::names::fidelity::WATER;
+                    let greyed = blocked_with(o.name, is, Some(rays), pack).is_some();
                     assert_eq!(
                         drawn,
                         is(o.name) && !greyed,

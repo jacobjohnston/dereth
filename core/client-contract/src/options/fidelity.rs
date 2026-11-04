@@ -150,6 +150,8 @@ pub enum Blocked {
     NeedsArtPack,
     /// The retail look's box draws the game's own water.
     RetailLook,
+    /// The art pack's ground draws this water always.
+    BuiltInWater,
 }
 
 impl Blocked {
@@ -163,6 +165,7 @@ impl Blocked {
             }
             Self::NeedsArtPack => "Needs an art pack",
             Self::RetailLook => "Off under Retail Look, which draws the game's own water",
+            Self::BuiltInWater => "Always on with the art pack's ground",
         }
     }
 }
@@ -220,6 +223,7 @@ pub fn blocked_with(
         Needs::LightingWithoutRetailLook if ticked(fidelity::RETAIL_LOOK) => {
             Some(Blocked::RetailLook)
         }
+        _ if pack && name.eq_ignore_ascii_case(fidelity::WATER) => Some(Blocked::BuiltInWater),
         _ => None,
     }
 }
@@ -492,15 +496,25 @@ mod tests {
         );
         assert_eq!(blocked(WEATHER, with(&[LIGHTING]), Some(false)), None);
         assert_eq!(blocked(LIGHTING, with(&[]), Some(false)), None);
-        // The water needs the better lighting, and gives way to the retail look.
+        // The water needs the better lighting, gives way to the retail look, and is always on
+        // with an art pack's ground.
+        for pack in [false, true] {
+            assert_eq!(
+                blocked_with(WATER, with(&[]), Some(false), pack),
+                Some(Blocked::NeedsLighting)
+            );
+            assert_eq!(
+                blocked_with(WATER, with(&[LIGHTING, RETAIL_LOOK]), None, pack),
+                Some(Blocked::RetailLook)
+            );
+        }
         assert_eq!(
-            blocked(WATER, with(&[]), Some(false)),
-            Some(Blocked::NeedsLighting)
+            blocked_with(WATER, with(&[LIGHTING]), Some(false), false),
+            None
         );
-        assert_eq!(blocked(WATER, with(&[LIGHTING]), Some(false)), None);
         assert_eq!(
-            blocked(WATER, with(&[LIGHTING, RETAIL_LOOK]), None),
-            Some(Blocked::RetailLook)
+            blocked_with(WATER, with(&[LIGHTING]), Some(false), true),
+            Some(Blocked::BuiltInWater)
         );
     }
 

@@ -14,6 +14,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 
 ## Unreleased
 
+- Better Lighting: with an art pack open, Reflective Water says it is always on with the pack's ground.
 - Launcher: the Library holds art packs as it holds data files, and a world's page chooses which the Dereth client draws, or none.
 - Better Lighting: Retail Look and No Slope Materials say so when no art pack is open.
 

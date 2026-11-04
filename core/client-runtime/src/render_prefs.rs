@@ -561,10 +561,14 @@ pub enum FidelityFeature {
     NoAntiAliasing,
     /// `Fidelity.NoSlopeMaterials`.
     NoSlopeMaterials,
+    /// `Fidelity.NoDamp`.
+    NoDamp,
     /// `Fidelity.VSync`.
     VSync,
     /// `Fidelity.Hdr`.
     Hdr,
+    /// `Fidelity.DepthMapping`.
+    DepthMapping,
     /// `Fidelity.Debug`.
     Debug,
 }
@@ -572,7 +576,7 @@ pub enum FidelityFeature {
 #[cfg(feature = "hifi")]
 impl FidelityFeature {
     /// Every option, in the order the names list them.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::Lighting,
         Self::Shadows,
         Self::GlobalIllumination,
@@ -583,8 +587,10 @@ impl FidelityFeature {
         Self::RetailLook,
         Self::NoAntiAliasing,
         Self::NoSlopeMaterials,
+        Self::NoDamp,
         Self::VSync,
         Self::Hdr,
+        Self::DepthMapping,
         Self::Debug,
     ];
 
@@ -602,8 +608,10 @@ impl FidelityFeature {
             Self::RetailLook => fidelity::RETAIL_LOOK,
             Self::NoAntiAliasing => fidelity::NO_ANTI_ALIASING,
             Self::NoSlopeMaterials => fidelity::NO_SLOPE_MATERIALS,
+            Self::NoDamp => fidelity::NO_DAMP,
             Self::VSync => fidelity::VSYNC,
             Self::Hdr => fidelity::HDR,
+            Self::DepthMapping => fidelity::DEPTH_MAPPING,
             Self::Debug => fidelity::DEBUG,
         }
     }
@@ -616,27 +624,35 @@ impl FidelityFeature {
     }
 
     /// The highest value the option takes: 4 for an effect (Ultra), 1 for the switches that
-    /// turn something off (the retail look's, the anti-aliasing's, the slope materials') and the
-    /// presentation choices, the last view for the diagnostic views.
+    /// turn something off (the retail look's, the anti-aliasing's, the slope materials', the
+    /// damp's) and the presentation choices, 3 for depth mapping's levels, the last view for the
+    /// diagnostic views.
     #[must_use]
     pub const fn max(self) -> u32 {
         match self {
             Self::Debug => 7,
+            Self::DepthMapping => 3,
             Self::RetailLook
             | Self::NoAntiAliasing
             | Self::NoSlopeMaterials
+            | Self::NoDamp
             | Self::VSync
             | Self::Hdr => 1,
             _ => 4,
         }
     }
 
-    /// What the option holds where the profile names nothing, when it is not 0: a box's default.
+    /// What the option holds where the profile names nothing, when it is not 0: a box's default,
+    /// or the Depth Mapping menu's.
     #[must_use]
     pub fn default_value(self) -> Option<u32> {
-        dereth_client_contract::options::fidelity::find(self.name())
-            .filter(|b| b.on_by_default)
-            .map(|_| 1)
+        use dereth_client_contract::options as o;
+        match self {
+            Self::DepthMapping => u32::try_from(o::depth_mapping::DEFAULT).ok(),
+            _ => o::fidelity::find(self.name())
+                .filter(|b| b.on_by_default)
+                .map(|_| 1),
+        }
     }
 
     /// `raw` as this option stores it: an effect past Ultra is Ultra; a diagnostic view past the
@@ -680,6 +696,16 @@ impl FidelityPreferences {
             let raw = match feature {
                 // The view a diagnostic run asks for, by number.
                 FidelityFeature::Debug => prefs.u32(feature.name()),
+                // A level by its name or number, or the box it once was.
+                FidelityFeature::DepthMapping => prefs
+                    .get(feature.name())
+                    .and_then(|v| {
+                        dereth_client_contract::options::depth_mapping::parse_value(
+                            feature.name(),
+                            v,
+                        )
+                    })
+                    .and_then(|v| u32::try_from(v).ok()),
                 // A box the page ticked; a number the file holds otherwise (from an older
                 // build) is not read, as the page does not read it.
                 _ => prefs.bool(feature.name()).map(u32::from),
@@ -724,7 +750,8 @@ impl FidelityPreferences {
 
     /// Whether any option is on in effect. Without one the presentation is not installed. The
     /// switches that turn something off (the retail look's, the anti-aliasing's, the slope
-    /// materials') and the presentation choices draw nothing of their own, so they alone are none.
+    /// materials', the damp's) and the presentation choices draw nothing of their own, so they
+    /// alone are none.
     #[must_use]
     pub fn any_effective(&self) -> bool {
         FidelityFeature::ALL
@@ -736,6 +763,7 @@ impl FidelityPreferences {
                         FidelityFeature::RetailLook
                             | FidelityFeature::NoAntiAliasing
                             | FidelityFeature::NoSlopeMaterials
+                            | FidelityFeature::NoDamp
                     )
             })
             .any(|f| self.effective(f) != 0)
@@ -961,6 +989,26 @@ mod tests {
             4,
             "the stored value is kept"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "hifi")]
+    fn the_depth_mapping_level_is_read_by_name_or_number_and_a_ticked_box_is_high() {
+        let read = |v: &str| {
+            FidelityPreferences::from_preferences(&Preferences::parse(&format!(
+                "[UI]\nInterface=Horizon\n[Fidelity]\nDepthMapping={v}\nNoDamp=True\n"
+            )))
+        };
+        assert_eq!(read("Medium").effective(FidelityFeature::DepthMapping), 2);
+        assert_eq!(read("1").effective(FidelityFeature::DepthMapping), 1);
+        assert_eq!(read("True").effective(FidelityFeature::DepthMapping), 3);
+        assert_eq!(read("9").effective(FidelityFeature::DepthMapping), 0);
+        assert_eq!(read("Off").effective(FidelityFeature::NoDamp), 1);
+        assert!(
+            !read("Off").any_effective(),
+            "turning the damp off draws nothing of its own"
+        );
+        assert!(read("Low").any_effective());
     }
 
     /// Behaviour: hifi.options.the-fidelity-section-reaches-the-render-preferences

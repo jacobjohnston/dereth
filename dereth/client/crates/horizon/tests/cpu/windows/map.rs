@@ -4,6 +4,7 @@
 
 use std::sync::{Arc, OnceLock};
 
+use dereth_client_contract::UiRequest;
 use dereth_horizon::art::Art;
 use dereth_horizon::draw::{DrawList, Rect};
 use dereth_horizon::options::HorizonOptions;
@@ -21,6 +22,13 @@ fn player() -> GameState {
         in_world: true,
         name: "Tester".into(),
         ..GameState::default()
+    }
+}
+
+fn administrator() -> GameState {
+    GameState {
+        is_admin: true,
+        ..player()
     }
 }
 
@@ -80,13 +88,14 @@ fn wheel(h: &mut Harness, state: &GameState, at: (f32, f32), notches: f32) {
     h.frame(state);
 }
 
-fn click(h: &mut Harness, state: &GameState, at: (f32, f32)) {
+fn click(h: &mut Harness, state: &GameState, at: (f32, f32)) -> Vec<UiRequest> {
     h.move_to(at.0, at.1);
     h.frame(state);
     h.press();
-    h.frame(state);
+    let mut out = h.frame(state).requests;
     h.release();
-    h.frame(state);
+    out.extend(h.frame(state).requests);
+    out
 }
 
 #[test]
@@ -144,6 +153,27 @@ fn a_drag_pans_a_zoomed_map_and_the_whole_picture_stays_put() {
     let k = view.shown().w / area.w;
     assert!((view.centre.0 - (was.0 + 40.0 * k)).abs() < 0.5);
     assert!((view.centre.1 - (was.1 + 20.0 * k)).abs() < 0.5);
+}
+
+#[test]
+fn a_teleport_from_a_zoomed_map_goes_to_the_place_under_the_pointer() {
+    let (state, art) = (administrator(), Arc::new(Art::empty()));
+    let (mut h, area) = opened(&art, &state);
+    wheel(&mut h, &state, middle(area), 6.0);
+    let b = h.ui.windows.admin.map_button.expect("the button");
+    click(&mut h, &state, middle(b));
+    let holtburg = map_pixel(42.2, 33.8);
+    h.ui.windows.map_view.centre = holtburg;
+    let at = h.ui.windows.map_view.on_screen(area, holtburg);
+    let sent = click(&mut h, &state, at);
+    let lines: Vec<_> = sent
+        .iter()
+        .filter_map(|r| match r {
+            UiRequest::ChatLineOnBehalf { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines, ["@tele 42.2n,33.8e"]);
 }
 
 /// The quads drawn from picture `key` this frame.
@@ -218,11 +248,12 @@ fn tiles_are_drawn_for_a_close_view_one_a_frame_and_let_go_when_the_map_closes()
     assert!(art.lookup(OVERVIEW_KEY).is_some(), "and the whole kept");
 }
 
-/// A player's zoomed map shows the major towns and the houses, and not the portals.
+/// A player's zoomed map shows the major towns and the houses; an administrator's also marks the
+/// portals.
 #[test]
-fn a_player_sees_the_towns_and_houses() {
+fn a_player_sees_the_towns_and_houses_and_an_administrator_every_place() {
     let art = built_in();
-    let state = player();
+    let mut state = player();
     let (mut h, _) = opened(&art, &state);
     h.ui.windows.map_view.zoom = 12.0;
     h.ui.windows.map_view.centre = map_pixel(42.2, 33.8);
@@ -242,4 +273,9 @@ fn a_player_sees_the_towns_and_houses() {
         "the cottages about Holtburg"
     );
     assert_eq!(marks(&h, PlaceKind::Portal), 0);
+
+    state.is_admin = true;
+    h.frame(&state);
+    assert_eq!(icons(&h), 1);
+    assert!(marks(&h, PlaceKind::Portal) > 0, "its portals");
 }

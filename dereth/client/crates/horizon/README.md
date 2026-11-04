@@ -31,9 +31,10 @@ other two, it draws the screens before the world at the window's own size.
   Ctrl+Shift+A, or Admin on the System menu. Its tabs (Players, Travel, Target, Myself, Spawn and
   World) are buttons and boxes that send the chat commands an administrator would otherwise type,
   and Commands searches the rest. The line sent and the server's replies show at its foot, and
-  what is hard to undo takes a second press. Their map also has a Teleport button: press it, then
-  click where to go. Commands that carry a password, and those the server
-  answers only at its console, stay at the launcher's or server's console.
+  what is hard to undo takes a second press. Their map marks them with an arrow pointing straight
+  down, its tip on the place, and has a Teleport button: press it, then click where to go.
+  Commands that carry a password, and those the server answers only at its console, stay at the
+  launcher's or server's console.
 - **The map** (M). The wheel zooms about the pointer, the buttons under it zoom about the player
   and go back to the whole picture, and a drag pans. It is the same for every character.
 - **Hotbar 1** is the shortcut bar. Click a shortcut to use it, drag it to another slot to move it,

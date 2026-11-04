@@ -18,6 +18,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Horizon: a new, far more detailed world map, drawn from the game's own files in the original
   map's colours, with every major town marked and named on it, and the cottages, villas and
   mansions as you zoom in. The wheel zooms in on it and a drag pans around it.
+- Horizon: an administrator's map marks them with an arrow pointing straight down at where they stand.
 
 ## 0.4.12 (2026-11-03)
 

@@ -73,6 +73,14 @@ const MARK_REACH: f32 = 6.0;
 /// A mark's side, in layout units.
 const MARK_SIDE: f32 = 5.0;
 
+/// An administrator's arrow, on the screen at this many layout units tall.
+const ARROW_UNITS: f32 = 30.0;
+/// The arrow's picture's side, in its pixels.
+const ARROW_SIDE: u32 = 64;
+/// The arrow's corners in its picture, from its tip, which points straight down at the middle of
+/// the bottom edge but for a margin for its edge's filter.
+const ARROW: [(f32, f32); 4] = [(32.0, 62.0), (10.0, 4.0), (32.0, 18.0), (54.0, 4.0)];
+
 /// The pixel of the picture that `ns`, `ew` falls on.
 #[must_use]
 pub fn map_pixel(ns: f64, ew: f64) -> (f32, f32) {
@@ -370,6 +378,59 @@ fn image(pixels: Pixels) -> Image {
     }
 }
 
+/// The arrow's picture: red, in a white edge that shows on every ground the map has.
+fn arrow_image() -> Image {
+    let side = ARROW_SIDE as usize;
+    let mut bgra = vec![0; side * side * 4];
+    // Distance from `(x, y)` to the arrow's edge, negative inside.
+    let distance = |x: f32, y: f32| {
+        let mut nearest = f32::MAX;
+        let mut inside = false;
+        for (i, &(ax, ay)) in ARROW.iter().enumerate() {
+            let (bx, by) = ARROW[(i + 1) % ARROW.len()];
+            let (dx, dy) = (bx - ax, by - ay);
+            let t = (((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+            let (ox, oy) = (x - ax - t * dx, y - ay - t * dy);
+            nearest = nearest.min(ox * ox + oy * oy);
+            if (ay > y) != (by > y) && x < ax + (y - ay) / dy * dx {
+                inside = !inside;
+            }
+        }
+        let d = nearest.sqrt();
+        if inside {
+            -d
+        } else {
+            d
+        }
+    };
+    for (i, px) in bgra.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        #[allow(clippy::cast_precision_loss)] // LINT-OK: within the picture's few pixels.
+        let d = distance((i % side) as f32 + 0.5, (i / side) as f32 + 0.5);
+        let red = ((-d - 4.0) + 0.5).clamp(0.0, 1.0);
+        let cover = (0.5 - d).clamp(0.0, 1.0);
+        let blend = |white: f32, fill: f32| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            // LINT-OK: a colour channel, clamped to its range above.
+            {
+                (white * (1.0 - red) + fill * red) as u8
+            }
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        // LINT-OK: a coverage in 0..1 scaled to a byte.
+        px.copy_from_slice(&[
+            blend(255.0, 32.0),
+            blend(255.0, 32.0),
+            blend(255.0, 224.0),
+            (cover * 255.0) as u8,
+        ]);
+    }
+    Image {
+        width: ARROW_SIDE,
+        height: ARROW_SIDE,
+        bgra,
+    }
+}
+
 /// A town's icon: a castle on a gold disc in a dark rim, drawn at [`TOWN_SIDE`] a side.
 #[must_use]
 pub fn town_icon() -> Image {
@@ -496,7 +557,7 @@ impl Windows {
             p.list.pop_clip();
         }
         if let Some((n, e)) = state.coords {
-            self.map_player(p, area, (n, e));
+            self.map_player(p, state, area, (n, e));
             let style =
                 TextStyle::new(Family::Body, 14.0, ctx.colours.text()).edge(ctx.colours.edge());
             let label = coords_text(n, e);
@@ -751,13 +812,24 @@ impl Windows {
         }
     }
 
-    /// Where the player is, when that is in view: the game's mark.
-    fn map_player(&self, p: &mut Painter<'_>, area: Rect, at: (f32, f32)) {
+    /// Where the player is, when that is in view: the game's mark, or for an administrator an
+    /// arrow pointing straight down with its tip on the very place.
+    fn map_player(&self, p: &mut Painter<'_>, state: &GameState, area: Rect, at: (f32, f32)) {
         let (x, y) = map_pixel(f64::from(at.0), f64::from(at.1));
         if !self.map_view.shown().contains(x, y) {
             return;
         }
         let (px, py) = self.map_view.on_screen(area, (x, y));
+        if state.is_admin {
+            if let Some(arrow) = p.art.cached("map.arrow", || Some(arrow_image())) {
+                let side = ARROW_UNITS * p.scale;
+                #[allow(clippy::cast_precision_loss)]
+                let tip = ARROW[0].1 / ARROW_SIDE as f32 * side;
+                let dst = Rect::new(px - side / 2.0, py - tip, side, side);
+                p.sprite(&arrow, dst, WHITE);
+            }
+            return;
+        }
         let s = 12.0 * p.scale;
         match p.art.ac_icon(graphic::PLAYER_ICON.0) {
             Some(icon) => p.sprite(&icon, Rect::new(px - s, py - s, 2.0 * s, 2.0 * s), WHITE),

@@ -21,6 +21,11 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Enhanced Graphics: a Quality Preset menu, from a light Low to a full Ultra, and the settings start at Medium. VSync and HDR Output are new.
 - Enhanced Graphics Mode: it always draws the best texture filtering and detail, models that hold their detail, and frames on the display's refresh unless VSync is off, whatever the Graphics settings say.
 - Enhanced Graphics Mode: Screen Brightness scales the whole picture alike.
+- Better Lighting: dungeon flames take their outdoor look and warm the rooms; fire pits and basins hold pulsing embers; lanterns light from within; an art pack's models in rooms take the room's lights.
+- Better Lighting: flames now flicker the way fire does, each at its own pace, a candle faster than a bonfire, and shadows sway with them. No Flame Flicker holds them steady. Glowing orbs, crystals and lamp glass hold steady.
+- Better Lighting: the flat, hard-edged sprites of light are gone, in favour of real light in their colour, and shadows from a room's lights now have soft edges.
+- Better Lighting: an art pack can give an object a light of its own, shining day and night with a soft glow in the air about it.
+- Better Lighting: Light Draw Distance chooses how far lamps, flames and art pack lights shine and glow, from 0.5x to 5x, and they now fade out in the distance instead of going out at once.
 
 ## 0.4.12 (2026-11-03)
 

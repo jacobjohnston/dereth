@@ -968,10 +968,16 @@ impl SceneDraw {
             if hifi_bridge::lamps_drawn(gpu) {
                 for block in self.blocks.values_mut() {
                     block.hifi_lamps.place(store);
+                    for cell in &mut block.env_cells {
+                        cell.lamps.place(store);
+                    }
                 }
             } else if applied.changed {
                 for block in self.blocks.values_mut() {
                     block.hifi_lamps.forget();
+                    for cell in &mut block.env_cells {
+                        cell.lamps.forget();
+                    }
                 }
             }
         }

@@ -626,6 +626,12 @@ struct EnvCellDraw {
     /// the second.
     statics: Vec<StaticBatch>,
     statics_blended: Vec<StaticBatch>,
+    /// The statics the art pack has models for, block-local: baked apart from the rest.
+    #[cfg(feature = "hifi")]
+    art_pack: Vec<crate::art_pack::PackPlacement>,
+    /// The lamps of its statics, for their flames' halos.
+    #[cfg(feature = "hifi")]
+    lamps: hifi_lamps::BlockLamps,
     /// This cell's degrading static placements. Per cell rather than per block,
     /// because the batches are.
     degrade: Vec<DegradePlacement>,

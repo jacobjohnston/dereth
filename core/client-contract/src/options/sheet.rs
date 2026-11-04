@@ -1026,8 +1026,8 @@ const CLIENT_SHARED: [Heading; 5] = [
 const CLIENT: [Heading; 5] = CLIENT_SHARED;
 
 /// With the optional high-fidelity presentation built in, the Client Options page ends with its
-/// twelve boxes under a heading of their own, on the Horizon interface's page alone: it is the only
-/// interface the presentation draws under.
+/// thirteen boxes and its Light Draw Distance under a heading of their own, on the Horizon
+/// interface's page alone: it is the only interface the presentation draws under.
 #[cfg(feature = "hifi")]
 const CLIENT: [Heading; 6] = {
     let s = CLIENT_SHARED;
@@ -1045,10 +1045,10 @@ const CLIENT: [Heading; 6] = {
     ]
 };
 
-/// The twelve boxes, each at its default and on the Horizon page alone: the two switches, then how
-/// frames reach the display, then the effects.
+/// The thirteen boxes and the Light Draw Distance, each at its default and on the Horizon page
+/// alone: the two switches, then how frames reach the display, then the effects.
 #[cfg(feature = "hifi")]
-const FIDELITY_ROWS: [Row; 12] = [
+const FIDELITY_ROWS: [Row; 14] = [
     fidelity_box(0),
     fidelity_box(1),
     fidelity_box(8),
@@ -1058,6 +1058,18 @@ const FIDELITY_ROWS: [Row; 12] = [
     fidelity_box(3),
     fidelity_box(4),
     fidelity_box(5),
+    only(
+        Shown::Only(Interface::Horizon),
+        noted(
+            super::light_distance::NOTE,
+            pref(
+                super::light_distance::CAPTION,
+                Value::Menu(crate::options::names::fidelity::LIGHT_DRAW_DISTANCE),
+                Int(super::light_distance::DEFAULT),
+            ),
+        ),
+    ),
+    fidelity_box(12),
     fidelity_box(6),
     fidelity_box(7),
     fidelity_box(9),
@@ -1319,7 +1331,8 @@ mod tests {
     }
 
     /// The experimental rendering effects' boxes are on the Horizon interface's Client page
-    /// alone, last, under their own heading, each at its default; the classic and the modern
+    /// alone, last, under their own heading, each at its default, with the Light Draw Distance
+    /// among them at its default; the classic and the modern
     /// interfaces' pages are exactly the shared headings', row for row; and a build without the
     /// effects has no such heading anywhere.
     ///
@@ -1342,7 +1355,7 @@ mod tests {
         if cfg!(feature = "hifi") {
             let (heading, rows) = horizon.last().expect("Horizon's Client page has headings");
             assert_eq!(heading.title, fidelity::HEADING);
-            assert_eq!(rows.len(), fidelity::OPTIONS.len());
+            assert_eq!(rows.len(), fidelity::OPTIONS.len() + 1);
             for o in &fidelity::OPTIONS {
                 let row = rows
                     .iter()
@@ -1355,6 +1368,18 @@ mod tests {
             // The two switches first.
             assert_eq!(rows[0].value, Value::Check(fidelity::OPTIONS[0].name));
             assert_eq!(rows[1].value, Value::Check(fidelity::OPTIONS[1].name));
+            let menu = rows
+                .iter()
+                .find(|r| {
+                    r.value == Value::Menu(crate::options::names::fidelity::LIGHT_DRAW_DISTANCE)
+                })
+                .expect("the Light Draw Distance");
+            assert_eq!(menu.caption, crate::options::light_distance::CAPTION);
+            assert_eq!(
+                menu.default,
+                Some(Int(crate::options::light_distance::DEFAULT))
+            );
+            assert_eq!(menu.shown, Shown::Only(Interface::Horizon));
             // The rest of Horizon's page is the shared headings'.
             let rest: Vec<&Row> = horizon[..horizon.len() - 1]
                 .iter()

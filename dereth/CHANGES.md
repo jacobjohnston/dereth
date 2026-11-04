@@ -15,6 +15,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 ## Unreleased
 
 - macOS: Command takes the place of Control for shortcuts, copy and paste among them, and the key bindings pages show it as Cmd.
+- Horizon: an administrator has an Admin window (Ctrl+Shift+A, or Admin on the System menu) whose buttons send the server's admin commands, and a Teleport button on the map.
 
 ## 0.4.12 (2026-11-03)
 

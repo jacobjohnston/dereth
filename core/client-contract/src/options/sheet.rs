@@ -745,7 +745,8 @@ const CLIENT_SHARED: [Heading; 5] = [
             ),
             only(
                 Shown::Only(Interface::Horizon),
-                noted(
+                // Offered where registered: in a build with the high-fidelity presentation.
+                hosted(noted(
                     super::weather_sound::NOTE,
                     pref(
                         super::weather_sound::CAPTION,
@@ -755,7 +756,7 @@ const CLIENT_SHARED: [Heading; 5] = [
                         },
                         Bool(true),
                     ),
-                ),
+                )),
             ),
             pref(
                 "Interface Sounds",

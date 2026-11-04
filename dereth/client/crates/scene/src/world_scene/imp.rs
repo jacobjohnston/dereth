@@ -34,6 +34,9 @@ mod bake_worker;
 #[path = "cells.rs"]
 mod cells;
 #[cfg(feature = "hifi")]
+#[path = "distant_trees.rs"]
+mod distant_trees;
+#[cfg(feature = "hifi")]
 #[path = "drawn_ground.rs"]
 mod drawn_ground;
 #[cfg(feature = "hifi")]
@@ -42,6 +45,9 @@ mod far_trees;
 #[cfg(feature = "hifi")]
 #[path = "forest_cover.rs"]
 mod forest_cover;
+#[cfg(feature = "hifi")]
+#[path = "ground_cover.rs"]
+mod ground_cover;
 #[cfg(feature = "hifi")]
 #[path = "hifi_bridge.rs"]
 mod hifi_bridge;
@@ -1148,6 +1154,13 @@ pub struct SceneDraw {
     /// The art pack's trees far off, while the presentation draws them.
     #[cfg(feature = "hifi")]
     far: far_trees::FarTrees,
+    /// The art pack's plants over the land near the viewer, while the presentation draws them.
+    #[cfg(feature = "hifi")]
+    ground_cover: ground_cover::GroundCover,
+    /// The art pack's trees past the blocks whose own objects stand in the world, while the
+    /// player asks for them.
+    #[cfg(feature = "hifi")]
+    distant_trees: distant_trees::DistantTrees,
     /// The four generated detail surfaces and their tiling values.
     detail: dereth_world_render::detail::DetailTexturing,
     /// The device texture each generated detail surface wraps, loaded from database type

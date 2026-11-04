@@ -1026,8 +1026,8 @@ const CLIENT_SHARED: [Heading; 5] = [
 const CLIENT: [Heading; 5] = CLIENT_SHARED;
 
 /// With the optional high-fidelity presentation built in, the Client Options page ends with its
-/// ten boxes under a heading of their own, on the Horizon interface's page alone: it is the only
-/// interface the presentation draws under.
+/// eleven boxes and its two draw distances under a heading of their own, on the Horizon
+/// interface's page alone: it is the only interface the presentation draws under.
 #[cfg(feature = "hifi")]
 const CLIENT: [Heading; 6] = {
     let s = CLIENT_SHARED;
@@ -1045,9 +1045,10 @@ const CLIENT: [Heading; 6] = {
     ]
 };
 
-/// The ten boxes, each off by default and on the Horizon page alone.
+/// The eleven boxes, each off by default, and the draw distances, each whole by default; all on
+/// the Horizon page alone.
 #[cfg(feature = "hifi")]
-const FIDELITY_ROWS: [Row; 10] = [
+const FIDELITY_ROWS: [Row; 13] = [
     fidelity_box(0),
     fidelity_box(1),
     fidelity_box(2),
@@ -1058,6 +1059,29 @@ const FIDELITY_ROWS: [Row; 10] = [
     fidelity_box(7),
     fidelity_box(8),
     fidelity_box(9),
+    fidelity_box(10),
+    only(
+        Shown::Only(Interface::Horizon),
+        noted(
+            super::draw_distance::TREE_NOTE,
+            pref(
+                super::draw_distance::TREE_CAPTION,
+                Value::Menu(crate::options::names::fidelity::TREE_DRAW_DISTANCE),
+                Int(super::draw_distance::TREE_DEFAULT),
+            ),
+        ),
+    ),
+    only(
+        Shown::Only(Interface::Horizon),
+        noted(
+            super::draw_distance::GROUND_COVER_NOTE,
+            pref(
+                super::draw_distance::GROUND_COVER_CAPTION,
+                Value::Menu(crate::options::names::fidelity::GROUND_COVER_DRAW_DISTANCE),
+                Int(super::draw_distance::GROUND_COVER_DEFAULT),
+            ),
+        ),
+    ),
 ];
 
 /// The row of the `i`th box.
@@ -1313,7 +1337,8 @@ mod tests {
     }
 
     /// The experimental rendering effects' boxes are on the Horizon interface's Client page
-    /// alone, last, under their own heading, each off by default; the classic and the modern
+    /// alone, last, under their own heading, each off by default, with the draw distances after
+    /// them, whole by default; the classic and the modern
     /// interfaces' pages are exactly the shared headings', row for row; and a build without the
     /// effects has no such heading anywhere.
     ///
@@ -1336,11 +1361,20 @@ mod tests {
         if cfg!(feature = "hifi") {
             let (heading, rows) = horizon.last().expect("Horizon's Client page has headings");
             assert_eq!(heading.title, fidelity::HEADING);
-            assert_eq!(rows.len(), fidelity::OPTIONS.len());
+            assert_eq!(rows.len(), fidelity::OPTIONS.len() + 2);
             for (row, o) in rows.iter().zip(fidelity::OPTIONS.iter()) {
                 assert_eq!(row.value, Value::Check(o.name));
                 assert_eq!(row.caption, o.caption);
                 assert_eq!(row.default, Some(Bool(false)), "{}", o.name);
+                assert_eq!(row.shown, Shown::Only(Interface::Horizon));
+            }
+            let menus = &rows[fidelity::OPTIONS.len()..];
+            for (row, name) in menus.iter().zip([
+                crate::options::names::fidelity::TREE_DRAW_DISTANCE,
+                crate::options::names::fidelity::GROUND_COVER_DRAW_DISTANCE,
+            ]) {
+                assert_eq!(row.value, Value::Menu(name));
+                assert_eq!(row.default, Some(Int(100)), "{name}");
                 assert_eq!(row.shown, Shown::Only(Interface::Horizon));
             }
             // The rest of Horizon's page is the shared headings'.

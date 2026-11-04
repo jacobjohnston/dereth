@@ -1402,11 +1402,14 @@ fn sheet_lines(page: PageId, state: &GameState) -> Vec<Line> {
     out
 }
 
-/// The preference of `row` when it is one of the experimental effects' boxes.
+/// The preference of `row` when it is one of the experimental effects' boxes, or their draw
+/// distances.
 #[cfg(feature = "hifi")]
 fn effect_box(row: &Row) -> Option<&'static str> {
+    use dereth_client_contract::options::draw_distance;
     match row.value {
         Value::Check(name) if fidelity::find(name).is_some() => Some(name),
+        Value::Menu(name) if draw_distance::is_a_distance(name) => Some(name),
         _ => None,
     }
 }

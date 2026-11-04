@@ -147,8 +147,7 @@ pub mod fidelity {
     /// second.
     pub const DYNAMIC_RESOLUTION: &str = "Fidelity.DynamicResolution";
     /// `Fidelity.RenderScale`: the share of the frame's pixels the better lighting draws the world
-    /// at, each way, percent, or 1 for Dynamic; on macOS MetalFX rebuilds the picture at the
-    /// frame's size.
+    /// at, each way, percent, or 1 for Dynamic; the picture is rebuilt at the frame's size.
     pub const RENDER_SCALE: &str = "Fidelity.RenderScale";
     /// `Fidelity.Debug`: a diagnostic view, set only by `--set-at`: 0 Off, 1 Passthrough,
     /// 2 Depth, 3 Normals, 4 AO, 5 Shadows, 6 Census, 7 Parity (re-shaded with no pass).

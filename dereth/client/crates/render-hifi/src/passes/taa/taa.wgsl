@@ -8,6 +8,10 @@
 // back the crispness the blend takes.
 //
 // The history is kept squeezed; the picture handed on is linear light again.
+//
+// At a render scale the blend can rebuild the picture at the frame's size instead (`fs_upscale`):
+// the history is the frame's size, each pixel takes the drawn pixels round where it falls, and
+// what the history held is dropped where it saw something nearer than the surface now there.
 
 struct Taa {
     // The world viewport: x, y, width, height, in target pixels.
@@ -26,6 +30,11 @@ struct Taa {
     // This frame's unjittered normalised device coordinates and depth to the last frame's clip
     // space, the same point of the world.
     reproject: mat4x4<f32>,
+    // The size the picture is rebuilt at, pixels, and its reciprocal.
+    output: vec4<f32>,
+    // x and y the near and far planes; z how much nearer, a share of the distance, a history
+    // must have stood to be dropped; w the rebuilt picture's sharpening.
+    upscale: vec4<f32>,
 };
 
 @group(0) @binding(0) var current: texture_2d<f32>;
@@ -35,6 +44,8 @@ struct Taa {
 @group(0) @binding(4) var lin: sampler;
 @group(0) @binding(5) var<uniform> taa: Taa;
 @group(0) @binding(6) var before_alpha: texture_2d<f32>;
+// The distance of what each pixel of the rebuilt history showed.
+@group(0) @binding(7) var history_distance: texture_2d<f32>;
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -96,7 +107,13 @@ fn motion_at(p: vec2<i32>) -> vec2<f32> {
 // The history at `uv` (the viewport's units), through a Catmull-Rom filter of five bilinear
 // samples, so following the motion does not blur it; `w` how many frames it holds.
 fn history_at(uv: vec2<f32>) -> vec4<f32> {
-    let at = (taa.viewport.xy + uv * taa.viewport.zw) - vec2<f32>(0.5);
+    return history_in(uv, taa.viewport, taa.size.zw);
+}
+
+// As `history_at`, for a history covering `area` (x, y, width, height) of a target whose texel
+// is `texel`.
+fn history_in(uv: vec2<f32>, area: vec4<f32>, texel: vec2<f32>) -> vec4<f32> {
+    let at = (area.xy + uv * area.zw) - vec2<f32>(0.5);
     let base = floor(at);
     let f = at - base;
     let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
@@ -105,11 +122,11 @@ fn history_at(uv: vec2<f32>) -> vec4<f32> {
     let w3 = f * f * (-0.5 + 0.5 * f);
     let w12 = w1 + w2;
     let o12 = w2 / w12;
-    let lo = taa.viewport.xy + vec2<f32>(0.5);
-    let hi = taa.viewport.xy + taa.viewport.zw - vec2<f32>(0.5);
-    let t0 = clamp(base - vec2<f32>(0.5), lo, hi) * taa.size.zw;
-    let t3 = clamp(base + vec2<f32>(2.5), lo, hi) * taa.size.zw;
-    let t12 = clamp(base + vec2<f32>(0.5) + o12, lo, hi) * taa.size.zw;
+    let lo = area.xy + vec2<f32>(0.5);
+    let hi = area.xy + area.zw - vec2<f32>(0.5);
+    let t0 = clamp(base - vec2<f32>(0.5), lo, hi) * texel;
+    let t3 = clamp(base + vec2<f32>(2.5), lo, hi) * texel;
+    let t12 = clamp(base + vec2<f32>(0.5) + o12, lo, hi) * texel;
     var c = textureSampleLevel(history, lin, vec2<f32>(t12.x, t0.y), 0.0) * (w12.x * w0.y);
     c = c + textureSampleLevel(history, lin, vec2<f32>(t0.x, t12.y), 0.0) * (w0.x * w12.y);
     c = c + textureSampleLevel(history, lin, vec2<f32>(t12.x, t12.y), 0.0) * (w12.x * w12.y);
@@ -212,6 +229,137 @@ fn fs_sharpen(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
     let hi = max(c, max(max(n, s), max(e, w)));
     let sharp = c + (c * 4.0 - n - s - e - w) * (taa.tune.x * 0.25);
     return vec4<f32>(unsqueeze(clamp(sharp, lo, hi)), 1.0);
+}
+
+// The distance of a depth `d` from the eye.
+fn distance_of(d: f32) -> f32 {
+    let n = taa.upscale.x;
+    let f = taa.upscale.y;
+    return n * f / max(f - d * (f - n), 1e-6);
+}
+
+// The distance the surface at drawn pixel `p` stood at in the last frame, as the camera moved;
+// below zero where it moved of itself.
+fn last_distance_at(p: vec2<i32>) -> f32 {
+    if (textureLoad(motion, p, 0).w > 0.5) {
+        return -1.0;
+    }
+    let d = textureLoad(depth, p, 0);
+    let uv = (vec2<f32>(p) + vec2<f32>(0.5) - taa.viewport.xy) / taa.viewport.zw;
+    let now = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0) - taa.jitter.xy;
+    let last = taa.reproject * vec4<f32>(now, d, 1.0);
+    if (last.w <= 1e-6) {
+        return -1.0;
+    }
+    return distance_of(last.z / last.w);
+}
+
+struct Rebuilt {
+    @location(0) colour: vec4<f32>,
+    @location(1) distance: vec4<f32>,
+};
+
+// The blend at the frame's size. Each pixel takes the drawn pixels round the place it falls on,
+// weighted by how near their jittered samples stand, and the history followed to it as in
+// `fs_resolve`; how much the current frame counts goes by how near its nearest sample stood, so
+// the history fills over the jitter's sequence. The history is dropped where it held something
+// nearer than the surface now seen there stood in the last frame: what the surface was hidden
+// behind. Writes the history squeezed, with how many frames' worth it holds in `w`, and the
+// distance of the nearest surface round the pixel.
+@fragment
+fn fs_upscale(@builtin(position) p: vec4<f32>) -> Rebuilt {
+    let drawn = taa.viewport.zw;
+    let uv = p.xy * taa.output.zw;
+    let at = taa.viewport.xy + uv * drawn;
+    // Drawn pixel q's sample stands at q + 0.5 + shift in the unjittered picture.
+    let shift = vec2<f32>(-taa.jitter.x, taa.jitter.y) * drawn * 0.5;
+    let middle = vec2<i32>(floor(at - shift));
+    let per_drawn = taa.output.xy / drawn;
+    var sum = vec3<f32>(0.0);
+    var weight = 0.0;
+    var hit = 0.0;
+    var m1 = vec3<f32>(0.0);
+    var m2 = vec3<f32>(0.0);
+    var lo = vec3<f32>(1e9);
+    var hi = vec3<f32>(-1e9);
+    var nearest = 2.0;
+    var nearest_at = middle;
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let q = inside(middle + vec2<i32>(x, y));
+            let c = current_at(q);
+            let off = vec2<f32>(q) + vec2<f32>(0.5) + shift - at;
+            let w = exp(-2.29 * dot(off, off));
+            sum = sum + c * w;
+            weight = weight + w;
+            let o = off * per_drawn;
+            hit = max(hit, exp(-2.29 * dot(o, o)));
+            m1 = m1 + c;
+            m2 = m2 + c * c;
+            lo = min(lo, c);
+            hi = max(hi, c);
+            let d = textureLoad(depth, q, 0);
+            if (d < nearest) {
+                nearest = d;
+                nearest_at = q;
+            }
+        }
+    }
+    let centre = sum / max(weight, 1e-4);
+    var out: Rebuilt;
+    out.distance = vec4<f32>(distance_of(nearest), 0.0, 0.0, 0.0);
+    let moved = motion_at(nearest_at);
+    let last = uv - moved;
+    var kept = taa.jitter.z;
+    if (any(last < vec2<f32>(0.0)) || any(last > vec2<f32>(1.0))) {
+        kept = 0.0;
+    }
+    // Hidden in the last frame: every history pixel round where the surface stood held
+    // something nearer.
+    let was = last_distance_at(nearest_at);
+    if (kept > 0.5 && was > 0.0) {
+        let top = vec2<i32>(taa.output.xy) - vec2<i32>(1);
+        let corner = vec2<i32>(floor(last * taa.output.xy - vec2<f32>(0.5)));
+        var farthest = 0.0;
+        for (var j = 0; j < 4; j = j + 1) {
+            let t = clamp(corner + vec2<i32>(j & 1, j >> 1u), vec2<i32>(0), top);
+            farthest = max(farthest, textureLoad(history_distance, t, 0).x);
+        }
+        if (farthest < was * (1.0 - taa.upscale.z)) {
+            kept = 0.0;
+        }
+    }
+    // Fewer frames held the faster the surface moves across the frame.
+    let pixels = length(moved * taa.output.xy);
+    let steady = mix(taa.jitter.w, taa.tune.y, clamp(pixels / max(taa.tune.z, 1e-3), 0.0, 1.0));
+    let most = 1.0 / max(steady, 1e-3);
+    let mean = m1 / 9.0;
+    let spread = sqrt(max(m2 / 9.0 - mean * mean, vec3<f32>(0.0)));
+    let box_lo = max(lo, mean - spread * 1.25);
+    let box_hi = min(hi, mean + spread * 1.25);
+    let held = history_in(last, vec4<f32>(vec2<f32>(0.0), taa.output.xy), taa.output.zw);
+    let h = clip_into(box_lo, box_hi, to_ycocg(held.rgb));
+    let frames = min(held.w, most) * kept;
+    var share = hit / max(frames + hit, 1e-4);
+    let translucent = textureLoad(motion, inside(middle), 0).z;
+    share = max(share, clamp(translucent * taa.tune.w, 0.0, 1.0));
+    if (kept < 0.5) {
+        share = 1.0;
+    }
+    let held_now = min(frames + hit, most);
+    if (taa.show.x > 0.5) {
+        out.colour = vec4<f32>(share * 0.5, held_now / most * 0.5, translucent * 0.5, held_now);
+        return out;
+    }
+    out.colour = vec4<f32>(from_ycocg(mix(h, centre, share)), held_now);
+    return out;
+}
+
+// The rebuilt history back to linear light, sharpened by its contrast.
+@fragment
+fn fs_upscale_sharpen(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
+    let top = vec2<i32>(taa.output.xy) - vec2<i32>(1);
+    return vec4<f32>(unsqueeze(rcas(current, vec2<i32>(p.xy), top, taa.upscale.w)), 1.0);
 }
 
 struct UpscaleInputs {

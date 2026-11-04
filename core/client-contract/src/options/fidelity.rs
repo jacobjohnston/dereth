@@ -16,8 +16,9 @@
 //!
 //! Two menus follow the switches: the Render Scale, the share of the frame's pixels the better
 //! lighting draws the world at, or Dynamic, and the frame rate a Dynamic render scale holds
-//! ([`super::dynamic_resolution`]). On macOS MetalFX rebuilds a picture drawn at fewer pixels at the
-//! frame's size; elsewhere it is enlarged.
+//! ([`super::dynamic_resolution`]). A picture drawn at fewer pixels is rebuilt at the frame's size
+//! from the frames before it: by MetalFX on macOS, by the better lighting's own anti-aliasing
+//! elsewhere.
 //!
 //! The effects start on. The enhanced graphics' quality presets set several of them at once
 //! ([`PRESET_VALUES`]), and the defaults of the boxes and the menus are the Medium preset's.
@@ -194,9 +195,10 @@ pub const SCALE_NOTE: &str = "Draws the world at this share of the screen's pixe
 
 /// What the render scale does, for the row's tooltip.
 #[cfg(not(target_os = "macos"))]
-pub const SCALE_NOTE: &str = "Draws the world at this share of the screen's pixels and enlarges \
-                              the picture to fill the screen: faster, softer. Dynamic lowers it \
-                              to hold a frame rate. It changes at once.";
+pub const SCALE_NOTE: &str = "Draws the world at this share of the screen's pixels and rebuilds \
+                              the picture to fill the screen from the frames before it: faster, a \
+                              little softer. Dynamic lowers it to hold a frame rate. It changes at \
+                              once.";
 
 /// The render scale value of a Dynamic render scale.
 #[allow(clippy::cast_possible_wrap)] // a small constant

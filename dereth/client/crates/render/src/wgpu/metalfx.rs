@@ -3,7 +3,7 @@
 //! Each frame the scaler takes the picture drawn at fewer pixels, its depth and how far each pixel
 //! moved, and rebuilds the picture at the frame's size from those and the frames before it. Only
 //! Metal has it: anywhere else no scaler is made ([`TemporalScaler::new`]) and the presentation
-//! enlarges its picture as it always has.
+//! rebuilds its picture with upscalers of its own.
 //!
 //! `wgpu` does not allow raw commands and its own in one encoder, so a scale is a submission of its
 //! own ([`TemporalScaler::encode`]), and everything drawn before it must have been submitted.

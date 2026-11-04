@@ -126,7 +126,7 @@ pub const OPTIONS: [FidelityOption; 11] = [
         caption: "No Wind",
         note: "Holds an art pack's trees and plants still instead of letting the wind move them. \
                It changes at once.",
-        needs: Needs::Lighting,
+        needs: Needs::ArtPack,
     },
 ];
 
@@ -200,7 +200,7 @@ pub fn blocked_with(
     pack: bool,
 ) -> Option<Blocked> {
     let needs = if super::draw_distance::is_a_distance(name) {
-        Needs::Lighting
+        Needs::ArtPack
     } else {
         find(name)?.needs
     };
@@ -505,12 +505,20 @@ mod tests {
     }
 
     #[test]
-    fn the_wind_box_and_the_draw_distances_need_the_better_lighting() {
+    fn the_wind_box_and_the_draw_distances_need_the_better_lighting_and_an_art_pack() {
         use fidelity::{GROUND_COVER_DRAW_DISTANCE, LIGHTING, NO_WIND, TREE_DRAW_DISTANCE};
+        // With an art pack open, whose trees and plants they move and draw.
+        let blocked = |name, ticked, rays| blocked_with(name, ticked, rays, true);
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         for name in [NO_WIND, TREE_DRAW_DISTANCE, GROUND_COVER_DRAW_DISTANCE] {
             assert_eq!(blocked(name, with(&[]), None), Some(Blocked::NeedsLighting));
             assert_eq!(blocked(name, with(&[LIGHTING]), Some(false)), None);
+            // Without one there is nothing to move or draw.
+            assert_eq!(
+                blocked_with(name, with(&[LIGHTING]), None, false),
+                Some(Blocked::NeedsArtPack),
+                "{name}"
+            );
         }
         assert!(find(TREE_DRAW_DISTANCE).is_none(), "the menu is no box");
     }

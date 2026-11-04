@@ -1489,9 +1489,14 @@ pub fn hdr_copy(
     encoder: &mut wgpu::CommandEncoder,
 ) -> Result<wgpu::TextureView, HifiError> {
     let (width, height) = cx.surface_size();
+    let (picture, scratch) = if cx.upscaled() {
+        (ResourceName::UpscaledHdr, ResourceName::UpscaledScratchHdr)
+    } else {
+        (ResourceName::SceneHdr, ResourceName::ScratchHdr)
+    };
     let copy = resources.texture(
         cx.device(),
-        ResourceName::ScratchHdr,
+        scratch,
         TextureSpec {
             width,
             height,
@@ -1499,10 +1504,9 @@ pub fn hdr_copy(
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         },
     )?;
-    let (Some(Resource::Texture(from, _)), Some(Resource::Texture(to, _))) = (
-        resources.get(ResourceName::SceneHdr),
-        resources.get(ResourceName::ScratchHdr),
-    ) else {
+    let (Some(Resource::Texture(from, _)), Some(Resource::Texture(to, _))) =
+        (resources.get(picture), resources.get(scratch))
+    else {
         return Err(HifiError::NotReady("no re-shaded picture to copy"));
     };
     encoder.copy_texture_to_texture(

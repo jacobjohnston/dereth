@@ -4,7 +4,8 @@
 //! At a render scale under a hundred percent the presentation draws its world at that share of
 //! the frame's pixels each way, so the work of every pass that works per pixel falls with the
 //! square of it, and enlarges the picture to fill the frame: the frame shows the same place as at
-//! full scale, nothing shifted and nothing cut off, only softer.
+//! full scale, nothing shifted and nothing cut off, only softer. On macOS MetalFX does the
+//! enlarging, and the frame goes on at its full size after it.
 //!
 //! Fixture: the retail dats (`DERETH_TEST_DAT_DIR`) and a hardware `wgpu` device.
 
@@ -19,13 +20,19 @@ use crate::instruments::hifi_stations::{self, capture, Shot};
 
 const W: u32 = 960;
 const H: u32 = 540;
+/// The effects a frame is drawn with.
+const FIDELITY: &str = "Lighting=1,Shadows=1,AmbientOcclusion=1,Sky=1";
 /// Frames the station is stepped before its frame is taken.
 const STEPS: usize = 24;
 
 fn device() -> Gpu {
+    device_of(W, H)
+}
+
+fn device_of(width: u32, height: u32) -> Gpu {
     let cfg = DeviceConfig {
-        width: W,
-        height: H,
+        width,
+        height,
         hifi: true,
         ..DeviceConfig::default()
     };
@@ -52,8 +59,7 @@ fn town(percent: u32) -> (Vec<u8>, SidecarReport) {
     gpu.hifi_set_render_scale(percent);
     let mut shot = Shot::open(&store, &mut gpu, &station);
     shot.scene.draw.cfg.render.fidelity =
-        FidelityPreferences::parse_switch("Lighting=1,Shadows=1,AmbientOcclusion=1,Sky=1")
-            .expect("a fidelity spec");
+        FidelityPreferences::parse_switch(FIDELITY).expect("a fidelity spec");
     shot.scene
         .update_from_preferences(&store, &mut gpu)
         .expect("the preferences poll");
@@ -172,4 +178,157 @@ fn the_world_drawn_at_two_thirds_fills_the_frame_where_the_full_picture_stands()
         mean_of(&edge),
         mean_of(&full_edge)
     );
+}
+
+/// On macOS the frame is upscaled by MetalFX at a render scale and not at a hundred percent, and
+/// the world is still drawn at the share it was asked for.
+#[cfg(target_os = "macos")]
+#[test]
+fn at_a_render_scale_metalfx_rebuilds_the_picture_and_at_a_hundred_percent_it_does_not() {
+    let _gpu = crate::common::gpu_lock();
+    let (_, scaled) = town(50);
+    assert_eq!(note(&scaled, "upscaled by MetalFX"), 1, "{scaled:?}");
+    assert_eq!(note(&scaled, "world drawn width"), u64::from(W / 2));
+    let (_, full) = town(100);
+    assert_eq!(note(&full, "upscaled by MetalFX"), 0, "{full:?}");
+}
+
+/// The scale can change between any two frames, as the options page changes it: the presentation
+/// goes on drawing, and at each share its picture fills the frame.
+#[test]
+fn the_render_scale_changes_between_frames_without_the_presentation_failing() {
+    let _gpu = crate::common::gpu_lock();
+    let store = crate::common::dats();
+    let station = hifi_stations::stations(&store)
+        .into_iter()
+        .find(|s| s.name == "holtburg")
+        .expect("the town's station");
+    let mut gpu = device();
+    let mut shot = Shot::open(&store, &mut gpu, &station);
+    shot.scene.draw.cfg.render.fidelity =
+        FidelityPreferences::parse_switch(FIDELITY).expect("a fidelity spec");
+    shot.scene
+        .update_from_preferences(&store, &mut gpu)
+        .expect("the preferences poll");
+    for percent in [100, 67, 50, 100, 75, 50] {
+        gpu.hifi_set_render_scale(percent);
+        for _ in 0..6 {
+            shot.step(&mut gpu);
+            assert!(gpu.hifi_settle(std::time::Duration::from_secs(60)));
+        }
+        let report = gpu.hifi_report().expect("the presentation is installed");
+        assert!(report.composited, "at {percent}%: {report:?}");
+        assert_eq!(gpu.hifi_failed(), None, "at {percent}%");
+        let frame = capture(&mut gpu);
+        let bright = frame.chunks_exact(4).filter(|p| p[1] > 8).count();
+        assert!(
+            bright * 10 > frame.len() / 4 * 9,
+            "at {percent}% the frame is dark"
+        );
+    }
+}
+
+/// How `a` differs from `b`, RGBA frames of one size: their peak signal to noise ratio, decibels.
+fn psnr(a: &[u8], b: &[u8]) -> f64 {
+    let sum: u64 = a
+        .iter()
+        .zip(b)
+        .map(|(x, y)| u64::from(x.abs_diff(*y)).pow(2))
+        .sum();
+    #[allow(clippy::cast_precision_loss)] // a mean over a frame
+    let mean = sum as f64 / a.len() as f64;
+    10.0 * (255.0f64 * 255.0 / mean.max(1e-9)).log10()
+}
+
+/// How much detail an RGBA frame `width` pixels across holds: the mean square of the green
+/// channel's difference between neighbours.
+fn detail(rgba: &[u8], width: usize) -> f64 {
+    let green: Vec<i32> = rgba.chunks_exact(4).map(|p| i32::from(p[1])).collect();
+    let sum: i64 = green
+        .windows(2)
+        .step_by(1)
+        .enumerate()
+        .filter(|(i, _)| (i + 1) % width != 0)
+        .map(|(_, w)| i64::from((w[0] - w[1]).pow(2)))
+        .sum();
+    #[allow(clippy::cast_precision_loss)] // a mean over a frame
+    let mean = sum as f64 / green.len() as f64;
+    mean
+}
+
+/// MetalFX against the plain enlarging and the full picture, the camera still and moving: each
+/// frame's likeness to the full picture and the detail it holds, and the frames as files in
+/// `DERETH_HIFI_CAPTURE_DIR`. `DERETH_HIFI_SIZE` is `WxH` (default 1920x1080). It asserts nothing.
+#[test]
+#[ignore = "instrument: compares; look at its frames"]
+fn compare_the_upscalers() {
+    let _gpu = crate::common::gpu_lock();
+    let store = crate::common::dats();
+    let station = hifi_stations::stations(&store)
+        .into_iter()
+        .find(|s| s.name == "holtburg")
+        .expect("the town's station");
+    let (width, height) = std::env::var("DERETH_HIFI_SIZE")
+        .ok()
+        .and_then(|s| {
+            let (w, h) = s.split_once('x')?;
+            Some((w.parse().ok()?, h.parse().ok()?))
+        })
+        .unwrap_or((1920, 1080));
+    let out = std::path::PathBuf::from(
+        std::env::var("DERETH_HIFI_CAPTURE_DIR").unwrap_or_else(|_| "upscalers".to_owned()),
+    );
+    std::fs::create_dir_all(&out).expect("the frames' folder");
+    let shoot = |percent: u32, upscaler: &str, jitter: &str, metres: f32| {
+        std::env::set_var("DERETH_HIFI_UPSCALER", upscaler);
+        std::env::set_var("DERETH_HIFI_METALFX_JITTER", jitter);
+        let mut gpu = device_of(width, height);
+        gpu.hifi_set_render_scale(percent);
+        let mut shot = Shot::open(&store, &mut gpu, &station);
+        shot.scene.draw.cfg.render.fidelity =
+            FidelityPreferences::parse_switch(FIDELITY).expect("a fidelity spec");
+        shot.scene
+            .update_from_preferences(&store, &mut gpu)
+            .expect("the preferences poll");
+        for _ in 0..48 {
+            shot.scene.camera.position.x += metres;
+            shot.step(&mut gpu);
+            assert!(gpu.hifi_settle(std::time::Duration::from_secs(60)));
+        }
+        let report = gpu.hifi_report().expect("the presentation is installed");
+        assert_eq!(gpu.hifi_failed(), None);
+        (capture(&mut gpu), note(&report, "upscaled by MetalFX"))
+    };
+    for (motion, metres) in [("still", 0.0), ("moving", 0.1)] {
+        let (full, _) = shoot(100, "", "1", metres);
+        hifi_stations::write_png(
+            &out.join(format!("{motion}-full.png")),
+            width,
+            height,
+            &full,
+        );
+        #[allow(clippy::cast_possible_truncation)] // a row's width
+        let across = width as usize;
+        eprintln!("{motion} full: detail {:.1}", detail(&full, across));
+        for (name, percent, upscaler, jitter) in [
+            ("metalfx-67", 67, "", "1"),
+            ("plain-67", 67, "plain", "1"),
+            ("metalfx-50", 50, "", "1"),
+            ("metalfx-50-jitter-flipped", 50, "", "-1"),
+            ("plain-50", 50, "plain", "1"),
+        ] {
+            let (frame, upscaled) = shoot(percent, upscaler, jitter, metres);
+            hifi_stations::write_png(
+                &out.join(format!("{motion}-{name}.png")),
+                width,
+                height,
+                &frame,
+            );
+            eprintln!(
+                "{motion} {name}: psnr {:.2} dB, detail {:.1}, upscaled {upscaled}",
+                psnr(&frame, &full),
+                detail(&frame, across),
+            );
+        }
+    }
 }

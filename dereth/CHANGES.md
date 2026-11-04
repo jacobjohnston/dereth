@@ -18,6 +18,9 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: the water has waves as large as it is, the sea's swell and surf, a lake's chop and hardly any on a river; foam gathers along the shore and on the crests, and the sun's light ripples over a shallow bed.
 - Better Lighting: near the camera, a body moving through the water stirs it, and the waves spread, cross, meet the shore and die away. Graphics without compute shaders draw the water without them.
 - Better Lighting: far water is no longer a glassy mirror. Its reflections soften and stretch with distance, and the sun's glitter spreads wider, as on rippled water.
+- Weather: about one rainy day in eight is now a thunderstorm on your screen, with lightning and its thunder rolling in a few seconds later, a gale that slants heavier rain across the sky, and darker clouds. It is drawn by this client alone; @weather storm (or /weather storm) brings one on at any time.
+- Weather Sounds: rain now patters and hisses, harder in a storm with the wind roaring in its gusts and muffled indoors, made as it plays so it never repeats. A new Weather Sounds row in the sound options sets how loud the rain, the wind and the thunder are.
+
 ## 0.4.12 (2026-11-03)
 
 - Launcher: you can add a world by its address in Auberean's realm too.

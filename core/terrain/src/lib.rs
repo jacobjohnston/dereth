@@ -28,6 +28,7 @@
 
 pub mod buildings;
 pub mod consts;
+pub mod ground_cover;
 pub mod land;
 pub mod math;
 pub mod narrow;

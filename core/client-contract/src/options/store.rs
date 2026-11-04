@@ -403,6 +403,12 @@ const CUSTOM_ENUMS: &[CustomEnum] = &[
         format: super::render_scale::convert_to_string,
         choices: super::render_scale::choice_rows,
     },
+    CustomEnum {
+        recognizes: super::draw_distance::is_a_distance,
+        parse: super::draw_distance::parse_value,
+        format: super::draw_distance::convert_to_string,
+        choices: super::draw_distance::choice_rows,
+    },
 ];
 
 fn custom_enum(name: &str) -> Option<&'static CustomEnum> {
@@ -1206,7 +1212,7 @@ mod tests {
         #[cfg(not(feature = "hifi"))]
         assert_eq!(len(), 48);
         #[cfg(feature = "hifi")]
-        assert_eq!(len(), 48 + super::super::fidelity::OPTIONS.len());
+        assert_eq!(len(), 48 + super::super::fidelity::OPTIONS.len() + 2);
         // The registration defaults are in force before any file is read.
         assert_eq!(
             inq_value("Input.MouseLookSensitivity"),

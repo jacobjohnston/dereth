@@ -16,6 +16,7 @@
 //! [[model]]
 //! id = "0x02000258"          # a setup (0x02...) or a graphics object (0x01...)
 //! foliage = true             # its cut-out materials are growth: two-sided, lit through
+//! wind = 1.0                 # how much the wind moves it, 0 to 2; 1 for growth, otherwise 0
 //! author = "..."
 //! tool = "..."
 //! license = "..."
@@ -97,6 +98,30 @@
 //!
 //! Only `texture`, `base_color` and the credit are required.
 //!
+//! A pack may also plant ground cover: plants retail never places, scattered over the terrain
+//! types each kind grows on. They are pictures alone: nothing collides with them. A kind's levels
+//! are a model's, and its last names how far from the eye the plant is drawn at all.
+//!
+//! ```toml
+//! [[ground_cover]]
+//! ground = [1, 9]            # the retail terrain types (0 to 31) it grows on
+//! density = 0.5              # plants a square metre
+//! scale = [0.8, 1.3]         # the smallest and the largest it is scaled by; 1 unless named
+//! steepest = 40.0            # the steepest slope it grows on, degrees; 40 unless named
+//! foliage = true             # as a model's; true unless named
+//! author = "..."
+//! tool = "..."
+//! license = "..."
+//!
+//! [[ground_cover.lod]]
+//! file = "grass/lod0.gltf"
+//! distance = 30.0
+//!
+//! [[ground_cover.lod]]
+//! file = "grass/lod1.gltf"
+//! distance = 70.0
+//! ```
+//!
 //! This module reads the manifest only. The models and their pictures are read by whatever
 //! draws them.
 
@@ -107,6 +132,10 @@ pub const FORMAT: i64 = 1;
 
 /// The manifest's file name at the top of a pack's folder.
 pub const MANIFEST_FILE: &str = "manifest.toml";
+
+/// The number the first kind of ground cover's model is known by, the kinds after it counting up:
+/// it stands for no retail object, and no retail object's id reaches it.
+pub const GROUND_COVER_IDS: u32 = 0xC000_0000;
 
 /// A pack's manifest.
 #[derive(Debug, Clone, PartialEq)]
@@ -119,6 +148,24 @@ pub struct ArtPackManifest {
     pub grounds: Vec<ManifestGround>,
     /// Its materials for retail pictures, in the order the manifest lists them.
     pub materials: Vec<ManifestMaterial>,
+    /// The kinds of plant it lays over the land. Each kind's model is among [`Self::models`], after
+    /// the models for retail objects, under the id the kind names.
+    pub ground_cover: Vec<ManifestGroundCover>,
+}
+
+/// One kind of plant a pack lays over the land.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManifestGroundCover {
+    /// The number its model is known by, from [`GROUND_COVER_IDS`].
+    pub id: DataId,
+    /// The retail terrain types it grows on, each 0 to 31.
+    pub grounds: Vec<u8>,
+    /// How many plants a square metre.
+    pub density: f32,
+    /// The smallest and the largest it is scaled by.
+    pub scale: (f32, f32),
+    /// The steepest slope it grows on, degrees.
+    pub steepest: f32,
 }
 
 /// One material drawn in place of retail pictures: the pictures it stands for and its own.
@@ -188,6 +235,8 @@ pub struct ManifestModel {
     /// sides and lit through from behind as well as from the front. Its other materials (a
     /// trunk) are ordinary surfaces.
     pub foliage: bool,
+    /// How much the wind moves it: 0 not at all, 1 as much as growth of its height moves.
+    pub wind: f32,
     /// Who made it, with what, and under which license.
     pub credit: Credit,
 }
@@ -247,7 +296,9 @@ impl ArtPackManifest {
     /// out; or a ground material is: a ground that is not a terrain type or the road, a ground
     /// two materials claim, no base color, or a size that is not a positive number; or a
     /// material for retail pictures is: a picture that is not a texture record, a picture two
-    /// materials claim, no base color, or a picture path outside the pack.
+    /// materials claim, no base color, or a picture path outside the pack; or a kind of ground
+    /// cover is: a ground that is not a terrain type, a density, scale or slope out of range, or a
+    /// last level with no distance or pictures for a level.
     pub fn parse(text: &str) -> Result<Self, ManifestError> {
         let table: toml::Table = match text.parse() {
             Ok(t) => t,
@@ -331,11 +382,28 @@ impl ArtPackManifest {
             }
             materials.push(material);
         }
+        let listed = match table.get("ground_cover") {
+            None => &empty,
+            Some(toml::Value::Array(a)) => a,
+            Some(_) => return fail("`ground_cover` is not a list of [[ground_cover]] tables"),
+        };
+        let mut ground_cover: Vec<ManifestGroundCover> = Vec::with_capacity(listed.len());
+        for (i, c) in listed.iter().enumerate() {
+            let Some(c) = c.as_table() else {
+                return fail(format!("ground cover {} is not a table", i + 1));
+            };
+            let id = DataId(GROUND_COVER_IDS + u32::try_from(i).unwrap_or(u32::MAX >> 2));
+            let (kind, model) = kind_of_cover(c, id)
+                .map_err(|e| ManifestError(format!("ground cover {}: {}", i + 1, e.0)))?;
+            ground_cover.push(kind);
+            models.push(model);
+        }
         Ok(Self {
             name,
             models,
             grounds,
             materials,
+            ground_cover,
         })
     }
 
@@ -549,15 +617,113 @@ fn material(t: &toml::Table) -> Result<ManifestMaterial, ManifestError> {
     })
 }
 
-fn model(t: &toml::Table) -> Result<ManifestModel, ManifestError> {
-    let id = object_id(t.get("id").and_then(toml::Value::as_str).unwrap_or(""))?;
-    let foliage = match t.get("foliage") {
-        None => false,
-        Some(v) => match v.as_bool() {
-            Some(b) => b,
-            None => return fail("foliage is not true or false"),
+/// The number at `key`, whole or not.
+fn number(t: &toml::Table, key: &str) -> Result<Option<f32>, ManifestError> {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    // A small number from a manifest, well inside both types' range.
+    match t.get(key) {
+        None => Ok(None),
+        Some(toml::Value::Float(f)) => Ok(Some(*f as f32)),
+        Some(toml::Value::Integer(i)) => Ok(Some(*i as f32)),
+        Some(_) => fail(format!("{key} is not a number")),
+    }
+}
+
+/// One kind of ground cover and its model, known by `id`.
+fn kind_of_cover(
+    t: &toml::Table,
+    id: DataId,
+) -> Result<(ManifestGroundCover, ManifestModel), ManifestError> {
+    let grounds = grounds_of(t.get("ground"))?
+        .into_iter()
+        .map(|g| match g {
+            Ground::Type(t) => Ok(t),
+            Ground::Road => fail("nothing grows on the road"),
+        })
+        .collect::<Result<Vec<u8>, ManifestError>>()?;
+    let Some(density) = number(t, "density")? else {
+        return fail("no density");
+    };
+    if !(density > 0.0 && density <= 16.0) {
+        return fail(format!("density {density} is not above 0 and at most 16"));
+    }
+    let scale = match t.get("scale") {
+        None => (1.0, 1.0),
+        Some(toml::Value::Array(a)) => {
+            let at = |k: usize| {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+                // A small number from a manifest, well inside both types' range.
+                a.get(k).and_then(|v| {
+                    v.as_float()
+                        .map(|f| f as f32)
+                        .or_else(|| v.as_integer().map(|i| i as f32))
+                })
+            };
+            match (a.len(), at(0), at(1)) {
+                (2, Some(lo), Some(hi)) => (lo, hi),
+                _ => return fail("scale is not two numbers"),
+            }
+        }
+        Some(_) => match number(t, "scale")? {
+            Some(s) => (s, s),
+            None => return fail("scale is not a number"),
         },
     };
+    if !(scale.0 > 0.0 && scale.0 <= scale.1 && scale.1.is_finite()) {
+        return fail(format!("scale {scale:?} does not grow from above 0"));
+    }
+    let steepest = number(t, "steepest")?.unwrap_or(40.0);
+    if !(steepest > 0.0 && steepest <= 90.0) {
+        return fail(format!("steepest {steepest} is not above 0 and at most 90"));
+    }
+    let foliage = flag(t, "foliage", true)?;
+    let model = model_known_as(t, id, foliage)?;
+    if model.lods.iter().any(|l| l.views.is_some()) {
+        return fail("a level is pictures of the model, which ground cover does not draw");
+    }
+    if model
+        .lods
+        .iter()
+        .rfind(|l| !l.shadows_only)
+        .is_none_or(|l| l.distance.is_none())
+    {
+        return fail("its last level names no distance, and it is drawn near the eye alone");
+    }
+    Ok((
+        ManifestGroundCover {
+            id,
+            grounds,
+            density,
+            scale,
+            steepest,
+        },
+        model,
+    ))
+}
+
+/// The true or false at `key`, `otherwise` where there is none.
+fn flag(t: &toml::Table, key: &str, otherwise: bool) -> Result<bool, ManifestError> {
+    match t.get(key) {
+        None => Ok(otherwise),
+        Some(v) => match v.as_bool() {
+            Some(b) => Ok(b),
+            None => fail(format!("{key} is not true or false")),
+        },
+    }
+}
+
+fn model(t: &toml::Table) -> Result<ManifestModel, ManifestError> {
+    let id = object_id(t.get("id").and_then(toml::Value::as_str).unwrap_or(""))?;
+    let foliage = flag(t, "foliage", false)?;
+    model_known_as(t, id, foliage)
+}
+
+/// The model a table describes, its levels and its credit, known by `id`.
+fn model_known_as(
+    t: &toml::Table,
+    id: DataId,
+    foliage: bool,
+) -> Result<ManifestModel, ManifestError> {
     let credit = Credit {
         author: text(t, "author")?.to_owned(),
         tool: text(t, "tool")?.to_owned(),
@@ -660,10 +826,15 @@ fn model(t: &toml::Table) -> Result<ManifestModel, ManifestError> {
             shadows_only,
         });
     }
+    let wind = number(t, "wind")?.unwrap_or(if foliage { 1.0 } else { 0.0 });
+    if !(0.0..=2.0).contains(&wind) {
+        return fail(format!("wind {wind} is not from 0 to 2"));
+    }
     Ok(ManifestModel {
         id,
         lods,
         foliage,
+        wind,
         credit,
     })
 }
@@ -705,6 +876,129 @@ license = "CC0-1.0"
 [[model.lod]]
 file = "rock.gltf"
 "#;
+
+    const COVER: &str = r#"
+[pack]
+name = "Meadow"
+format = 1
+
+[[model]]
+id = "0x02000258"
+author = "Someone"
+tool = "A generator"
+license = "CC0-1.0"
+
+[[model.lod]]
+file = "tree.gltf"
+
+[[ground_cover]]
+ground = [1, 9]
+density = 0.5
+scale = [0.8, 1.3]
+steepest = 30
+author = "Someone"
+tool = "A generator"
+license = "CC0-1.0"
+
+[[ground_cover.lod]]
+file = "grass/lod0.gltf"
+distance = 30.0
+
+[[ground_cover.lod]]
+file = "grass/lod1.gltf"
+distance = 70.0
+
+[[ground_cover]]
+ground = 3
+density = 1
+author = "Someone"
+tool = "A generator"
+license = "CC0-1.0"
+
+[[ground_cover.lod]]
+file = "fern.gltf"
+distance = 40.0
+"#;
+
+    #[test]
+    fn ground_cover_lists_its_kinds_and_each_kinds_model_follows_the_models_for_retail_objects() {
+        let m = ArtPackManifest::parse(COVER).expect("reads");
+        assert_eq!(m.ground_cover.len(), 2);
+        let grass = &m.ground_cover[0];
+        assert_eq!(grass.id, DataId(GROUND_COVER_IDS));
+        assert_eq!(grass.grounds, [1, 9]);
+        assert_eq!(grass.density, 0.5);
+        assert_eq!(grass.scale, (0.8, 1.3));
+        assert_eq!(grass.steepest, 30.0);
+        let fern = &m.ground_cover[1];
+        assert_eq!(fern.id, DataId(GROUND_COVER_IDS + 1));
+        assert_eq!(fern.grounds, [3]);
+        assert_eq!(fern.scale, (1.0, 1.0), "no scale named");
+        assert_eq!(fern.steepest, 40.0, "no slope named");
+        assert_eq!(m.models.len(), 3);
+        assert_eq!(m.models[0].id, DataId(0x0200_0258));
+        assert_eq!(m.models[1].id, grass.id);
+        assert_eq!(m.models[2].id, fern.id);
+        assert!(
+            !m.models[0].foliage,
+            "a model's foliage is off unless named"
+        );
+        assert!(m.models[1].foliage, "a plant's is on unless named");
+        assert_eq!(m.models[1].lods[1].distance, Some(70.0));
+    }
+
+    #[test]
+    fn a_model_is_moved_by_the_wind_as_it_asks_and_growth_is_moved_unless_it_says_otherwise() {
+        let m = ArtPackManifest::parse(COVER).expect("reads");
+        assert_eq!(m.models[0].wind, 0.0, "not growth");
+        assert_eq!(m.models[1].wind, 1.0, "growth");
+        let still = COVER.replacen("id = \"0x02000258\"", "id = \"0x02000258\"\nwind = 0.5", 1);
+        assert_eq!(
+            ArtPackManifest::parse(&still).expect("reads").models[0].wind,
+            0.5
+        );
+        let wild = COVER.replacen("id = \"0x02000258\"", "id = \"0x02000258\"\nwind = 3", 1);
+        assert!(ArtPackManifest::parse(&wild).is_err());
+    }
+
+    #[test]
+    fn ground_cover_that_cannot_be_drawn_is_refused_and_says_why() {
+        for (from, to, why) in [
+            ("ground = [1, 9]", r#"ground = ["road"]"#, "road"),
+            ("ground = [1, 9]", "ground = [32]", "terrain type"),
+            ("density = 0.5", "density = 0", "density"),
+            ("density = 0.5", "density = 17", "density"),
+            (
+                "density = 0.5
+",
+                "",
+                "no density",
+            ),
+            ("scale = [0.8, 1.3]", "scale = [1.3, 0.8]", "scale"),
+            ("scale = [0.8, 1.3]", "scale = [1.3]", "scale"),
+            ("steepest = 30", "steepest = 91", "steepest"),
+            (
+                "distance = 70.0
+",
+                "",
+                "no distance",
+            ),
+            (
+                "distance = 70.0",
+                "distance = 70.0
+views = 8",
+                "pictures",
+            ),
+        ] {
+            let text = COVER.replacen(from, to, 1);
+            assert_ne!(text, COVER, "{from}");
+            let e = ArtPackManifest::parse(&text).expect_err(why);
+            assert!(
+                e.0.contains("ground cover 1") && e.0.contains(why),
+                "{why}: {e}"
+            );
+        }
+    }
 
     #[test]
     fn a_manifest_lists_each_model_with_its_levels_its_lighting_and_its_credit() {

@@ -447,6 +447,7 @@ fn ground_knobs(k: &Knobs) -> HifiGroundKnobs {
             waves: k.get(Knob::WaterWaves),
             foam: k.get(Knob::WaterFoam),
             caustics: k.get(Knob::WaterCaustics),
+            rain: k.get(Knob::WaterRain),
         }),
         // LINT-OK: a view number, 0 to 4.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

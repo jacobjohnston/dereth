@@ -173,6 +173,8 @@ pub enum Knob {
     WaterFoam,
     /// How brightly the sun's light ripples over a shallow bed.
     WaterCaustics,
+    /// How strongly the rain's drops stir the water.
+    WaterRain,
     /// A diagnostic view.
     View,
     /// How much an art pack's lit surfaces count in the outdoor exposure.
@@ -293,7 +295,7 @@ const fn switch(
 }
 
 /// How many knobs there are.
-pub const KNOB_COUNT: usize = 106;
+pub const KNOB_COUNT: usize = 107;
 
 /// Every knob, in [`Knob`]'s order.
 pub const KNOBS: [KnobSpec; KNOB_COUNT] = [
@@ -377,6 +379,7 @@ pub const KNOBS: [KnobSpec; KNOB_COUNT] = [
     num(Knob::WaterWaves, "water_waves", 1.0, (0.0, 3.0), "", "water", "how large the waves run: on the sea most, on a lake by how far it reaches, on a river hardly at all; 0 leaves only the ripples"),
     num(Knob::WaterFoam, "water_foam", 1.0, (0.0, 3.0), "", "water", "how much foam the water gathers along its shore, in the surf rolling in from the sea and on the crests of its larger waves: 0 none"),
     num(Knob::WaterCaustics, "water_caustics", 1.0, (0.0, 3.0), "", "water", "how brightly the sun's light, bent by the surface, ripples over a shallow bed: 0 none"),
+    num(Knob::WaterRain, "water_rain", 1.0, (0.0, 3.0), "", "water", "how strongly the rain's drops stir the water they fall on near the eye: 0 not at all"),
     num(Knob::View, "view", 0.0, (0.0, 4.0), "", "views", "a diagnostic view: 1 the offset (red raised, blue lowered, 1 m full), 2 the pins (magenta pinned), 3 retail's slope (pale under 20 degrees, olive, yellow, orange to 48.4, magenta unwalkable), 4 walkable and unwalkable ground"),
     num(Knob::PackExposure, "pack_exposure", 1.0, (0.0, 1.0), "", "light", "how much an art pack's models' lit surfaces and its materials count, against the world's own surfaces, when the outdoor exposure is held to the ordinary picture"),
     num(Knob::LeafExposure, "leaf_exposure", 0.1, (0.0, 1.0), "", "light", "how much an art pack's leaves count there: their crowns' own shading darkens them where the old light knows nothing of it, and counted wholly a dense crown would raise the whole frame"),

@@ -41,6 +41,12 @@ pub const BODIES: usize = 8;
 const CENTER_WITHIN: f32 = 30.0;
 /// How far a body may move from one frame to the next and still be the same body, meters.
 const FOLLOW: f32 = 1.5;
+/// How many drops land a second on a square meter of water in full rain.
+const DROPS: f32 = 6.0;
+/// How deep a drop dents the water, meters, in full rain.
+const DROP_DEPTH: f32 = 0.02;
+/// The rain's lattice, meters a patch: the shader's own.
+const RAIN_PATCH: f32 = 0.4;
 /// The bytes of one step's constants: four vectors, then each body where it starts and ends.
 pub const STEP_BYTES: usize = 16 * 4 + 2 * BODIES * 16;
 /// The stride steps' constants are laid at: a multiple of every device's offset alignment.
@@ -55,7 +61,7 @@ pub struct Sim {
     clock: Option<f64>,
     /// The clock's time not yet stepped, seconds.
     owed: f64,
-    /// Steps run, for the bodies' sway.
+    /// Steps run, for the rain.
     count: u32,
     /// Where each body stood last frame, in the world.
     bodies: Vec<Vec3>,
@@ -85,6 +91,8 @@ pub struct Disturbance<'a> {
     pub bodies: &'a [Vec3],
     /// How strongly a body moving stirs the water: 0 not at all.
     pub stir: f32,
+    /// How much rain falls on the water, 0..1, as strongly as it disturbs it.
+    pub rain: f32,
 }
 
 impl Sim {
@@ -147,6 +155,10 @@ impl Sim {
         // LINT-OK: a cell's side and a few hundred cells.
         #[allow(clippy::cast_precision_loss)]
         let side = f64::from(SIDE) * f64::from(CELL);
+        let rain = d.rain.clamp(0.0, 3.0);
+        // LINT-OK: a step, a sixtieth of a second.
+        #[allow(clippy::cast_possible_truncation)]
+        let chance = (DROPS * rain.min(1.0) * RAIN_PATCH * RAIN_PATCH * STEP as f32).min(1.0);
         for s in 0..steps {
             // The first step clears what it newly holds; the rest hold what it held.
             let held = if s == 0 {
@@ -180,7 +192,12 @@ impl Sim {
             #[allow(clippy::cast_possible_truncation)]
             let step = STEP as f32;
             let pull = GRAVITY * PACE / CELL * step * step;
-            for v in place.into_iter().chain([pull, DAMPING * step, 0.0, 0.0]) {
+            for v in place.into_iter().chain([
+                pull,
+                DAMPING * step,
+                chance * rain.signum(),
+                DROP_DEPTH * rain,
+            ]) {
                 c.extend(v.to_le_bytes());
             }
             // LINT-OK: a few bodies.
@@ -309,6 +326,7 @@ mod tests {
             eye: Vec3::new(0.0, -5.0, 3.0),
             bodies,
             stir: 1.0,
+            rain: 0.0,
         }
     }
 

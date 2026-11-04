@@ -18,8 +18,8 @@
 //! mirrors rather than lying glassy. Over them run waves ([`waves`]) as large as the water is: the
 //! sea's swell and surf, a lake's chop by how far it reaches, hardly any on a river. Through shallow
 //! water the sun's light ripples over the bed. Near the eye the water is simulated ([`sim`]): a
-//! body moving through it stirs it, and its waves spread, cross, meet the shore and die away. The
-//! simulation steps in a compute shader, so a device without compute shaders (WebGL 2) draws the
+//! body moving through it and the rain's drops stir it, and their waves spread, cross, meet the
+//! shore and die away together. The simulation steps in a compute shader, so a device without compute shaders (WebGL 2) draws the
 //! water without it.
 //!
 //! Only pixels change: collision, physics, what can be picked and everything the game reads keep
@@ -39,6 +39,7 @@ use crate::build::Prebuilt;
 use crate::graph::WarmCx;
 use crate::graph::{EncodeCx, HifiPass, PrepareCx};
 use crate::passes::lighting::{legacy_light, CASCADES};
+use crate::passes::weather::{falls, snow_share, Fall};
 use crate::resources::{Resource, ResourceName};
 use crate::shared::camera::{render_from_clip, HEIGHT_UP};
 use crate::shared::fullscreen::{COLOUR_WGSL, FULLSCREEN_WGSL};
@@ -175,6 +176,10 @@ pub struct Water {
     sim: sim::Sim,
     /// Which of the simulation's two pictures holds the water as it stands.
     sim_current: usize,
+    /// How much rain falls, eased as the weather eases it.
+    fall: Fall,
+    /// The clock at the last frame the rain was stepped.
+    fall_clock: Option<f64>,
 }
 
 /// The pass.
@@ -564,6 +569,8 @@ pub struct Inputs {
     pub fogged: bool,
     /// The cascades' side in texels, when they hold this frame's shadow.
     pub cascades: Option<u32>,
+    /// How much rain falls on the water, 0..1.
+    pub rain: f32,
     /// The simulated square in render space, south-west and north-east corners.
     pub sim_area: [f32; 4],
     /// Where render space's origin lies in the world, wrapped to the simulated square's side.
@@ -683,7 +690,7 @@ pub fn constants(
         waves::surf(frame.time),
     ]);
     let foam = as_drawn(frame, Vec3::splat(0.8));
-    c.extend([foam.x, foam.y, foam.z, 0.0]);
+    c.extend([foam.x, foam.y, foam.z, inputs.rain * water.rain]);
     let beam = if sun_up {
         crate::passes::lighting::DayLight::of(frame).sun
     } else {
@@ -703,11 +710,13 @@ fn floats(values: &[f32]) -> Vec<u8> {
 }
 
 /// What the simulated water runs this frame: where its square lies and each step's constants,
-/// stirred by the bodies near the eye. `None` where it is not simulated, which leaves it calm.
+/// stirred by the bodies near the eye and `rain` falling on it. `None` where it is not simulated,
+/// which leaves it calm.
 fn stir(
     state: &mut sim::Sim,
     frame: &HifiFrame,
     water: &HifiWater,
+    rain: f32,
     simulated: bool,
 ) -> Option<sim::Plan> {
     if !simulated {
@@ -736,6 +745,7 @@ fn stir(
         eye,
         bodies: &bodies,
         stir: water.rings,
+        rain: rain * water.rain,
     }))
 }
 
@@ -749,8 +759,28 @@ impl HifiPass for Water {
         notes.push(("retail water colors worked out", self.averaged));
     }
 
-    fn observe(&mut self, _cx: &mut PrepareCx<'_, '_>) {
+    // The rain eases as the weather's own does, on every frame, so it stands as it should the
+    // moment the water is drawn.
+    fn observe(&mut self, cx: &mut PrepareCx<'_, '_>) {
         self.drawn = false;
+        let frame = cx.frame;
+        if cx.settings.weather.is_on() {
+            let dt = self
+                .fall_clock
+                .map_or(0.0, |l| (frame.time - l).clamp(0.0, 0.25));
+            self.fall_clock = Some(frame.time);
+            // LINT-OK: a fraction of a second.
+            #[allow(clippy::cast_possible_truncation)]
+            self.fall.step(
+                falls(frame),
+                snow_share(frame),
+                frame.sky.asked_fall,
+                dt as f32,
+            );
+        } else {
+            self.fall = Fall::default();
+            self.fall_clock = None;
+        }
     }
 
     fn wanted(&self, s: &HifiSettings, f: &HifiFrame, _caps: &Caps) -> bool {
@@ -858,7 +888,8 @@ impl HifiPass for Water {
         .map(|h| as_drawn(cx.frame, h));
         // The simulated water, stepped as far as the clock has run: each step reading one of its
         // pictures and writing the other.
-        let plan = stir(&mut self.sim, cx.frame, &water, gpu.sim.is_some());
+        let rain = self.fall.amount() * (1.0 - self.fall.snow());
+        let plan = stir(&mut self.sim, cx.frame, &water, rain, gpu.sim.is_some());
         if let (Some(plan), Some(sim)) = (&plan, &gpu.sim) {
             for (k, step) in plan.steps.iter().enumerate() {
                 queue.write_buffer(&sim.steps, (k * sim::STEP_STRIDE) as u64, step);
@@ -917,6 +948,7 @@ impl HifiPass for Water {
                 physical_sky,
                 fogged: !(cx.settings.sky.is_on() && cx.frame.sky.outdoor),
                 cascades: cascades.as_ref().map(|(size, _)| *size),
+                rain,
                 sim_area: plan.as_ref().map_or(NO_SIM_AREA, |p| p.area),
                 sim_fold: plan.as_ref().map_or(glam::Vec2::ZERO, |p| p.fold),
             },
@@ -1091,8 +1123,8 @@ mod tests {
             ..HifiFrame::default()
         };
         let mut calm = pass();
-        assert!(stir(&mut calm.sim, &at(10.0), &water, false).is_none());
-        assert!(stir(&mut calm.sim, &at(10.5), &water, false).is_none());
+        assert!(stir(&mut calm.sim, &at(10.0), &water, 0.0, false).is_none());
+        assert!(stir(&mut calm.sim, &at(10.5), &water, 0.0, false).is_none());
         assert_eq!(calm.sim, sim::Sim::default(), "the simulation never ran");
         // Unsimulated, the square covers nothing, so the shader draws none of it.
         let values = constants(
@@ -1104,6 +1136,7 @@ mod tests {
                 physical_sky: 1.0,
                 fogged: false,
                 cascades: None,
+                rain: 0.0,
                 sim_area: NO_SIM_AREA,
                 sim_fold: glam::Vec2::ZERO,
             },
@@ -1114,8 +1147,8 @@ mod tests {
         assert!(x1 <= x0 && y1 <= y0);
         // With compute it steps as the clock runs.
         let mut stirred = pass();
-        assert!(stir(&mut stirred.sim, &at(10.0), &water, true).is_some());
-        let plan = stir(&mut stirred.sim, &at(10.5), &water, true).expect("simulated");
+        assert!(stir(&mut stirred.sim, &at(10.0), &water, 0.0, true).is_some());
+        let plan = stir(&mut stirred.sim, &at(10.5), &water, 0.0, true).expect("simulated");
         assert_eq!(plan.steps.len(), sim::MOST_STEPS);
     }
 
@@ -1131,6 +1164,7 @@ mod tests {
                 physical_sky: 1.0,
                 fogged: false,
                 cascades: Some(2048),
+                rain: 0.0,
                 sim_area: NO_SIM_AREA,
                 sim_fold: glam::Vec2::ZERO,
             },

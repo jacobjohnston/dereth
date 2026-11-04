@@ -372,6 +372,59 @@ fn moving_the_holder_moves_what_it_holds() {
     );
 }
 
+/// Behaviour: objects.held.a-wielded-weapon-is-drawn-in-the-holders-hand
+///
+/// **A held weapon is lifted onto the drawn ground from its holder's feet, not its own origin.**
+/// The lift fades with height over the ground, so measured at the hand it would leave the weapon
+/// below a lifted hand.
+#[test]
+fn a_held_weapon_is_lifted_from_where_its_holder_stands() {
+    let store = retail_store();
+    let mut gpu = test_gpu(800, 600);
+    let mut scene = scene_of(&store, &mut gpu, false);
+    let mut stream = ObjectStream::with_store(Arc::clone(&store));
+    stream.apply_event(
+        &create_ev(HOLDER, HOLDER_SETUP, Some(Vec3::ZERO), None, Some(101)),
+        LocalTime(0.0),
+    );
+    stream.apply_event(
+        &create_ev(
+            ITEM,
+            ITEM_SETUP,
+            None,
+            Some((HOLDER, RIGHT_HAND)),
+            Some(RIGHT_HAND_COMBAT),
+        ),
+        LocalTime(0.0),
+    );
+    scene
+        .sync_objects(&store, &mut gpu, &mut stream)
+        .expect("syncs");
+    step(&mut scene);
+    let holder = scene
+        .server_object_frame(ObjectId(HOLDER))
+        .expect("holder frame");
+    let item = scene
+        .server_object_frame(ObjectId(ITEM))
+        .expect("item frame");
+    assert!(
+        dist(item.origin, holder.origin) > 0.5,
+        "the hand is off the feet"
+    );
+    let w = &scene.world;
+    let stance = |id: u32| w.object_stance_origin(w.objects.get(&ObjectId(id)).expect("an object"));
+    assert_eq!(
+        stance(ITEM),
+        Some(holder.origin),
+        "the item stands where its holder does"
+    );
+    assert_eq!(
+        stance(HOLDER),
+        Some(holder.origin),
+        "a holder stands where it is"
+    );
+}
+
 /// Behaviour: objects.parent.a-new-parent-event-attaches-the-child-in-wire-order
 ///
 /// **A `0xF749` moves an already-drawn object onto its holder.** The item is on the ground, drawn

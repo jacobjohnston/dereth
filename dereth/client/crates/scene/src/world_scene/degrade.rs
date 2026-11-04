@@ -135,15 +135,18 @@ impl SceneDraw {
             d.part_levels.resize(d.meshes.len(), 0);
             d.part_draw_pos.resize(d.meshes.len(), Frame::default());
             d.part_cypt.resize(d.meshes.len(), 0.0);
-            // Drawn on the drawn ground, outdoors, while the presentation draws one.
+            // Drawn on the drawn ground, outdoors, while the presentation draws one; a held
+            // object rides up with its holder rather than being lifted where it hangs.
             #[cfg(feature = "hifi")]
-            let lift = if ws
-                .object_draw_cell(o)
-                .is_some_and(dereth_physics::landdefs::is_outdoors)
-            {
-                self.drawn.shift_at(o.frame.origin)
-            } else {
-                0.0
+            let lift = match ws.object_stance_origin(o) {
+                Some(at)
+                    if ws
+                        .object_draw_cell(o)
+                        .is_some_and(dereth_physics::landdefs::is_outdoors) =>
+                {
+                    self.drawn.shift_at(at)
+                }
+                _ => 0.0,
             };
             for (i, pl) in d.meshes.iter().enumerate() {
                 resident += pl.triangles_held();

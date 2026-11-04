@@ -612,6 +612,25 @@ impl WorldState {
         None
     }
 
+    /// Where the outermost holder of this object stands, in render space (its own origin when
+    /// nothing holds it): the point a held object is drawn lifted from, so it moves with its holder.
+    #[must_use]
+    pub fn object_stance_origin(&self, object: &WorldObject) -> Option<Vec3> {
+        let mut at = object;
+        for _ in 0..=self.objects.len() {
+            let Some((id, _)) = at.sim.parent else {
+                return Some(at.frame.origin);
+            };
+            if self.player_object == Some(id) {
+                if let Some(c) = self.character.as_ref() {
+                    return Some(c.render_frame().origin);
+                }
+            }
+            at = self.objects.get(&id)?;
+        }
+        None
+    }
+
     /// One object's part frames in render space, for the tests — what part updating last wrote.
     /// The placement tests assert against these
     /// because the placement id changes where the parts sit and nothing else about the object.

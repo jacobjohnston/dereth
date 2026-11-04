@@ -1403,13 +1403,14 @@ fn sheet_lines(page: PageId, state: &GameState) -> Vec<Line> {
 }
 
 /// The preference of `row` when it is one of the experimental effects' boxes, or their Depth
-/// Mapping menu.
+/// Mapping or God Rays menu.
 #[cfg(feature = "hifi")]
 fn effect_box(row: &Row) -> Option<&'static str> {
-    use dereth_client_contract::options::depth_mapping;
+    use dereth_client_contract::options::{depth_mapping, god_rays};
     match row.value {
         Value::Check(name) if fidelity::find(name).is_some() => Some(name),
         Value::Menu(name) if depth_mapping::is_depth_mapping(name) => Some(name),
+        Value::Menu(name) if god_rays::is_god_rays(name) => Some(name),
         _ => None,
     }
 }

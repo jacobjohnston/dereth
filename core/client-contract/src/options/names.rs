@@ -144,6 +144,9 @@ pub mod fidelity {
     /// `Fidelity.DepthMapping`: how much relief surfaces take from a pack, a level: 0 Off,
     /// 1 Low, 2 Medium, 3 High.
     pub const DEPTH_MAPPING: &str = "Fidelity.DepthMapping";
+    /// `Fidelity.GodRays`: how strongly the sunlit air shows shafts of light, a level: 0 Off,
+    /// 1 Low, 2 Medium, 3 High.
+    pub const GOD_RAYS: &str = "Fidelity.GodRays";
     /// `Fidelity.Debug`: a diagnostic view, set only by `--set-at`: 0 Off, 1 Passthrough,
     /// 2 Depth, 3 Normals, 4 AO, 5 Shadows, 6 Census, 7 Parity (re-shaded with no pass).
     pub const DEBUG: &str = "Fidelity.Debug";
@@ -156,7 +159,7 @@ pub mod fidelity {
     /// over it. No box sets it.
     pub const ART_PACK: &str = "Fidelity.ArtPack";
 
-    /// Every name the profile and `--set-at` may set, the eleven boxes first and the menu after
+    /// Every name the profile and `--set-at` may set, the eleven boxes first and the menus after
     /// them.
     pub const NAMES: &[&str] = &[
         LIGHTING,
@@ -171,6 +174,7 @@ pub mod fidelity {
         NO_SLOPE_MATERIALS,
         NO_DAMP,
         DEPTH_MAPPING,
+        GOD_RAYS,
         DEBUG,
     ];
 }

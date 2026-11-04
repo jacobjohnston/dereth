@@ -1026,8 +1026,8 @@ const CLIENT_SHARED: [Heading; 5] = [
 const CLIENT: [Heading; 5] = CLIENT_SHARED;
 
 /// With the optional high-fidelity presentation built in, the Client Options page ends with its
-/// eleven boxes and its Depth Mapping menu under a heading of their own, on the Horizon
-/// interface's page alone: it is the only interface the presentation draws under.
+/// eleven boxes and its Depth Mapping and God Rays menus under a heading of their own, on the
+/// Horizon interface's page alone: it is the only interface the presentation draws under.
 #[cfg(feature = "hifi")]
 const CLIENT: [Heading; 6] = {
     let s = CLIENT_SHARED;
@@ -1045,10 +1045,10 @@ const CLIENT: [Heading; 6] = {
     ]
 };
 
-/// The eleven boxes, each off by default, and the Depth Mapping menu, Off by default; all on the
-/// Horizon page alone.
+/// The eleven boxes, each off by default, and the Depth Mapping and God Rays menus, Off by
+/// default; all on the Horizon page alone.
 #[cfg(feature = "hifi")]
-const FIDELITY_ROWS: [Row; 12] = [
+const FIDELITY_ROWS: [Row; 13] = [
     fidelity_box(0),
     fidelity_box(1),
     fidelity_box(2),
@@ -1068,6 +1068,17 @@ const FIDELITY_ROWS: [Row; 12] = [
                 super::depth_mapping::CAPTION,
                 Value::Menu(crate::options::names::fidelity::DEPTH_MAPPING),
                 Int(super::depth_mapping::DEFAULT),
+            ),
+        ),
+    ),
+    only(
+        Shown::Only(Interface::Horizon),
+        noted(
+            super::god_rays::NOTE,
+            pref(
+                super::god_rays::CAPTION,
+                Value::Menu(crate::options::names::fidelity::GOD_RAYS),
+                Int(super::god_rays::DEFAULT),
             ),
         ),
     ),
@@ -1326,8 +1337,8 @@ mod tests {
     }
 
     /// The experimental rendering effects' boxes are on the Horizon interface's Client page
-    /// alone, last, under their own heading, each off by default, with the Depth Mapping menu
-    /// after them, Off by default; the classic and the modern
+    /// alone, last, under their own heading, each off by default, with the Depth Mapping and God
+    /// Rays menus after them, Off by default; the classic and the modern
     /// interfaces' pages are exactly the shared headings', row for row; and a build without the
     /// effects has no such heading anywhere.
     ///
@@ -1350,21 +1361,33 @@ mod tests {
         if cfg!(feature = "hifi") {
             let (heading, rows) = horizon.last().expect("Horizon's Client page has headings");
             assert_eq!(heading.title, fidelity::HEADING);
-            assert_eq!(rows.len(), fidelity::OPTIONS.len() + 1);
+            assert_eq!(rows.len(), fidelity::OPTIONS.len() + 2);
             for (row, o) in rows.iter().zip(fidelity::OPTIONS.iter()) {
                 assert_eq!(row.value, Value::Check(o.name));
                 assert_eq!(row.caption, o.caption);
                 assert_eq!(row.default, Some(Bool(false)), "{}", o.name);
                 assert_eq!(row.shown, Shown::Only(Interface::Horizon));
             }
-            let menu = rows.last().expect("the Depth Mapping menu");
-            assert_eq!(
-                menu.value,
-                Value::Menu(crate::options::names::fidelity::DEPTH_MAPPING)
-            );
-            assert_eq!(menu.caption, crate::options::depth_mapping::CAPTION);
-            assert_eq!(menu.default, Some(Int(crate::options::depth_mapping::OFF)));
-            assert_eq!(menu.shown, Shown::Only(Interface::Horizon));
+            let menus = [
+                (
+                    crate::options::names::fidelity::DEPTH_MAPPING,
+                    crate::options::depth_mapping::CAPTION,
+                    crate::options::depth_mapping::OFF,
+                ),
+                (
+                    crate::options::names::fidelity::GOD_RAYS,
+                    crate::options::god_rays::CAPTION,
+                    crate::options::god_rays::OFF,
+                ),
+            ];
+            for (menu, (name, caption, default)) in
+                rows[fidelity::OPTIONS.len()..].iter().zip(menus)
+            {
+                assert_eq!(menu.value, Value::Menu(name));
+                assert_eq!(menu.caption, caption);
+                assert_eq!(menu.default, Some(Int(default)));
+                assert_eq!(menu.shown, Shown::Only(Interface::Horizon));
+            }
             // The rest of Horizon's page is the shared headings'.
             let rest: Vec<&Row> = horizon[..horizon.len() - 1]
                 .iter()

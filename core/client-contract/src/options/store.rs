@@ -409,6 +409,12 @@ const CUSTOM_ENUMS: &[CustomEnum] = &[
         format: super::depth_mapping::convert_to_string,
         choices: super::depth_mapping::choice_rows,
     },
+    CustomEnum {
+        recognizes: super::god_rays::is_god_rays,
+        parse: super::god_rays::parse_value,
+        format: super::god_rays::convert_to_string,
+        choices: super::god_rays::choice_rows,
+    },
 ];
 
 fn custom_enum(name: &str) -> Option<&'static CustomEnum> {

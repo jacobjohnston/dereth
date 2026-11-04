@@ -24,6 +24,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Art packs: a material for a retail picture may name a grit, a small picture shared by many materials that adds fine bumps, speckle and roughness at real size.
 - Art packs: a material for a retail picture may be glacier ice: opaque and deep blue, with light bent through it, with or without Depth Mapping.
 - Better Lighting: an art pack's glassy ground mirrors the sky.
+- Better Lighting: a God Rays menu, Off to High: sunlight shows in the air in shafts where walls, roofs and trees break it, most at dawn and dusk, in fog and under trees.
 
 ## 0.4.12 (2026-11-03)
 

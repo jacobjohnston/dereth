@@ -1,7 +1,7 @@
 //! The words and rules of the optional high-fidelity presentation's options: eleven check boxes on
 //! the Horizon interface's Client page, under a heading of their own, each off until the player
-//! ticks it, and the Depth Mapping menu after them ([`super::depth_mapping`]), Off until the player
-//! chooses a level.
+//! ticks it, and the Depth Mapping and God Rays menus after them ([`super::depth_mapping`],
+//! [`super::god_rays`]), Off until the player chooses a level.
 //!
 //! Four of the effects are drawn inside the better lighting and draw nothing without it: the sun
 //! shadows, the bounced light, the lamps and the weather. The lamps also need a graphics device
@@ -14,7 +14,8 @@
 //! the ninth box turns off; an art pack's ground lays scree and rock on steep slopes, which the
 //! tenth box turns off. The Depth Mapping menu gives the world's own pictures the relief an art
 //! pack has for them, inside the better lighting; the damp and slime it lays on a room's surfaces
-//! the last box turns off.
+//! the last box turns off. God Rays shows the sunlight
+//! in the air, inside the better lighting.
 //!
 //! In a build with the `hifi` feature the options are registered with the value store
 //! ([`register`]), so the page reads and writes them like any other option and the profile keeps
@@ -175,11 +176,12 @@ pub fn find(name: &str) -> Option<&'static FidelityOption> {
 /// draws when ticked.
 #[must_use]
 pub fn blocked(name: &str, ticked: impl Fn(&str) -> bool, rays: Option<bool>) -> Option<Blocked> {
-    let needs = if super::depth_mapping::is_depth_mapping(name) {
-        Needs::Lighting
-    } else {
-        find(name)?.needs
-    };
+    let needs =
+        if super::depth_mapping::is_depth_mapping(name) || super::god_rays::is_god_rays(name) {
+            Needs::Lighting
+        } else {
+            find(name)?.needs
+        };
     let lighting = ticked(fidelity::LIGHTING);
     match needs {
         Needs::Lighting | Needs::LightingAndRays | Needs::Relief if !lighting => {
@@ -191,9 +193,9 @@ pub fn blocked(name: &str, ticked: impl Fn(&str) -> bool, rays: Option<bool>) ->
     }
 }
 
-/// Register every box with the value store, each off, and the Depth Mapping menu, Off. The
-/// store's load then reads the `[Fidelity]` section of the profile into them, and the page reads
-/// and writes them.
+/// Register every box with the value store, each off, and the Depth Mapping and God Rays menus,
+/// Off. The store's load then reads the `[Fidelity]` section of the profile into them, and the
+/// page reads and writes them.
 pub fn register() -> usize {
     let boxes: usize = OPTIONS
         .iter()
@@ -210,12 +212,17 @@ pub fn register() -> usize {
         PrefValue::Int(super::depth_mapping::DEFAULT),
         super::store::DataType::UInt,
     );
-    boxes + usize::from(depth)
+    let rays = super::store::register_preference(
+        fidelity::GOD_RAYS,
+        PrefValue::Int(super::god_rays::DEFAULT),
+        super::store::DataType::UInt,
+    );
+    boxes + usize::from(depth) + usize::from(rays)
 }
 
-/// Whether the store's save leaves `name` out of the profile: a box still off, or the Depth
-/// Mapping menu still Off, that the profile does not name, so a profile that never ticked one has
-/// no `[Fidelity]` section.
+/// Whether the store's save leaves `name` out of the profile: a box still off, or a menu still at
+/// its default, that the profile does not name, so a profile that never ticked one has no
+/// `[Fidelity]` section.
 #[must_use]
 pub fn left_out_of_save(
     name: &str,
@@ -224,6 +231,8 @@ pub fn left_out_of_save(
 ) -> bool {
     let unchanged = if super::depth_mapping::is_depth_mapping(name) {
         *value == PrefValue::Int(super::depth_mapping::DEFAULT)
+    } else if super::god_rays::is_god_rays(name) {
+        *value == PrefValue::Int(super::god_rays::DEFAULT)
     } else {
         find(name).is_some() && *value == PrefValue::Bool(false)
     };
@@ -509,6 +518,36 @@ mod tests {
             &PrefValue::Bool(false),
             &empty
         ));
+    }
+
+    #[test]
+    fn the_god_rays_menu_needs_the_better_lighting() {
+        use fidelity::{GOD_RAYS, LIGHTING};
+        let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
+        assert_eq!(
+            blocked(GOD_RAYS, with(&[]), None),
+            Some(Blocked::NeedsLighting)
+        );
+        assert_eq!(blocked(GOD_RAYS, with(&[LIGHTING]), Some(false)), None);
+        assert!(find(GOD_RAYS).is_none(), "the menu is no box");
+    }
+
+    /// The God Rays menu is registered Off, and the save leaves it out until it is changed.
+    #[test]
+    fn the_god_rays_menu_is_off_and_left_out_of_the_profile_until_chosen() {
+        use super::super::god_rays::{DEFAULT, OFF};
+        use crate::persist::preferences::UserPreferences;
+        let empty = UserPreferences::parse("").expect("an empty profile");
+        assert_eq!(DEFAULT, OFF);
+        let off = PrefValue::Int(OFF);
+        assert!(left_out_of_save(fidelity::GOD_RAYS, &off, &empty));
+        assert!(!left_out_of_save(
+            fidelity::GOD_RAYS,
+            &PrefValue::Int(2),
+            &empty
+        ));
+        let named = UserPreferences::parse("[Fidelity]\r\nGodRays=Off\r\n").expect("reads");
+        assert!(!left_out_of_save(fidelity::GOD_RAYS, &off, &named));
     }
 
     #[test]

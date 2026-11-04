@@ -16,9 +16,10 @@ use dereth_horizon::ui::panels::WindowId;
 
 use crate::Harness;
 
-/// The Client page, scrolled to its end, with the device `hifi` reports.
+/// The Client page, scrolled to its end, with the device `hifi` reports and an art pack open.
 fn client_page(#[cfg(feature = "hifi")] hifi: Availability) -> (Harness, GameState) {
     store::init();
+    fidelity::note_art_pack();
     #[allow(unused_mut)]
     let mut state = GameState {
         in_world: true,

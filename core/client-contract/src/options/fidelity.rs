@@ -34,7 +34,7 @@ pub enum Needs {
     LightingAndRays,
     /// The better lighting and an art pack.
     ArtPack,
-    /// The better lighting, and depth mapping on: the relief it is drawn with.
+    /// The better lighting, an art pack, and depth mapping on: the relief it is drawn with.
     Relief,
 }
 
@@ -207,7 +207,7 @@ pub fn blocked_with(
     pack: bool,
 ) -> Option<Blocked> {
     let needs = if super::depth_mapping::is_depth_mapping(name) {
-        Needs::Lighting
+        Needs::ArtPack
     } else {
         find(name)?.needs
     };
@@ -217,7 +217,7 @@ pub fn blocked_with(
             Some(Blocked::NeedsLighting)
         }
         Needs::LightingAndRays if rays == Some(false) => Some(Blocked::NeedsRays),
-        Needs::ArtPack if !pack => Some(Blocked::NeedsArtPack),
+        Needs::ArtPack | Needs::Relief if !pack => Some(Blocked::NeedsArtPack),
         Needs::Relief if !ticked(fidelity::DEPTH_MAPPING) => Some(Blocked::NeedsDepthMapping),
         _ => None,
     }
@@ -507,6 +507,8 @@ mod tests {
     #[test]
     fn the_depth_mapping_menu_needs_the_better_lighting_and_the_damp_box_needs_the_menu() {
         use fidelity::{DEPTH_MAPPING, LIGHTING, NO_DAMP};
+        // With an art pack open, whose relief the menu draws.
+        let blocked = |name, ticked, rays| blocked_with(name, ticked, rays, true);
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         assert_eq!(
             blocked(DEPTH_MAPPING, with(&[]), None),
@@ -525,6 +527,14 @@ mod tests {
             blocked(NO_DAMP, with(&[LIGHTING, DEPTH_MAPPING]), Some(false)),
             None
         );
+        // Without one there is no relief to draw.
+        for name in [DEPTH_MAPPING, NO_DAMP] {
+            assert_eq!(
+                blocked_with(name, with(&[LIGHTING, DEPTH_MAPPING]), None, false),
+                Some(Blocked::NeedsArtPack),
+                "{name}"
+            );
+        }
         assert_eq!(
             Blocked::NeedsDepthMapping.reason(),
             "Needs Depth Mapping",

@@ -1026,8 +1026,8 @@ const CLIENT_SHARED: [Heading; 5] = [
 const CLIENT: [Heading; 5] = CLIENT_SHARED;
 
 /// With the optional high-fidelity presentation built in, the Client Options page ends with its
-/// thirteen boxes under a heading of their own, on the Horizon interface's page alone: it is the only
-/// interface the presentation draws under.
+/// thirteen boxes under a heading of their own, on the Horizon interface's page alone: it is the
+/// only interface the presentation draws under.
 #[cfg(feature = "hifi")]
 const CLIENT: [Heading; 6] = {
     let s = CLIENT_SHARED;

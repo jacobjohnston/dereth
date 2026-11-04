@@ -14,6 +14,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 
 ## Unreleased
 
+- Enhanced Graphics: Reflective Water is now Water Reflections and starts on, as the Medium preset has it; the Low preset turns it off. It leaves the page under Keep Retail Look.
 - Settings: Client is now Display and Sound. Display opens with a Graphics menu, Standard or Enhanced, each showing what applies to it, and options now use the names games usually use.
 - Better Lighting is now Enhanced Graphics Mode, and its effects start on. Under Standard, the page offers only Ambient Occlusion and Atmospheric Sky.
 - Retail Look is now Keep Retail Look: the game's own models and ground or the enhanced ones, all or nothing. What it rules out leaves the page.

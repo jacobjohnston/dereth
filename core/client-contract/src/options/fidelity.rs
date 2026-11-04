@@ -1,6 +1,6 @@
-//! The words and rules of the optional high-fidelity presentation's options: twelve check boxes on
-//! the Horizon interface's Display page, under a heading of their own, below a Graphics menu that
-//! chooses standard or enhanced graphics.
+//! The words and rules of the optional high-fidelity presentation's options: thirteen check boxes
+//! on the Horizon interface's Display page, under a heading of their own, below a Graphics menu
+//! that chooses standard or enhanced graphics.
 //!
 //! The first box is Enhanced Graphics Mode, the better lighting, which the Graphics menu sets. Four
 //! of the effects are drawn inside it and draw nothing without it: the sun shadows, the bounced
@@ -10,7 +10,9 @@
 //! itself, so the ambient occlusion stands aside in the outdoor frames it is drawn into; indoors
 //! and underground, where it draws nothing, the occlusion is drawn.) An art pack's models and
 //! ground are drawn inside the better lighting too, and Keep Retail Look draws the game's own in
-//! their place, all of them or none. The better lighting smooths the world's edges with temporal
+//! their place, all of them or none. The water is drawn with reflections inside the better
+//! lighting, and Keep Retail Look draws the game's own. The better lighting smooths the world's
+//! edges with temporal
 //! anti-aliasing, which a box turns off; an art pack's ground lays scree and rock on steep slopes,
 //! which a box turns off; and the last two boxes choose how its frames reach the display.
 //!
@@ -133,13 +135,13 @@ pub const OPTIONS: [FidelityOption; 13] = [
     },
     FidelityOption {
         name: fidelity::WATER,
-        caption: "Reflective Water",
+        caption: "Water Reflections",
         note: "Draws the world's water as water, with ripples, reflections of the sky and the \
                land, and a bed seen through it. The land is drawn again with it, from the game's \
                own pictures. An art pack's ground always has this water.",
         needs: Needs::LightingWithoutRetailLook,
         inverted: false,
-        on_by_default: false,
+        on_by_default: true,
     },
     FidelityOption {
         name: fidelity::NO_ANTI_ALIASING,
@@ -214,6 +216,7 @@ pub const PRESET_VALUES: &[(&str, [PrefValue; PRESET_NAMES.len()])] = &[
     (fidelity::AMBIENT_OCCLUSION, [OFF, ON, ON, ON]),
     (fidelity::SKY, [OFF, ON, ON, ON]),
     (fidelity::WEATHER, [OFF, ON, ON, ON]),
+    (fidelity::WATER, [OFF, ON, ON, ON]),
     (fidelity::NO_ANTI_ALIASING, [ON, OFF, OFF, OFF]),
     (fidelity::NO_SLOPE_MATERIALS, [OFF, OFF, OFF, OFF]),
 ];
@@ -619,7 +622,7 @@ mod tests {
     fn what_the_lighting_and_the_retail_look_rule_out_leaves_the_page() {
         use fidelity::{
             AMBIENT_OCCLUSION, GLOBAL_ILLUMINATION, HDR, LAMPS, LIGHTING, NO_ANTI_ALIASING,
-            NO_SLOPE_MATERIALS, RETAIL_LOOK, SHADOWS, SKY, VSYNC, WEATHER,
+            NO_SLOPE_MATERIALS, RETAIL_LOOK, SHADOWS, SKY, VSYNC, WATER, WEATHER,
         };
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         let left = |name: &str, on: &'static [&'static str]| {
@@ -635,6 +638,7 @@ mod tests {
             GLOBAL_ILLUMINATION,
             LAMPS,
             WEATHER,
+            WATER,
             NO_ANTI_ALIASING,
             NO_SLOPE_MATERIALS,
             VSYNC,
@@ -642,9 +646,14 @@ mod tests {
         ] {
             assert!(left(name, &[]), "{name}");
         }
-        // The retail look takes off what an art pack draws, and only that.
-        assert!(left(NO_SLOPE_MATERIALS, &[LIGHTING, RETAIL_LOOK]));
-        for o in OPTIONS.iter().filter(|o| o.name != NO_SLOPE_MATERIALS) {
+        // The retail look takes off what an art pack draws and the water, and only those.
+        for name in [WATER, NO_SLOPE_MATERIALS] {
+            assert!(left(name, &[LIGHTING, RETAIL_LOOK]), "{name}");
+        }
+        for o in OPTIONS
+            .iter()
+            .filter(|o| ![WATER, NO_SLOPE_MATERIALS].contains(&o.name))
+        {
             assert!(!left(o.name, &[LIGHTING, RETAIL_LOOK]), "{}", o.name);
         }
         // A device without rays stays, with its reason.

@@ -882,6 +882,7 @@ mod tests {
                     | FidelityFeature::Lamps
                     | FidelityFeature::Sky
                     | FidelityFeature::Weather
+                    | FidelityFeature::Water
                     | FidelityFeature::VSync
             );
             assert_eq!(d.value(f), u32::from(on), "{f:?}");
@@ -927,6 +928,7 @@ mod tests {
         ));
         assert!(old.interface);
         assert_eq!(old.effective(FidelityFeature::Lighting), 1);
+        assert_eq!(old.effective(FidelityFeature::Water), 1);
         // Every option has its name, and every name its option.
         assert_eq!(fidelity::NAMES.len(), FidelityFeature::ALL.len());
         for f in FidelityFeature::ALL {

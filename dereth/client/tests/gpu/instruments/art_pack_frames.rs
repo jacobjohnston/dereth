@@ -43,6 +43,8 @@
 //!   tuning file's form with `;` between lines (`walk_cap = 0.3; cliffs = false`); the frames wait
 //!   for the world's landscape vertices the drawn ground is drawn from.
 //! - `DERETH_REPORT_OBJECTS`: objects to make for that frame, each `setup,block,x,y`, `;` between.
+//! - `DERETH_REPORT_FRAMES`: that many more frames after it, `DERETH_REPORT_FRAME_SECONDS` apart
+//!   (default 1/30), as `report-<way>-NNN.png`, for a clip.
 //! - `DERETH_REPORT`: for [`capture_the_frame_a_report_describes`], the line the client's
 //!   `@report` printed, or the name of a file holding it. The frame is drawn as the report says it
 //!   was: the body where the player stood, the camera held where it stood, the time, the weather,
@@ -797,6 +799,18 @@ fn capture_the_frame_a_report_describes() {
         let rgba = capture(gpu);
         let file = out.join(format!("report-{}.png", way.name()));
         write_png(&file, width, height, &rgba);
+        // `DERETH_REPORT_FRAMES` more frames, `DERETH_REPORT_FRAME_SECONDS` apart, for a clip.
+        if let Some(n) = env("DERETH_REPORT_FRAMES").and_then(|n| n.parse::<usize>().ok()) {
+            let dt = env("DERETH_REPORT_FRAME_SECONDS")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(1.0 / 30.0);
+            for k in 0..n {
+                shot.step_by(gpu, dt);
+                let rgba = capture(gpu);
+                let file = out.join(format!("report-{}-{k:03}.png", way.name()));
+                write_png(&file, width, height, &rgba);
+            }
+        }
         // Both as the report writes them, from the block the world is drawn around.
         let block = shot.scene.viewer_block().unwrap_or_default();
         let drawn = dereth_client_runtime::report::ReportCamera::from_render(

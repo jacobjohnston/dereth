@@ -834,12 +834,17 @@ impl FidelityPreferences {
             .any(|f| self.effective(f) != 0)
     }
 
-    /// These preferences with the presentation choices taken out, the render scale among them: a
-    /// change to one alone needs no new start.
+    /// These preferences with the presentation choices taken out, the render scale among them, and
+    /// the draw distances, which each frame reads: a change to one alone needs no new start.
     #[must_use]
     pub fn without_presentation_choices(mut self) -> Self {
         for (i, f) in FidelityFeature::ALL.iter().enumerate() {
-            if f.is_presentation_choice() {
+            if f.is_presentation_choice()
+                || matches!(
+                    f,
+                    FidelityFeature::TreeDrawDistance | FidelityFeature::GroundCoverDrawDistance
+                )
+            {
                 self.values[i] = 0;
             }
         }
@@ -1092,6 +1097,7 @@ mod tests {
         let switched = FidelityPreferences::parse_switch("Lighting=1,GroundCoverDrawDistance=1")
             .expect("a switch");
         assert_eq!(switched.effective(cover), 1);
+        assert_eq!(switched.without_presentation_choices().value(cover), 0);
         assert_eq!(FidelityFeature::TreeDrawDistance.clamp(20), 0);
         assert_eq!(FidelityFeature::TreeDrawDistance.clamp(1), 0);
         assert_eq!(FidelityFeature::NoWind.clamp(3), 1);

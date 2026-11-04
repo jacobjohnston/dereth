@@ -890,8 +890,9 @@ pub(super) fn apply_preferences(
         gpu.hifi_set_render_scale(render_scale(prefs));
     }
     // How frames reach the display is the device's and the next start's, not the presentation's,
-    // and the share drawn is the frame's size; the settings, the anti-aliasing a render scale
-    // keeps on among them, are the presentation's.
+    // the share drawn is the frame's size and each frame reads the draw distances; the settings,
+    // the anti-aliasing a render scale keeps on and the ground cover Off leaves out among them,
+    // are the presentation's.
     let drawn =
         |p: &FidelityPreferences, rays| (p.without_presentation_choices(), settings(p, rays));
     if (drawn(&last.0, last.1), last.1) == (drawn(prefs, rays), rays) {

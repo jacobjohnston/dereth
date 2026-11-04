@@ -1676,7 +1676,7 @@ fn frame_constants(frame: &HifiFrame, clip_from_render: Mat4) -> Vec<f32> {
     c.extend([amb[0], amb[1], amb[2], 0.0]);
     #[allow(clippy::cast_possible_truncation)] // ten minutes' worth, well inside the type
     let clock = frame.time.rem_euclid(600.0) as f32;
-    c.extend([cam.dither, 0.0, clock, 0.0]);
+    c.extend([cam.dither, cam.mip_bias, clock, 0.0]);
     c.extend([objects[0], objects[1], objects[2], 0.0]);
     c
 }

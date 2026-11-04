@@ -16,8 +16,13 @@
 //! which a box turns off; two boxes choose how its frames reach the display; and the flames' light
 //! flickers, which a box holds steady. Light Draw Distance chooses how far the lamps light.
 //!
+//! Two menus follow the switches: the Render Scale, the share of the frame's pixels the better
+//! lighting draws the world at, or Dynamic, and the frame rate a Dynamic render scale holds
+//! ([`super::dynamic_resolution`]). On macOS MetalFX rebuilds a picture drawn at fewer pixels at the
+//! frame's size; elsewhere it is enlarged.
+//!
 //! The effects start on. The enhanced graphics' quality presets set several of them at once
-//! ([`PRESET_VALUES`]), and the defaults of the boxes and the menu are the Medium preset's.
+//! ([`PRESET_VALUES`]), and the defaults of the boxes and the menus are the Medium preset's.
 //!
 //! In a build with the `hifi` feature the options are registered with the value store
 //! ([`register`]), so the page reads and writes them like any other option and the profile keeps
@@ -137,7 +142,7 @@ pub const OPTIONS: [FidelityOption; 13] = [
         name: fidelity::NO_ANTI_ALIASING,
         caption: "Anti-Aliasing",
         note: "Temporal anti-aliasing smooths the world's edges. Off, edges stair-step and \
-               shimmer in motion.",
+               shimmer in motion. It is always on below a Render Scale of 100%.",
         needs: Needs::Lighting,
         inverted: true,
         on_by_default: false,
@@ -182,7 +187,33 @@ pub const OPTIONS: [FidelityOption; 13] = [
 
 /// The menus among the effects' rows, each with what it needs. A menu's own module registers it
 /// and gives its choices; a row here gives it the boxes' rules.
-pub const MENUS: &[(&str, Needs)] = &[(fidelity::LIGHT_DRAW_DISTANCE, Needs::Lighting)];
+pub const MENUS: &[(&str, Needs)] = &[
+    (fidelity::RENDER_SCALE, Needs::Lighting),
+    (fidelity::DYNAMIC_RESOLUTION, Needs::Lighting),
+    (fidelity::LIGHT_DRAW_DISTANCE, Needs::Lighting),
+];
+
+/// The render scale until the player changes it: Dynamic, as the Medium preset has it.
+pub const SCALE_DEFAULT: u32 = super::render_scale::DYNAMIC;
+
+/// The render scale menu's caption.
+pub const SCALE_CAPTION: &str = "Render Scale";
+
+/// What the render scale does, for the row's tooltip.
+#[cfg(target_os = "macos")]
+pub const SCALE_NOTE: &str = "Draws the world at this share of the screen's pixels and has \
+                              MetalFX rebuild the picture to fill the screen: faster, a little \
+                              softer. Dynamic lowers it to hold a frame rate. It changes at once.";
+
+/// What the render scale does, for the row's tooltip.
+#[cfg(not(target_os = "macos"))]
+pub const SCALE_NOTE: &str = "Draws the world at this share of the screen's pixels and enlarges \
+                              the picture to fill the screen: faster, softer. Dynamic lowers it \
+                              to hold a frame rate. It changes at once.";
+
+/// The render scale value of a Dynamic render scale.
+#[allow(clippy::cast_possible_wrap)] // a small constant
+const DYNAMIC: i32 = super::render_scale::DYNAMIC as i32;
 
 /// The heading's caption.
 pub const HEADING: &str = "Enhanced Graphics";
@@ -221,6 +252,14 @@ pub const PRESET_VALUES: &[(&str, [PrefValue; PRESET_NAMES.len()])] = &[
     (
         fidelity::LIGHT_DRAW_DISTANCE,
         [Int(100), Int(150), Int(300), Int(500)],
+    ),
+    (
+        fidelity::RENDER_SCALE,
+        [Int(DYNAMIC), Int(DYNAMIC), Int(DYNAMIC), Int(100)],
+    ),
+    (
+        fidelity::DYNAMIC_RESOLUTION,
+        [Int(60), Int(60), Int(60), Int(60)],
     ),
 ];
 
@@ -341,9 +380,20 @@ pub fn blocked(name: &str, ticked: impl Fn(&str) -> bool, rays: Option<bool>) ->
     }
 }
 
-/// Register every box with the value store, each at its default, and the Light Draw Distance menu
-/// at its own. The store's load then reads the `[Fidelity]` section of the profile into them, and
-/// the page reads and writes them.
+/// What the menu `name` holds until the player changes it.
+fn menu_default(name: &str) -> Option<PrefValue> {
+    if name.eq_ignore_ascii_case(fidelity::RENDER_SCALE) {
+        i32::try_from(SCALE_DEFAULT).ok().map(Int)
+    } else if super::dynamic_resolution::is_dynamic_resolution(name) {
+        Some(Int(super::dynamic_resolution::DEFAULT))
+    } else {
+        None
+    }
+}
+
+/// Register every box with the value store, each at its default, and the render scale's and the
+/// Light Draw Distance menus at their own. The store's load then reads the `[Fidelity]` section of
+/// the profile into them, and the page reads and writes them.
 pub fn register() -> usize {
     let boxes: usize = OPTIONS
         .iter()
@@ -360,12 +410,19 @@ pub fn register() -> usize {
         PrefValue::Int(super::light_distance::DEFAULT),
         super::store::DataType::UInt,
     );
-    boxes + usize::from(lights)
+    let menus = [fidelity::RENDER_SCALE, fidelity::DYNAMIC_RESOLUTION]
+        .into_iter()
+        .filter_map(|name| Some((name, menu_default(name)?)))
+        .filter(|(name, value)| {
+            super::store::register_preference(name, value.clone(), super::store::DataType::UInt)
+        })
+        .count();
+    boxes + usize::from(lights) + menus
 }
 
-/// Whether the store's save leaves `name` out of the profile: a box, or the Light Draw Distance
-/// menu, still at its default that the profile does not name, so a profile that never changed one
-/// has no `[Fidelity]` section.
+/// Whether the store's save leaves `name` out of the profile: a box or a menu still at its default
+/// that the profile does not name, so a profile that never changed one has no `[Fidelity]`
+/// section.
 #[must_use]
 pub fn left_out_of_save(
     name: &str,
@@ -374,6 +431,7 @@ pub fn left_out_of_save(
 ) -> bool {
     let unchanged = match find(name) {
         Some(o) => *value == PrefValue::Bool(o.on_by_default),
+        None if menu_default(name).is_some() => menu_default(name).as_ref() == Some(value),
         None => is_a_menu(name) && *value == Int(super::light_distance::DEFAULT),
     };
     unchanged
@@ -626,9 +684,9 @@ mod tests {
     #[test]
     fn what_the_lighting_and_the_retail_look_rule_out_leaves_the_page() {
         use fidelity::{
-            AMBIENT_OCCLUSION, GLOBAL_ILLUMINATION, HDR, LAMPS, LIGHTING, LIGHT_DRAW_DISTANCE,
-            NO_ANTI_ALIASING, NO_FLAME_FLICKER, NO_SLOPE_MATERIALS, RETAIL_LOOK, SHADOWS, SKY,
-            VSYNC, WEATHER,
+            AMBIENT_OCCLUSION, DYNAMIC_RESOLUTION, GLOBAL_ILLUMINATION, HDR, LAMPS, LIGHTING,
+            LIGHT_DRAW_DISTANCE, NO_ANTI_ALIASING, NO_FLAME_FLICKER, NO_SLOPE_MATERIALS,
+            RENDER_SCALE, RETAIL_LOOK, SHADOWS, SKY, VSYNC, WEATHER,
         };
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         let left = |name: &str, on: &'static [&'static str]| {
@@ -650,8 +708,13 @@ mod tests {
             HDR,
             NO_FLAME_FLICKER,
             LIGHT_DRAW_DISTANCE,
+            RENDER_SCALE,
+            DYNAMIC_RESOLUTION,
         ] {
             assert!(left(name, &[]), "{name}");
+        }
+        for name in [RENDER_SCALE, DYNAMIC_RESOLUTION] {
+            assert!(!left(name, &[LIGHTING, RETAIL_LOOK]), "{name}");
         }
         assert!(!left(LIGHT_DRAW_DISTANCE, &[LIGHTING, RETAIL_LOOK]));
         // The retail look takes off what an art pack draws, and only that.
@@ -718,14 +781,18 @@ mod tests {
         assert!(low.contains(&(fidelity::GLOBAL_ILLUMINATION, PrefValue::Bool(false))));
         assert!(low.contains(&(fidelity::NO_ANTI_ALIASING, PrefValue::Bool(true))));
         assert!(low.contains(&(fidelity::LIGHT_DRAW_DISTANCE, Int(100))));
+        assert!(low.contains(&(fidelity::RENDER_SCALE, Int(DYNAMIC))));
         let ultra = PRESETS[3].values();
         assert!(ultra.iter().all(|(name, v)| match find(name) {
             Some(o) => *v == PrefValue::Bool(!o.inverted),
+            None if *name == fidelity::RENDER_SCALE => *v == Int(100),
+            None if *name == fidelity::DYNAMIC_RESOLUTION => *v == Int(60),
             None => *v == Int(500),
         }));
         // The defaults of the boxes and the menu are the Medium preset's.
         let defaults = |name: &str| match find(name) {
             Some(o) => Some(PrefValue::Bool(o.on_by_default)),
+            None if menu_default(name).is_some() => menu_default(name),
             None => is_a_menu(name).then_some(Int(super::super::light_distance::DEFAULT)),
         };
         assert_eq!(preset_in_use(defaults), Some(PRESETS[1]));
@@ -770,6 +837,43 @@ mod tests {
         let named =
             UserPreferences::parse("[Fidelity]\r\nLightDrawDistance=1x\r\n").expect("reads");
         assert!(!left_out_of_save(name, &whole, &named));
+    }
+
+    #[test]
+    fn the_render_scale_needs_the_better_lighting_and_stays_out_of_a_profile_until_changed() {
+        let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
+        for name in [fidelity::RENDER_SCALE, fidelity::DYNAMIC_RESOLUTION] {
+            assert_eq!(blocked(name, with(&[]), None), Some(Blocked::NeedsLighting));
+            assert_eq!(blocked(name, with(&[fidelity::LIGHTING]), None), None);
+            assert!(find(name).is_none(), "{name} is no box");
+        }
+        let ini = crate::persist::preferences::UserPreferences::parse("").unwrap();
+        assert_eq!(SCALE_DEFAULT, super::super::render_scale::DYNAMIC);
+        assert!(left_out_of_save(
+            fidelity::RENDER_SCALE,
+            &Int(DYNAMIC),
+            &ini
+        ));
+        assert!(!left_out_of_save(fidelity::RENDER_SCALE, &Int(100), &ini));
+        assert!(left_out_of_save(
+            fidelity::DYNAMIC_RESOLUTION,
+            &Int(super::super::dynamic_resolution::DEFAULT),
+            &ini
+        ));
+        assert!(!left_out_of_save(
+            fidelity::DYNAMIC_RESOLUTION,
+            &Int(90),
+            &ini
+        ));
+        let named = crate::persist::preferences::UserPreferences::parse(
+            "[Fidelity]\r\nRenderScale=Dynamic\r\n",
+        )
+        .unwrap();
+        assert!(!left_out_of_save(
+            fidelity::RENDER_SCALE,
+            &Int(DYNAMIC),
+            &named
+        ));
     }
 
     #[test]

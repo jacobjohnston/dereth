@@ -7,6 +7,7 @@
 pub mod background;
 pub mod classic;
 pub mod config;
+pub mod dynamic_resolution;
 pub mod fidelity;
 pub mod interface;
 pub mod landscape;

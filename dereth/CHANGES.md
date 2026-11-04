@@ -27,6 +27,9 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: the flat, hard-edged sprites of light are gone, in favour of real light in their colour, and shadows from a room's lights now have soft edges.
 - Better Lighting: an art pack can give an object a light of its own, shining day and night with a soft glow in the air about it.
 - Better Lighting: Light Draw Distance chooses how far lamps, flames and art pack lights shine and glow, from 0.5x to 5x, and they now fade out in the distance instead of going out at once.
+- Enhanced Graphics: a Render Scale menu draws the world at 85%, 75%, 67% or 50% of the screen's pixels each way, for a higher frame rate on large screens. On a Mac MetalFX rebuilds the picture at full size; elsewhere it is enlarged. Anti-Aliasing stays on below 100%, and pictures are read for the full frame.
+- Enhanced Graphics: Render Scale starts at Dynamic, as the Low, Medium and High presets have it (Ultra draws 100%): it lowers the render scale to hold the Dynamic Resolution Frame Rate (60 FPS unless chosen), shown only while Dynamic is chosen.
+- Performance Panel: SCALE shows the render scale drawn now, as a Dynamic render scale moves it.
 
 ## 0.4.12 (2026-11-03)
 

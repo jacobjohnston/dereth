@@ -10,7 +10,12 @@
 //! after Full Screen; the host reads the share from the store every frame ([`percent`]), so a
 //! change applies at once. The front page keeps the choice, and the host hands a change made on a
 //! page back to it, so the profile does not keep it ([`left_out_of_save`]).
+//!
+//! The enhanced graphics' own render scale (`Fidelity.RenderScale`, [`super::fidelity`]) offers
+//! the same shares and Dynamic ([`DYNAMIC`]), reads the same words ([`is_a_scale`]), and the profile
+//! keeps it.
 
+use crate::options::names::fidelity::RENDER_SCALE as FIDELITY_RENDER_SCALE;
 use crate::view::PrefValue;
 
 /// `[Display] RenderScale`: the share of the screen's own pixels drawn while the client fills
@@ -26,8 +31,82 @@ pub const CHOICES: [u32; 5] = [100, 85, 75, 67, 50];
 /// All of the screen's pixels.
 pub const ALL: u32 = 100;
 
+/// The enhanced graphics' choice that moves the render scale to hold a frame rate (see
+/// [`super::dynamic_resolution`]): no share, so no share is mistaken for it.
+pub const DYNAMIC: u32 = 1;
+
+/// Its words.
+const DYNAMIC_WORD: &str = "Dynamic";
+
+/// Dynamic's words in the menu, marked where it is the default.
+fn dynamic_label() -> String {
+    if super::fidelity::SCALE_DEFAULT == DYNAMIC {
+        format!("{DYNAMIC_WORD} (Default)")
+    } else {
+        DYNAMIC_WORD.to_owned()
+    }
+}
+
 /// The least share drawn: half the screen's pixels each way.
 pub const LEAST: u32 = 50;
+
+/// A share in percent as a multiple: `0.5x`, `1x`, `1.5x`.
+fn times(share: u32) -> String {
+    let whole = share / 100;
+    let part = share % 100;
+    if part == 0 {
+        format!("{whole}x")
+    } else if part.is_multiple_of(10) {
+        format!("{whole}.{}x", part / 10)
+    } else {
+        format!("{whole}.{part:02}x")
+    }
+}
+
+/// `share`'s words in the profile, marked where it is the enhanced graphics' default.
+fn label(share: u32) -> String {
+    if share == super::fidelity::SCALE_DEFAULT {
+        format!("{} (Default)", times(share))
+    } else {
+        times(share)
+    }
+}
+
+/// The enhanced graphics' words for a share in their menu: percent, the whole frame named and the
+/// default marked.
+fn percent_label(share: u32) -> String {
+    match (share == ALL, share == super::fidelity::SCALE_DEFAULT) {
+        (true, true) => "100% (Native, Default)".to_owned(),
+        (true, false) => "100% (Native)".to_owned(),
+        (false, true) => format!("{share}% (Default)"),
+        (false, false) => format!("{share}%"),
+    }
+}
+
+/// The share in percent a word stands for: a multiple with or without its mark, or a percent with
+/// or without its sign.
+fn parse_share(raw: &str) -> Option<u32> {
+    let word = raw.trim();
+    let word = word.split(" (").next().unwrap_or(word).trim_end();
+    if let Some(many) = word.strip_suffix(['x', 'X']) {
+        let many: f32 = many.trim_end().parse().ok()?;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        // LINT-OK: a menu's multiple, a small positive number, brought to percent and rounded.
+        return (many.is_finite() && many > 0.0).then_some((many * 100.0 + 0.5) as u32);
+    }
+    word.trim_end_matches('%').trim_end().parse().ok()
+}
+
+/// Whether `name` is the enhanced graphics' render scale.
+fn is_fidelity(name: &str) -> bool {
+    name.eq_ignore_ascii_case(FIDELITY_RENDER_SCALE)
+}
+
+/// Whether `name` is one of the two preferences that hold a share.
+#[must_use]
+pub fn is_a_scale(name: &str) -> bool {
+    name.eq_ignore_ascii_case(RENDER_SCALE) || is_fidelity(name)
+}
 
 /// `share`, kept between [`LEAST`] and [`ALL`].
 const fn kept(share: u32) -> u32 {
@@ -68,45 +147,72 @@ pub fn percent() -> u32 {
     }
 }
 
-/// The value a word stands for: a share in percent, with or without its sign, between [`LEAST`]
-/// and [`ALL`]. `None` for another name or another word, which leaves the option as it was.
+/// The value a word stands for: a share in percent, with or without its sign, or as a multiple,
+/// between [`LEAST`] and [`ALL`], or the enhanced graphics' Dynamic. `None` for another name or
+/// another word, which leaves the option as it was.
 #[must_use]
 pub fn parse_value(name: &str, raw: &str) -> Option<i32> {
-    if !name.eq_ignore_ascii_case(RENDER_SCALE) {
+    if !is_a_scale(name) {
         return None;
     }
-    let share: u32 = raw.trim().trim_end_matches('%').trim_end().parse().ok()?;
+    if is_fidelity(name)
+        && raw
+            .trim()
+            .get(..DYNAMIC_WORD.len())
+            .is_some_and(|w| w.eq_ignore_ascii_case(DYNAMIC_WORD))
+    {
+        return i32::try_from(DYNAMIC).ok();
+    }
+    let share = parse_share(raw)?;
     (LEAST..=ALL)
         .contains(&share)
         .then(|| i32::try_from(share).ok())
         .flatten()
 }
 
-/// The words for a value: the share in percent. `None` for any other name.
+/// The words for a value: the share in percent, or for the enhanced graphics as a multiple, or
+/// Dynamic. `None` for any other name.
 #[must_use]
 pub fn convert_to_string(name: &str, v: &PrefValue) -> Option<String> {
-    if !name.eq_ignore_ascii_case(RENDER_SCALE) {
+    if !is_a_scale(name) {
         return None;
     }
     match v {
+        PrefValue::Int(i) if is_fidelity(name) => u32::try_from(*i).ok().map(|s| {
+            if s == DYNAMIC {
+                dynamic_label()
+            } else {
+                label(s)
+            }
+        }),
         PrefValue::Int(i) => Some(format!("{i}%")),
         _ => None,
     }
 }
 
-/// The shares a page offers ([`CHOICES`]), each as its words; `None` for any other name.
+/// The shares a page offers ([`CHOICES`]), each as its words, after the enhanced graphics'
+/// Dynamic; `None` for any other name.
 #[must_use]
 pub fn choice_rows(name: &str) -> Option<Vec<super::store::Choice>> {
-    if !name.eq_ignore_ascii_case(RENDER_SCALE) {
+    if !is_a_scale(name) {
         return None;
     }
+    let fidelity = is_fidelity(name);
+    let dynamic = fidelity.then(|| super::store::Choice {
+        label: dynamic_label(),
+        value: i32::try_from(DYNAMIC).unwrap_or(1),
+    });
     Some(
-        CHOICES
-            .iter()
-            .map(|&share| super::store::Choice {
-                label: format!("{share}%"),
+        dynamic
+            .into_iter()
+            .chain(CHOICES.iter().map(|&share| super::store::Choice {
+                label: if fidelity {
+                    percent_label(share)
+                } else {
+                    format!("{share}%")
+                },
                 value: i32::try_from(share).unwrap_or(100),
-            })
+            }))
             .collect(),
     )
 }
@@ -241,5 +347,50 @@ mod tests {
             Some("85%")
         );
         assert_eq!(convert_to_string("Other.Name", &PrefValue::Int(85)), None);
+    }
+
+    /// The enhanced graphics' render scale offers Dynamic before the shares, reads a multiple or
+    /// a percent, and writes a multiple, or Dynamic, which is its default and reads back.
+    ///
+    /// Behaviour: none (the experimental render scale's spelling).
+    #[test]
+    fn the_enhanced_render_scale_reads_a_multiple_or_a_percent_and_offers_dynamic() {
+        let fidelity = FIDELITY_RENDER_SCALE;
+        assert!(is_a_scale(fidelity) && is_a_scale(RENDER_SCALE));
+        assert_eq!(parse_value(fidelity, "0.5x"), Some(50));
+        assert_eq!(parse_value(fidelity, "75%"), Some(75));
+        assert_eq!(parse_value(RENDER_SCALE, "0.75x"), Some(75));
+        assert_eq!(
+            parse_value(RENDER_SCALE, "Dynamic"),
+            None,
+            "the browser's has none"
+        );
+        assert_eq!(
+            convert_to_string(fidelity, &PrefValue::Int(50)).as_deref(),
+            Some("0.5x")
+        );
+        assert_eq!(
+            convert_to_string(fidelity, &PrefValue::Int(100)).as_deref(),
+            Some("1x")
+        );
+        let dynamic = convert_to_string(fidelity, &PrefValue::Int(1)).unwrap();
+        assert_eq!(dynamic, "Dynamic (Default)");
+        assert_eq!(parse_value(fidelity, &dynamic), Some(1));
+        let rows: Vec<(String, i32)> = choice_rows(fidelity)
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.label, c.value))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Dynamic (Default)".to_owned(), 1),
+                ("100% (Native)".to_owned(), 100),
+                ("85%".to_owned(), 85),
+                ("75%".to_owned(), 75),
+                ("67%".to_owned(), 67),
+                ("50%".to_owned(), 50)
+            ]
+        );
     }
 }

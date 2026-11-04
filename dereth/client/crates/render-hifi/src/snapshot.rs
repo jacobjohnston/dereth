@@ -496,6 +496,9 @@ pub struct HifiCamera {
     /// it dithers so that frames of them average to soft edges: 1 and over (the fraction is the
     /// place), nought on a frame drawn without the anti-aliasing.
     pub dither: f32,
+    /// How many levels finer the world's pictures are read: what the anti-aliasing rebuilds the
+    /// full frame from has the pixels of the frame, not the fewer it draws. Set with the jitter.
+    pub mip_bias: f32,
 }
 
 impl HifiCamera {

@@ -569,6 +569,10 @@ pub enum FidelityFeature {
     NoFlameFlicker,
     /// `Fidelity.LightDrawDistance`.
     LightDrawDistance,
+    /// `Fidelity.DynamicResolution`.
+    DynamicResolution,
+    /// `Fidelity.RenderScale`.
+    RenderScale,
     /// `Fidelity.Debug`.
     Debug,
 }
@@ -576,7 +580,7 @@ pub enum FidelityFeature {
 #[cfg(feature = "hifi")]
 impl FidelityFeature {
     /// Every option, in the order the names list them.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 17] = [
         Self::Lighting,
         Self::Shadows,
         Self::GlobalIllumination,
@@ -591,6 +595,8 @@ impl FidelityFeature {
         Self::Hdr,
         Self::NoFlameFlicker,
         Self::LightDrawDistance,
+        Self::DynamicResolution,
+        Self::RenderScale,
         Self::Debug,
     ];
 
@@ -612,27 +618,39 @@ impl FidelityFeature {
             Self::Hdr => fidelity::HDR,
             Self::NoFlameFlicker => fidelity::NO_FLAME_FLICKER,
             Self::LightDrawDistance => fidelity::LIGHT_DRAW_DISTANCE,
+            Self::DynamicResolution => fidelity::DYNAMIC_RESOLUTION,
+            Self::RenderScale => fidelity::RENDER_SCALE,
             Self::Debug => fidelity::DEBUG,
         }
     }
 
-    /// Whether the option chooses how frames reach the screen, or how the presentation draws what
-    /// it already draws, rather than asking for an effect, so that alone it asks nothing of the
-    /// device.
+    /// Whether the option chooses how frames reach the screen, how many of the frame's pixels the
+    /// world is drawn at, or how the presentation draws what it already draws, rather than asking
+    /// for an effect, so that alone it asks nothing of the device.
     #[must_use]
     pub const fn is_presentation_choice(self) -> bool {
-        matches!(self, Self::VSync | Self::Hdr | Self::NoFlameFlicker)
+        matches!(
+            self,
+            Self::VSync
+                | Self::Hdr
+                | Self::NoFlameFlicker
+                | Self::DynamicResolution
+                | Self::RenderScale
+        )
     }
 
     /// The highest value the option takes: 4 for an effect (Ultra), 1 for the switches that
     /// turn something off (the retail look's, the anti-aliasing's, the slope materials', the
     /// flicker's) and the presentation choices, the greatest share for the light draw distance,
-    /// the last view for the diagnostic views.
+    /// the last view for the diagnostic views, the highest frame rate for Dynamic Resolution, and
+    /// under a hundred for the render scale.
     #[must_use]
     pub const fn max(self) -> u32 {
         match self {
             Self::Debug => 7,
             Self::LightDrawDistance => dereth_client_contract::options::light_distance::MOST,
+            Self::RenderScale => 99,
+            Self::DynamicResolution => 120,
             Self::RetailLook
             | Self::NoAntiAliasing
             | Self::NoSlopeMaterials
@@ -644,12 +662,14 @@ impl FidelityFeature {
     }
 
     /// What the option holds where the profile names nothing, when it is not 0: a box's default,
-    /// or the Light Draw Distance's.
+    /// or the Light Draw Distance's, the render scale's or Dynamic Resolution's.
     #[must_use]
     pub fn default_value(self) -> Option<u32> {
         use dereth_client_contract::options as o;
         match self {
             Self::LightDrawDistance => u32::try_from(o::light_distance::DEFAULT).ok(),
+            Self::RenderScale => Some(o::fidelity::SCALE_DEFAULT),
+            Self::DynamicResolution => u32::try_from(o::dynamic_resolution::DEFAULT).ok(),
             _ => o::fidelity::find(self.name())
                 .filter(|b| b.on_by_default)
                 .map(|_| 1),
@@ -657,10 +677,18 @@ impl FidelityFeature {
     }
 
     /// `raw` as this option stores it: an effect past Ultra is Ultra; a diagnostic view past the
-    /// last is off; a light draw distance outside its menu is the whole distance, 0.
+    /// last is off; a light draw distance outside its menu is the whole distance, 0; a render scale
+    /// that is neither Dynamic nor a share under the whole frame is all of its pixels, 0.
     #[must_use]
     pub const fn clamp(self, raw: u32) -> u32 {
-        if matches!(self, Self::LightDrawDistance) {
+        if matches!(self, Self::RenderScale) {
+            use dereth_client_contract::options::render_scale::{DYNAMIC, LEAST};
+            if raw == DYNAMIC || (raw >= LEAST && raw <= self.max()) {
+                raw
+            } else {
+                0
+            }
+        } else if matches!(self, Self::LightDrawDistance) {
             if raw >= dereth_client_contract::options::light_distance::LEAST && raw <= self.max() {
                 raw
             } else {
@@ -703,6 +731,26 @@ impl FidelityPreferences {
             let raw = match feature {
                 // The view a diagnostic run asks for, by number.
                 FidelityFeature::Debug => prefs.u32(feature.name()),
+                // The share the page chose, or Dynamic, in its words.
+                FidelityFeature::RenderScale => prefs
+                    .get(feature.name())
+                    .and_then(|v| {
+                        dereth_client_contract::options::render_scale::parse_value(
+                            feature.name(),
+                            v,
+                        )
+                    })
+                    .and_then(|v| u32::try_from(v).ok()),
+                // A frame rate in its words.
+                FidelityFeature::DynamicResolution => prefs
+                    .get(feature.name())
+                    .and_then(|v| {
+                        dereth_client_contract::options::dynamic_resolution::parse_value(
+                            feature.name(),
+                            v,
+                        )
+                    })
+                    .and_then(|v| u32::try_from(v).ok()),
                 // A share by its words.
                 FidelityFeature::LightDrawDistance => prefs
                     .get(feature.name())
@@ -777,8 +825,8 @@ impl FidelityPreferences {
             .any(|f| self.effective(f) != 0)
     }
 
-    /// These preferences with the presentation choices taken out: what the presentation's own
-    /// settings are made from, so a change to one alone needs no new start.
+    /// These preferences with the presentation choices taken out, the render scale among them: a
+    /// change to one alone needs no new start.
     #[must_use]
     pub fn without_presentation_choices(mut self) -> Self {
         for (i, f) in FidelityFeature::ALL.iter().enumerate() {
@@ -918,6 +966,10 @@ mod tests {
             );
             let at = if f == FidelityFeature::LightDrawDistance {
                 150
+            } else if f == FidelityFeature::RenderScale {
+                dereth_client_contract::options::render_scale::DYNAMIC
+            } else if f == FidelityFeature::DynamicResolution {
+                60
             } else {
                 u32::from(on)
             };
@@ -1028,6 +1080,39 @@ mod tests {
             4,
             "the stored value is kept"
         );
+    }
+
+    /// Behaviour: none (the experimental render scale; visual only)
+    #[test]
+    #[cfg(feature = "hifi")]
+    fn the_render_scale_holds_dynamic_or_a_share_under_the_whole_frame_and_draws_nothing_itself() {
+        use dereth_client_contract::PrefValue;
+        let mut q = FidelityPreferences {
+            interface: true,
+            ..FidelityPreferences::default()
+        };
+        assert!(q.set_named(fidelity::RENDER_SCALE, &PrefValue::Int(67)));
+        assert_eq!(q.effective(FidelityFeature::RenderScale), 67);
+        assert!(!q.any_effective(), "a scale alone draws nothing");
+        assert!(!q.any_stored());
+        assert_eq!(
+            q.without_presentation_choices(),
+            FidelityPreferences {
+                interface: true,
+                ..FidelityPreferences::default()
+            }
+        );
+        for (raw, stored) in [(100, 0), (49, 0), (2, 0), (1, 1), (50, 50), (99, 99)] {
+            assert!(q.set_named(fidelity::RENDER_SCALE, &PrefValue::Int(raw)));
+            assert_eq!(q.value(FidelityFeature::RenderScale), stored, "{raw}");
+        }
+        let q = FidelityPreferences::parse_switch("Lighting=1,RenderScale=75").unwrap();
+        assert_eq!(q.effective(FidelityFeature::RenderScale), 75);
+        let read = FidelityPreferences::from_preferences(&Preferences::parse(
+            "[UI]\nInterface=Horizon\n[Fidelity]\nRenderScale=0.5x\nDynamicResolution=90 FPS\n",
+        ));
+        assert_eq!(read.effective(FidelityFeature::RenderScale), 50);
+        assert_eq!(read.effective(FidelityFeature::DynamicResolution), 90);
     }
 
     /// Behaviour: hifi.options.the-fidelity-section-reaches-the-render-preferences

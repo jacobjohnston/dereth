@@ -22,7 +22,8 @@ struct Weather {
     // x the quality; y how much of what falls is snow, 0 rain to 1 snow; z how much falls, 0 to
     // 1; w radians per pixel.
     params: vec4<f32>,
-    // x, y where the world fog begins and is full; z, w unused.
+    // x, y where the world fog begins and is full; z how many of the frame's pixels each texel of
+    // the world's depth was drawn at; w unused.
     fogp: vec4<f32>,
     // x the period the time wraps over, seconds; y, z where render space's origin sits in the
     // world, wrapped to the noise's period; w that period, metres.
@@ -291,8 +292,39 @@ fn in_view(px: vec2<f32>) -> bool {
     return px.x >= v.x && px.y >= v.y && px.x < v.x + v.z && px.y < v.y + v.w;
 }
 
+// How far apart, as a share of the nearer's distance, the samples round a pixel may lie and still
+// be one surface.
+const DEPTH_ONE_SURFACE: f32 = 0.05;
+
+// The depth at `px`. A picture drawn at fewer pixels has its depth enlarged in steps, and a step
+// is no surface: read between the steps' middles, which on a flat surface is exact. Across an edge,
+// the step as it is.
 fn depth_at(px: vec2<i32>) -> f32 {
-    return textureLoad(depth, px, 0);
+    let raw = textureLoad(depth, px, 0);
+    let step = W.fogp.z;
+    if (step <= 1.001) {
+        return raw;
+    }
+    let at = vec2<f32>(px) + vec2<f32>(0.5) - W.viewport.xy;
+    let low = at / step - vec2<f32>(0.5);
+    let i = floor(low);
+    let f = low - i;
+    let most = vec2<i32>(textureDimensions(depth)) - vec2<i32>(1);
+    let taken = W.viewport.xy + (i + vec2<f32>(0.5)) * step;
+    let across = vec2<i32>(i32(step + 0.5), 0);
+    let down = vec2<i32>(0, i32(step + 0.5));
+    let t = vec2<i32>(taken);
+    let a = textureLoad(depth, clamp(t, vec2<i32>(0), most), 0);
+    let b = textureLoad(depth, clamp(t + across, vec2<i32>(0), most), 0);
+    let c = textureLoad(depth, clamp(t + down, vec2<i32>(0), most), 0);
+    let e = textureLoad(depth, clamp(t + across + down, vec2<i32>(0), most), 0);
+    // Depth runs as one over the distance: the distance, as far as a share of it goes.
+    let far = max(max(a, b), max(c, e));
+    let near = min(min(a, b), min(c, e));
+    if (far >= 1.0 || (1.0 - near) / max(1.0 - far, 1e-7) > 1.0 + DEPTH_ONE_SURFACE) {
+        return raw;
+    }
+    return mix(mix(a, b, f.x), mix(c, e, f.x), f.y);
 }
 
 fn point_at(px: vec2<i32>) -> vec3<f32> {

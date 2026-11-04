@@ -148,6 +148,13 @@ pub mod fidelity {
     /// `Fidelity.LightDrawDistance`: how far the lamps light the world and show their glow, a
     /// share of the distance they reach with nothing changed, percent.
     pub const LIGHT_DRAW_DISTANCE: &str = "Fidelity.LightDrawDistance";
+    /// `Fidelity.DynamicResolution`: the frame rate a Dynamic render scale moves to hold, frames a
+    /// second.
+    pub const DYNAMIC_RESOLUTION: &str = "Fidelity.DynamicResolution";
+    /// `Fidelity.RenderScale`: the share of the frame's pixels the better lighting draws the world
+    /// at, each way, percent, or 1 for Dynamic; on macOS MetalFX rebuilds the picture at the
+    /// frame's size.
+    pub const RENDER_SCALE: &str = "Fidelity.RenderScale";
     /// `Fidelity.Debug`: a diagnostic view, set only by `--set-at`: 0 Off, 1 Passthrough,
     /// 2 Depth, 3 Normals, 4 AO, 5 Shadows, 6 Census, 7 Parity (re-shaded with no pass).
     pub const DEBUG: &str = "Fidelity.Debug";
@@ -177,6 +184,8 @@ pub mod fidelity {
         HDR,
         NO_FLAME_FLICKER,
         LIGHT_DRAW_DISTANCE,
+        DYNAMIC_RESOLUTION,
+        RENDER_SCALE,
         DEBUG,
     ];
 }

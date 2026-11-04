@@ -1850,6 +1850,17 @@ fn frame_constants(frame: &HifiFrame, clip_from_render: Mat4, wind: bool) -> Vec
     #[allow(clippy::cast_possible_truncation)]
     let clock = frame.time.rem_euclid(4096.0) as f32;
     c.extend([clock, if wind { 1.0 } else { 0.0 }, origin.x, origin.y]);
+    // The storm's gale: its heading east and north, how far the storm has come in, and how hard
+    // it gusts now, 0 to 1.
+    let gale =
+        glam::Vec2::from(crate::passes::weather::storm::frame_wind(frame)).normalize_or(Vec2::X);
+    let gust = crate::passes::weather::storm::gust(frame.time) * 0.5 + 0.5;
+    let storm = if wind {
+        frame.sky.storm.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    c.extend([gale.x, gale.y, storm, gust]);
     c
 }
 
@@ -2213,8 +2224,8 @@ mod tests {
         let c = frame_constants(&frame, Mat4::IDENTITY, true);
         assert_eq!(
             c.len(),
-            60,
-            "two transforms and seven rows, as the shader's frame"
+            64,
+            "two transforms and eight rows, as the shader's frame"
         );
         assert!(c.len() * 4 <= 256, "inside the frame's uniform");
         // The landscape's ambient, which the light per pixel divides out, and the objects': a

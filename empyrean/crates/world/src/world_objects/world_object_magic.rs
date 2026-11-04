@@ -584,6 +584,62 @@ pub fn show_resist_info(
     }
 }
 
+/// Not ACE: Ethangar's Wrath, a spell of this world's data overlay.
+pub const ETHANGARS_WRATH: u32 = 6341;
+
+/// Not ACE: the weenie of the burst Ethangar's Wrath leaves on the caster and each creature it kills.
+const WRATH_BURST: u32 = 100_004;
+
+/// Not ACE: how long a burst stays in the world, in seconds.
+const WRATH_BURST_SECONDS: f64 = 4.0;
+
+/// Not ACE: the living, attackable creatures, players aside, that have `this` as their attack
+/// target or are its selection.
+#[must_use]
+pub fn wrath_victims(w: &World, this: ObjectGuid) -> Vec<ObjectGuid> {
+    let selected = obj(w, this).and_then(|o| {
+        o.health_query_target()
+            .or_else(|| o.current_appraisal_target())
+    });
+    w.objects
+        .guids()
+        .filter(|&g| {
+            obj(w, g).is_some_and(|o| o.is_creature() && !o.is_player() && o.attackable())
+                && creature_is_alive(w, g)
+                && (selected == Some(g.full())
+                    || crate::world_objects::monster_combat::attack_target(w, g) == Some(this))
+        })
+        .collect()
+}
+
+/// Not ACE: puts a burst where `at` stands, and takes it away again.
+fn wrath_burst(w: &mut World, at: ObjectGuid) {
+    let Some(location) = obj(w, at).and_then(|o| o.location()) else {
+        return;
+    };
+    let Some(mut burst) =
+        crate::factories::world_object_factory::create_new_world_object_by_wcid_in_world(
+            w,
+            WRATH_BURST,
+        )
+    else {
+        return;
+    };
+    burst.set_location(Some(location));
+    let guid = burst.guid;
+    if w.objects.insert(burst).is_err() {
+        return;
+    }
+    crate::dispatch::enter_world::enter_world(w, guid);
+
+    let mut chain = ActionChain::new();
+    chain.add_delay_seconds(w, WRATH_BURST_SECONDS);
+    chain.add_action(Actor::Object(guid), move |w| {
+        crate::world_objects::world_object::destroy(w, guid, true, false);
+    });
+    chain.enqueue_chain(w);
+}
+
 /// Creates a spell based on MetaSpellType. `item_caster`, `weapon`, `is_weapon_spell`,
 /// `from_proc` and `equip` default to null / null / false / false / false.
 // ACE: WorldObject.HandleCastSpell
@@ -599,6 +655,16 @@ pub fn handle_cast_spell(
     from_proc: bool,
     equip: bool,
 ) -> bool {
+    // Not ACE: dealt as damage, so each death is credited to the caster.
+    if spell.id() == ETHANGARS_WRATH {
+        wrath_burst(w, this);
+        for victim in wrath_victims(w, this) {
+            wrath_burst(w, victim);
+            crate::world_objects::creature_death::smite(w, victim, this, true);
+        }
+        return true;
+    }
+
     let target = live(w, target);
     let item_caster = live(w, item_caster);
 

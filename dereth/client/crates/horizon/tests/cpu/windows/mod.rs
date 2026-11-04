@@ -8,6 +8,7 @@ mod character;
 mod examine;
 mod frame_art;
 mod info;
+mod map;
 mod notebook;
 mod plugins;
 mod settings;

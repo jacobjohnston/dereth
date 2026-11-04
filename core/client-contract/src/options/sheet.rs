@@ -1058,9 +1058,6 @@ const FIDELITY_ROWS: [Row; 13] = [
     fidelity_box(3),
     fidelity_box(4),
     fidelity_box(5),
-    fidelity_box(6),
-    fidelity_box(7),
-    fidelity_box(9),
     only(
         Shown::Only(Interface::Horizon),
         noted(
@@ -1072,6 +1069,9 @@ const FIDELITY_ROWS: [Row; 13] = [
             ),
         ),
     ),
+    fidelity_box(6),
+    fidelity_box(7),
+    fidelity_box(9),
 ];
 
 /// The row of the `i`th box.

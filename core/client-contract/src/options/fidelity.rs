@@ -16,14 +16,14 @@
 //! the sunlight in the air, inside the better lighting.
 //!
 //! The effects start on. The enhanced graphics' quality presets set several of them at once
-//! ([`PRESET_VALUES`]), and the boxes' defaults are the Medium preset's.
+//! ([`PRESET_VALUES`]), and the defaults of the boxes and the menu are the Medium preset's.
 //!
 //! In a build with the `hifi` feature the options are registered with the value store
 //! ([`register`]), so the page reads and writes them like any other option and the profile keeps
 //! them in its `[Fidelity]` section. Without it nothing here is registered and no page shows them.
 
 use super::names::fidelity;
-use crate::PrefValue;
+use crate::PrefValue::{self, Int};
 
 /// What a box needs before it draws anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,7 +171,7 @@ pub const OPTIONS: [FidelityOption; 12] = [
 
 /// The menus among the effects' rows, each with what it needs. A menu's own module registers it
 /// and gives its choices; a row here gives it the boxes' rules.
-pub const MENUS: &[(&str, Needs)] = &[];
+pub const MENUS: &[(&str, Needs)] = &[(fidelity::GOD_RAYS, Needs::Lighting)];
 
 /// The heading's caption.
 pub const HEADING: &str = "Enhanced Graphics";
@@ -207,6 +207,7 @@ pub const PRESET_VALUES: &[(&str, [PrefValue; PRESET_NAMES.len()])] = &[
     (fidelity::WEATHER, [OFF, ON, ON, ON]),
     (fidelity::NO_ANTI_ALIASING, [ON, OFF, OFF, OFF]),
     (fidelity::NO_SLOPE_MATERIALS, [OFF, OFF, OFF, OFF]),
+    (fidelity::GOD_RAYS, [Int(0), Int(1), Int(1), Int(1)]),
 ];
 
 /// One quality preset, by its place in [`PRESET_NAMES`].
@@ -311,13 +312,8 @@ pub fn needs(name: &str) -> Option<Needs> {
 /// when ticked.
 #[must_use]
 pub fn blocked(name: &str, ticked: impl Fn(&str) -> bool, rays: Option<bool>) -> Option<Blocked> {
-    let wants = if super::god_rays::is_god_rays(name) {
-        Needs::Lighting
-    } else {
-        needs(name)?
-    };
     let lighting = ticked(fidelity::LIGHTING);
-    match wants {
+    match needs(name)? {
         Needs::Lighting | Needs::LightingAndRays | Needs::LightingWithoutRetailLook
             if !lighting =>
         {
@@ -362,10 +358,9 @@ pub fn left_out_of_save(
     value: &PrefValue,
     ini: &crate::persist::preferences::UserPreferences,
 ) -> bool {
-    let unchanged = if super::god_rays::is_god_rays(name) {
-        *value == PrefValue::Int(super::god_rays::DEFAULT)
-    } else {
-        find(name).is_some_and(|o| *value == PrefValue::Bool(o.on_by_default))
+    let unchanged = match find(name) {
+        Some(o) => *value == PrefValue::Bool(o.on_by_default),
+        None => is_a_menu(name) && *value == PrefValue::Int(super::god_rays::DEFAULT),
     };
     unchanged
         && !ini
@@ -617,8 +612,8 @@ mod tests {
     #[test]
     fn what_the_lighting_and_the_retail_look_rule_out_leaves_the_page() {
         use fidelity::{
-            AMBIENT_OCCLUSION, GLOBAL_ILLUMINATION, HDR, LAMPS, LIGHTING, NO_ANTI_ALIASING,
-            NO_SLOPE_MATERIALS, RETAIL_LOOK, SHADOWS, SKY, VSYNC, WEATHER,
+            AMBIENT_OCCLUSION, GLOBAL_ILLUMINATION, GOD_RAYS, HDR, LAMPS, LIGHTING,
+            NO_ANTI_ALIASING, NO_SLOPE_MATERIALS, RETAIL_LOOK, SHADOWS, SKY, VSYNC, WEATHER,
         };
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         let left = |name: &str, on: &'static [&'static str]| {
@@ -638,9 +633,11 @@ mod tests {
             NO_SLOPE_MATERIALS,
             VSYNC,
             HDR,
+            GOD_RAYS,
         ] {
             assert!(left(name, &[]), "{name}");
         }
+        assert!(!left(GOD_RAYS, &[LIGHTING, RETAIL_LOOK]));
         // The retail look takes off what an art pack draws, and only that.
         assert!(left(NO_SLOPE_MATERIALS, &[LIGHTING, RETAIL_LOOK]));
         for o in OPTIONS.iter().filter(|o| o.name != NO_SLOPE_MATERIALS) {
@@ -700,12 +697,17 @@ mod tests {
         let low = PRESETS[0].values();
         assert!(low.contains(&(fidelity::GLOBAL_ILLUMINATION, PrefValue::Bool(false))));
         assert!(low.contains(&(fidelity::NO_ANTI_ALIASING, PrefValue::Bool(true))));
+        assert!(low.contains(&(fidelity::GOD_RAYS, Int(super::super::god_rays::OFF))));
         let ultra = PRESETS[3].values();
-        assert!(ultra
-            .iter()
-            .all(|(name, v)| *v == PrefValue::Bool(!find(name).unwrap().inverted)));
-        // The boxes' defaults are the Medium preset's.
-        let defaults = |name: &str| find(name).map(|o| PrefValue::Bool(o.on_by_default));
+        assert!(ultra.iter().all(|(name, v)| match find(name) {
+            Some(o) => *v == PrefValue::Bool(!o.inverted),
+            None => *v == Int(super::super::god_rays::LOW),
+        }));
+        // The defaults of the boxes and the menu are the Medium preset's.
+        let defaults = |name: &str| match find(name) {
+            Some(o) => Some(PrefValue::Bool(o.on_by_default)),
+            None => is_a_menu(name).then_some(Int(super::super::god_rays::DEFAULT)),
+        };
         assert_eq!(preset_in_use(defaults), Some(PRESETS[1]));
         // Each preset is in use once set, and a value of the player's own is none.
         for p in PRESETS {
@@ -735,22 +737,23 @@ mod tests {
         assert!(find(GOD_RAYS).is_none(), "the menu is no box");
     }
 
-    /// The God Rays menu is registered Off, and the save leaves it out until it is changed.
+    /// The God Rays menu starts at Low, as the Medium preset has it, and the save leaves it out
+    /// until it is changed.
     #[test]
-    fn the_god_rays_menu_is_off_and_left_out_of_the_profile_until_chosen() {
-        use super::super::god_rays::{DEFAULT, OFF};
+    fn the_god_rays_menu_starts_low_and_is_left_out_of_the_profile_until_chosen() {
+        use super::super::god_rays::{DEFAULT, LOW, OFF};
         use crate::persist::preferences::UserPreferences;
         let empty = UserPreferences::parse("").expect("an empty profile");
-        assert_eq!(DEFAULT, OFF);
-        let off = PrefValue::Int(OFF);
-        assert!(left_out_of_save(fidelity::GOD_RAYS, &off, &empty));
+        assert_eq!(DEFAULT, LOW);
+        let low = PrefValue::Int(LOW);
+        assert!(left_out_of_save(fidelity::GOD_RAYS, &low, &empty));
         assert!(!left_out_of_save(
             fidelity::GOD_RAYS,
-            &PrefValue::Int(2),
+            &PrefValue::Int(OFF),
             &empty
         ));
-        let named = UserPreferences::parse("[Fidelity]\r\nGodRays=Off\r\n").expect("reads");
-        assert!(!left_out_of_save(fidelity::GOD_RAYS, &off, &named));
+        let named = UserPreferences::parse("[Fidelity]\r\nGodRays=Low\r\n").expect("reads");
+        assert!(!left_out_of_save(fidelity::GOD_RAYS, &low, &named));
     }
 
     #[test]

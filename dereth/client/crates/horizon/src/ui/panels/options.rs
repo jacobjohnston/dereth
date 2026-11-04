@@ -1607,11 +1607,9 @@ fn effect_left_out(_row: &Row, _state: &GameState) -> bool {
 /// The preference of `row` when it is one of the experimental effects' boxes or menus.
 #[cfg(feature = "hifi")]
 fn effect_box(row: &Row) -> Option<&'static str> {
-    use dereth_client_contract::options::god_rays;
     match row.value {
         Value::Check(name) if fidelity::find(name).is_some() => Some(name),
         Value::Menu(name) if fidelity::is_a_menu(name) => Some(name),
-        Value::Menu(name) if god_rays::is_god_rays(name) => Some(name),
         _ => None,
     }
 }

@@ -636,12 +636,17 @@ impl FidelityFeature {
         }
     }
 
-    /// What the option holds where the profile names nothing, when it is not 0: a box's default.
+    /// What the option holds where the profile names nothing, when it is not 0: a box's default,
+    /// or the God Rays menu's.
     #[must_use]
     pub fn default_value(self) -> Option<u32> {
-        dereth_client_contract::options::fidelity::find(self.name())
-            .filter(|b| b.on_by_default)
-            .map(|_| 1)
+        use dereth_client_contract::options as o;
+        match self {
+            Self::GodRays => u32::try_from(o::god_rays::DEFAULT).ok(),
+            _ => o::fidelity::find(self.name())
+                .filter(|b| b.on_by_default)
+                .map(|_| 1),
+        }
     }
 
     /// `raw` as this option stores it: an effect past Ultra is Ultra; a diagnostic view past the
@@ -894,7 +899,12 @@ mod tests {
                     | FidelityFeature::Weather
                     | FidelityFeature::VSync
             );
-            assert_eq!(d.value(f), u32::from(on), "{f:?}");
+            let at = if f == FidelityFeature::GodRays {
+                1
+            } else {
+                u32::from(on)
+            };
+            assert_eq!(d.value(f), at, "{f:?}");
         }
         // A box the profile turned off stays off.
         let off = FidelityPreferences::from_preferences(&Preferences::parse(
@@ -954,14 +964,21 @@ mod tests {
         };
         assert_eq!(read("Medium").effective(FidelityFeature::GodRays), 2);
         assert_eq!(read("3").effective(FidelityFeature::GodRays), 3);
-        assert_eq!(read("9").effective(FidelityFeature::GodRays), 0);
+        assert_eq!(
+            read("9").effective(FidelityFeature::GodRays),
+            1,
+            "a word it does not know leaves it at its default"
+        );
+        let switched = |s: &str| FidelityPreferences::parse_switch(s).unwrap();
         assert!(
-            !read("High").any_effective(),
+            !switched("GodRays=3").any_effective(),
             "God Rays draws inside the better lighting"
         );
-        let switched = FidelityPreferences::parse_switch("Lighting=1,GodRays=2").unwrap();
-        assert_eq!(switched.effective(FidelityFeature::GodRays), 2);
-        assert!(switched.any_effective());
+        assert_eq!(
+            switched("Lighting=1,GodRays=2").effective(FidelityFeature::GodRays),
+            2
+        );
+        assert!(switched("Lighting=1,GodRays=2").any_effective());
     }
 
     #[test]

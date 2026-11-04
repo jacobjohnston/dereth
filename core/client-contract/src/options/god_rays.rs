@@ -1,5 +1,5 @@
-//! How strongly sunlight shows in the air, God Rays: an experimental menu after the effects'
-//! boxes, drawn inside the better lighting. It is registered with them
+//! How strongly sunlight shows in the air, God Rays: an experimental menu among the effects' rows
+//! ([`super::fidelity::MENUS`]), drawn inside the better lighting. It is registered with them
 //! ([`super::fidelity::register`]); the profile keeps a level the player chose, and leaves out one
 //! still [`DEFAULT`] ([`super::fidelity::left_out_of_save`]).
 
@@ -20,8 +20,8 @@ pub const OFF: i32 = 0;
 /// The lightest level, and the one a ticked box stands for.
 pub const LOW: i32 = 1;
 
-/// The level until the player changes it: off, as every effect is until it is asked for.
-pub const DEFAULT: i32 = OFF;
+/// The level until the player changes it: Low, as the Medium preset has it.
+pub const DEFAULT: i32 = LOW;
 
 /// The levels the menu offers, least first.
 pub const LEVELS: [&str; 4] = ["Off", "Low", "Medium", "High"];

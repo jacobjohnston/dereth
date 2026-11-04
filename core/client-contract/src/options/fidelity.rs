@@ -55,8 +55,8 @@ pub struct FidelityOption {
     pub on_by_default: bool,
 }
 
-/// The twelve boxes, each above the boxes it can take off the page.
-pub const OPTIONS: [FidelityOption; 12] = [
+/// The thirteen boxes, each above the boxes it can take off the page.
+pub const OPTIONS: [FidelityOption; 13] = [
     FidelityOption {
         name: fidelity::LIGHTING,
         caption: "Enhanced Graphics",
@@ -130,6 +130,16 @@ pub const OPTIONS: [FidelityOption; 12] = [
         needs: Needs::Lighting,
         inverted: false,
         on_by_default: true,
+    },
+    FidelityOption {
+        name: fidelity::WATER,
+        caption: "Reflective Water",
+        note: "Draws the world's water as water, with ripples, reflections of the sky and the \
+               land, and a bed seen through it. The land is drawn again with it, from the game's \
+               own pictures. An art pack's ground always has this water.",
+        needs: Needs::LightingWithoutRetailLook,
+        inverted: false,
+        on_by_default: false,
     },
     FidelityOption {
         name: fidelity::NO_ANTI_ALIASING,
@@ -551,7 +561,7 @@ mod tests {
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         use fidelity::{
             AMBIENT_OCCLUSION, GLOBAL_ILLUMINATION, LAMPS, LIGHTING, NO_SLOPE_MATERIALS,
-            RETAIL_LOOK, SHADOWS, SKY, WEATHER,
+            RETAIL_LOOK, SHADOWS, SKY, WATER, WEATHER,
         };
         for name in [SHADOWS, GLOBAL_ILLUMINATION, LAMPS, WEATHER] {
             assert_eq!(
@@ -583,6 +593,16 @@ mod tests {
         );
         assert_eq!(blocked(WEATHER, with(&[LIGHTING]), Some(false)), None);
         assert_eq!(blocked(LIGHTING, with(&[]), Some(false)), None);
+        // The water needs the better lighting, and gives way to the retail look.
+        assert_eq!(
+            blocked(WATER, with(&[]), Some(false)),
+            Some(Blocked::NeedsLighting)
+        );
+        assert_eq!(blocked(WATER, with(&[LIGHTING]), Some(false)), None);
+        assert_eq!(
+            blocked(WATER, with(&[LIGHTING, RETAIL_LOOK]), None),
+            Some(Blocked::RetailLook)
+        );
         // The slope materials are an art pack's ground's, which Keep Retail Look leaves out.
         assert_eq!(
             blocked(NO_SLOPE_MATERIALS, with(&[]), None),

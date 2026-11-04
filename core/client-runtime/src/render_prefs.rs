@@ -555,6 +555,8 @@ pub enum FidelityFeature {
     Sky,
     /// `Fidelity.Weather`.
     Weather,
+    /// `Fidelity.Water`.
+    Water,
     /// `Fidelity.RetailLook`.
     RetailLook,
     /// `Fidelity.NoAntiAliasing`.
@@ -572,7 +574,7 @@ pub enum FidelityFeature {
 #[cfg(feature = "hifi")]
 impl FidelityFeature {
     /// Every option, in the order the names list them.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Lighting,
         Self::Shadows,
         Self::GlobalIllumination,
@@ -580,6 +582,7 @@ impl FidelityFeature {
         Self::Lamps,
         Self::Sky,
         Self::Weather,
+        Self::Water,
         Self::RetailLook,
         Self::NoAntiAliasing,
         Self::NoSlopeMaterials,
@@ -599,6 +602,7 @@ impl FidelityFeature {
             Self::Lamps => fidelity::LAMPS,
             Self::Sky => fidelity::SKY,
             Self::Weather => fidelity::WEATHER,
+            Self::Water => fidelity::WATER,
             Self::RetailLook => fidelity::RETAIL_LOOK,
             Self::NoAntiAliasing => fidelity::NO_ANTI_ALIASING,
             Self::NoSlopeMaterials => fidelity::NO_SLOPE_MATERIALS,
@@ -948,7 +952,7 @@ mod tests {
         assert!(q.set_named(fidelity::SHADOWS, &PrefValue::Int(7)));
         assert!(!q.set_named(fidelity::SHADOWS, &PrefValue::Float(2.0)));
         assert!(!q.set_named("Render.FieldOfView", &PrefValue::Int(2)));
-        assert!(!q.set_named("Fidelity.Water", &PrefValue::Int(2)));
+        assert!(!q.set_named("Fidelity.Puddles", &PrefValue::Int(2)));
         assert_eq!(
             q.effective(FidelityFeature::Shadows),
             4,
@@ -1000,7 +1004,7 @@ mod tests {
         let classic = FidelityPreferences::parse_switch("Lighting=1,Interface=0").expect("classic");
         assert!(!classic.any_effective() && classic.any_stored());
         assert!(FidelityPreferences::parse_switch("Lighting").is_err());
-        assert!(FidelityPreferences::parse_switch("Water=1").is_err());
+        assert!(FidelityPreferences::parse_switch("Puddles=1").is_err());
         assert!(FidelityPreferences::parse_switch("Sky=lots").is_err());
     }
 

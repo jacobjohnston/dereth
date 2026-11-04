@@ -1,4 +1,4 @@
-//! The words and rules of the optional high-fidelity presentation's options: ten check boxes on
+//! The words and rules of the optional high-fidelity presentation's options: eleven check boxes on
 //! the Horizon interface's Client page, under a heading of their own, each off until the player
 //! ticks it.
 //!
@@ -9,9 +9,10 @@
 //! creases itself, so the ambient occlusion stands aside in the outdoor frames it is drawn into;
 //! indoors and underground, where it draws nothing, the occlusion is drawn.) An art pack's models
 //! are drawn inside the better lighting too, and the retail look box draws the original models in
-//! their place. The better lighting smooths the world's edges with temporal anti-aliasing, which
-//! the ninth box turns off; an art pack's ground lays scree and rock on steep slopes, which the
-//! last box turns off.
+//! their place; the reflective water is drawn inside it, and gives way to the retail look, which
+//! draws the game's own water. The better lighting smooths the world's edges with temporal
+//! anti-aliasing, which the tenth box turns off; an art pack's ground lays scree and rock on steep
+//! slopes, which the last box turns off.
 //!
 //! In a build with the `hifi` feature the options are registered with the value store
 //! ([`register`]), so the page reads and writes them like any other option and the profile keeps
@@ -31,6 +32,8 @@ pub enum Needs {
     LightingAndRays,
     /// The better lighting and an art pack.
     ArtPack,
+    /// The better lighting, and the retail look's box unticked.
+    LightingWithoutRetailLook,
 }
 
 /// One box as the page shows it.
@@ -46,8 +49,8 @@ pub struct FidelityOption {
     pub needs: Needs,
 }
 
-/// The ten boxes, in page order.
-pub const OPTIONS: [FidelityOption; 10] = [
+/// The eleven boxes, in page order.
+pub const OPTIONS: [FidelityOption; 11] = [
     FidelityOption {
         name: fidelity::LIGHTING,
         caption: "Better Lighting (HDR Sun and Sky Light)",
@@ -99,6 +102,14 @@ pub const OPTIONS: [FidelityOption; 10] = [
         needs: Needs::Lighting,
     },
     FidelityOption {
+        name: fidelity::WATER,
+        caption: "Reflective Water",
+        note: "Draws the world's water as water, with ripples, reflections of the sky and the \
+               land, and a bed seen through it. The land is drawn again with it, from the game's \
+               own pictures. An art pack's ground always has this water.",
+        needs: Needs::LightingWithoutRetailLook,
+    },
+    FidelityOption {
         name: fidelity::RETAIL_LOOK,
         caption: "Retail Look (Original Models)",
         note: "Draws the original models where an art pack has replacements for them. An art \
@@ -137,6 +148,8 @@ pub enum Blocked {
     NeedsRays,
     /// No art pack is open.
     NeedsArtPack,
+    /// The retail look's box draws the game's own water.
+    RetailLook,
 }
 
 impl Blocked {
@@ -149,6 +162,7 @@ impl Blocked {
                 "Needs ray tracing, which this graphics card, driver or backend lacks"
             }
             Self::NeedsArtPack => "Needs an art pack",
+            Self::RetailLook => "Off under Retail Look, which draws the game's own water",
         }
     }
 }
@@ -193,11 +207,19 @@ pub fn blocked_with(
     let o = find(name)?;
     let lighting = ticked(fidelity::LIGHTING);
     match o.needs {
-        Needs::Lighting | Needs::LightingAndRays | Needs::ArtPack if !lighting => {
+        Needs::Lighting
+        | Needs::LightingAndRays
+        | Needs::LightingWithoutRetailLook
+        | Needs::ArtPack
+            if !lighting =>
+        {
             Some(Blocked::NeedsLighting)
         }
         Needs::LightingAndRays if rays == Some(false) => Some(Blocked::NeedsRays),
         Needs::ArtPack if !pack => Some(Blocked::NeedsArtPack),
+        Needs::LightingWithoutRetailLook if ticked(fidelity::RETAIL_LOOK) => {
+            Some(Blocked::RetailLook)
+        }
         _ => None,
     }
 }
@@ -422,7 +444,8 @@ mod tests {
     fn a_box_whose_prerequisite_is_off_or_covered_says_why() {
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         use fidelity::{
-            AMBIENT_OCCLUSION, GLOBAL_ILLUMINATION, LAMPS, LIGHTING, SHADOWS, SKY, WEATHER,
+            AMBIENT_OCCLUSION, GLOBAL_ILLUMINATION, LAMPS, LIGHTING, RETAIL_LOOK, SHADOWS, SKY,
+            WATER, WEATHER,
         };
         for name in [SHADOWS, GLOBAL_ILLUMINATION, LAMPS, WEATHER] {
             assert_eq!(
@@ -469,6 +492,16 @@ mod tests {
         );
         assert_eq!(blocked(WEATHER, with(&[LIGHTING]), Some(false)), None);
         assert_eq!(blocked(LIGHTING, with(&[]), Some(false)), None);
+        // The water needs the better lighting, and gives way to the retail look.
+        assert_eq!(
+            blocked(WATER, with(&[]), Some(false)),
+            Some(Blocked::NeedsLighting)
+        );
+        assert_eq!(blocked(WATER, with(&[LIGHTING]), Some(false)), None);
+        assert_eq!(
+            blocked(WATER, with(&[LIGHTING, RETAIL_LOOK]), None),
+            Some(Blocked::RetailLook)
+        );
     }
 
     #[test]

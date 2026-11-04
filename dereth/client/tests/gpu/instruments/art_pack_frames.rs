@@ -42,6 +42,7 @@
 //! - `DERETH_TERRAIN_KNOBS`: the drawn ground's knobs for the frames drawn with the pack, in the
 //!   tuning file's form with `;` between lines (`walk_cap = 0.3; cliffs = false`); the frames wait
 //!   for the world's landscape vertices the drawn ground is drawn from.
+//! - `DERETH_REPORT_OBJECTS`: objects to make for that frame, each `setup,block,x,y`, `;` between.
 //! - `DERETH_REPORT`: for [`capture_the_frame_a_report_describes`], the line the client's
 //!   `@report` printed, or the name of a file holding it. The frame is drawn as the report says it
 //!   was: the body where the player stood, the camera held where it stood, the time, the weather,
@@ -721,6 +722,24 @@ fn capture_the_frame_a_report_describes() {
         }
         let mut shot = Shot::open_blending(&store, gpu, &station, splat());
         shot.apply_report(&report);
+        // Objects the server would have made, which a report does not hold: a portal or a wisp.
+        for (k, spec) in env("DERETH_REPORT_OBJECTS")
+            .unwrap_or_default()
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .enumerate()
+        {
+            let f: Vec<&str> = spec.split(',').map(str::trim).collect();
+            let hex = |s: &str| u32::from_str_radix(s.trim_start_matches("0x"), 16);
+            let num = |s: &str| s.parse::<f32>().expect("a position");
+            shot.create_object(
+                0x7000_0000 + u32::try_from(k).unwrap_or(0),
+                (hex(f[0]).expect("a setup"), None),
+                u16::try_from(hex(f[1]).expect("a block")).expect("a block"),
+                (num(f[2]), num(f[3])),
+                0.0,
+            );
+        }
         if way != Way::Retail {
             if way == Way::Pack {
                 match pack.as_ref() {

@@ -165,6 +165,8 @@ pub struct PackModel {
     /// Cut-out growth: its cut-out materials (needles, leaves) are drawn from both sides and lit
     /// through from behind.
     pub foliage: bool,
+    /// How much the wind moves it: 0 not at all, 1 as much as growth of its height moves.
+    pub wind: f32,
     /// Its levels of detail, nearest first.
     pub lods: Vec<PackLod>,
     /// A sphere holding every level, model space: centre and radius.
@@ -660,8 +662,25 @@ pub struct ArtPack {
     pub materials: Vec<TextureMaterial>,
     /// The grit pictures the materials share.
     pub grits: Vec<Image>,
+    /// The kinds of plant it lays over the land, whose models read.
+    pub ground_cover: Vec<PackGroundCover>,
     /// What would not read, a line each.
     pub problems: Vec<String>,
+}
+
+/// One kind of plant a pack lays over the land.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PackGroundCover {
+    /// The number its model is known by among the pack's models.
+    pub id: DataId,
+    /// The retail terrain types it grows on, a bit each.
+    pub grounds: u32,
+    /// How many plants a square metre.
+    pub density: f32,
+    /// The smallest and the largest it is scaled by.
+    pub scale: (f32, f32),
+    /// The steepest slope it grows on, degrees.
+    pub steepest: f32,
 }
 
 /// Why a pack could not be opened at all, as a sentence.
@@ -970,6 +989,7 @@ impl ArtPack {
             models.push(PackModel {
                 id: entry.id,
                 foliage: entry.foliage,
+                wind: entry.wind,
                 bounds: bounds(&built),
                 lods: built,
                 credit: entry.credit.clone(),
@@ -1169,6 +1189,18 @@ impl ArtPack {
         if let Some(r) = recording {
             r.files = reader.kept.take().unwrap_or_default();
         }
+        let ground_cover = manifest
+            .ground_cover
+            .iter()
+            .filter(|c| models.iter().any(|m| m.id == c.id))
+            .map(|c| PackGroundCover {
+                id: c.id,
+                grounds: c.grounds.iter().fold(0, |bits, g| bits | 1 << g),
+                density: c.density,
+                scale: c.scale,
+                steepest: c.steepest,
+            })
+            .collect();
         Ok(Self {
             name: manifest.name,
             serial: next_serial(),
@@ -1178,6 +1210,7 @@ impl ArtPack {
             grounds,
             materials: retextured,
             grits,
+            ground_cover,
             problems,
         })
     }
@@ -1809,6 +1842,7 @@ license = "CC0-1.0"
             grounds: Vec::new(),
             materials: Vec::new(),
             grits: Vec::new(),
+            ground_cover: Vec::new(),
             problems: Vec::new(),
         };
         let one = images::with_levels(4, 4, vec![9; 64], true, None);

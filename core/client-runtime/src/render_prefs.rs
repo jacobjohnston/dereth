@@ -561,6 +561,8 @@ pub enum FidelityFeature {
     NoAntiAliasing,
     /// `Fidelity.NoSlopeMaterials`.
     NoSlopeMaterials,
+    /// `Fidelity.NoWind`.
+    NoWind,
     /// `Fidelity.NoDamp`.
     NoDamp,
     /// `Fidelity.VSync`.
@@ -569,6 +571,10 @@ pub enum FidelityFeature {
     Hdr,
     /// `Fidelity.DepthMapping`.
     DepthMapping,
+    /// `Fidelity.TreeDrawDistance`.
+    TreeDrawDistance,
+    /// `Fidelity.GroundCoverDrawDistance`.
+    GroundCoverDrawDistance,
     /// `Fidelity.Debug`.
     Debug,
 }
@@ -576,7 +582,7 @@ pub enum FidelityFeature {
 #[cfg(feature = "hifi")]
 impl FidelityFeature {
     /// Every option, in the order the names list them.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 18] = [
         Self::Lighting,
         Self::Shadows,
         Self::GlobalIllumination,
@@ -587,10 +593,13 @@ impl FidelityFeature {
         Self::RetailLook,
         Self::NoAntiAliasing,
         Self::NoSlopeMaterials,
+        Self::NoWind,
         Self::NoDamp,
         Self::VSync,
         Self::Hdr,
         Self::DepthMapping,
+        Self::TreeDrawDistance,
+        Self::GroundCoverDrawDistance,
         Self::Debug,
     ];
 
@@ -608,10 +617,13 @@ impl FidelityFeature {
             Self::RetailLook => fidelity::RETAIL_LOOK,
             Self::NoAntiAliasing => fidelity::NO_ANTI_ALIASING,
             Self::NoSlopeMaterials => fidelity::NO_SLOPE_MATERIALS,
+            Self::NoWind => fidelity::NO_WIND,
             Self::NoDamp => fidelity::NO_DAMP,
             Self::VSync => fidelity::VSYNC,
             Self::Hdr => fidelity::HDR,
             Self::DepthMapping => fidelity::DEPTH_MAPPING,
+            Self::TreeDrawDistance => fidelity::TREE_DRAW_DISTANCE,
+            Self::GroundCoverDrawDistance => fidelity::GROUND_COVER_DRAW_DISTANCE,
             Self::Debug => fidelity::DEBUG,
         }
     }
@@ -625,16 +637,20 @@ impl FidelityFeature {
 
     /// The highest value the option takes: 4 for an effect (Ultra), 1 for the switches that
     /// turn something off (the retail look's, the anti-aliasing's, the slope materials', the
-    /// damp's) and the presentation choices, 3 for depth mapping's levels, the last view for the
-    /// diagnostic views.
+    /// damp's, the wind's) and the presentation choices, 3 for depth mapping's levels, the greatest
+    /// share for the draw distances, the last view for the diagnostic views.
     #[must_use]
     pub const fn max(self) -> u32 {
         match self {
             Self::Debug => 7,
             Self::DepthMapping => 3,
+            Self::TreeDrawDistance | Self::GroundCoverDrawDistance => {
+                dereth_client_contract::options::draw_distance::MOST
+            }
             Self::RetailLook
             | Self::NoAntiAliasing
             | Self::NoSlopeMaterials
+            | Self::NoWind
             | Self::NoDamp
             | Self::VSync
             | Self::Hdr => 1,
@@ -643,12 +659,13 @@ impl FidelityFeature {
     }
 
     /// What the option holds where the profile names nothing, when it is not 0: a box's default,
-    /// or the Depth Mapping menu's.
+    /// or the Depth Mapping and Tree Draw Distance menus'.
     #[must_use]
     pub fn default_value(self) -> Option<u32> {
         use dereth_client_contract::options as o;
         match self {
             Self::DepthMapping => u32::try_from(o::depth_mapping::DEFAULT).ok(),
+            Self::TreeDrawDistance => u32::try_from(o::draw_distance::TREE_DEFAULT).ok(),
             _ => o::fidelity::find(self.name())
                 .filter(|b| b.on_by_default)
                 .map(|_| 1),
@@ -656,10 +673,20 @@ impl FidelityFeature {
     }
 
     /// `raw` as this option stores it: an effect past Ultra is Ultra; a diagnostic view past the
-    /// last is off.
+    /// last is off; a draw distance outside its menu is the whole distance, 0, but for the ground
+    /// cover's Off.
     #[must_use]
     pub const fn clamp(self, raw: u32) -> u32 {
-        if raw <= self.max() {
+        if matches!(self, Self::TreeDrawDistance | Self::GroundCoverDrawDistance) {
+            use dereth_client_contract::options::draw_distance::{LEAST, OFF};
+            #[allow(clippy::cast_sign_loss)] // a small positive constant
+            let off = matches!(self, Self::GroundCoverDrawDistance) && raw == OFF as u32;
+            if raw >= LEAST && raw <= self.max() || off {
+                raw
+            } else {
+                0
+            }
+        } else if raw <= self.max() {
             raw
         } else if matches!(self, Self::Debug) {
             0
@@ -706,6 +733,18 @@ impl FidelityPreferences {
                         )
                     })
                     .and_then(|v| u32::try_from(v).ok()),
+                // A share by its words, or the ground cover's Off.
+                FidelityFeature::TreeDrawDistance | FidelityFeature::GroundCoverDrawDistance => {
+                    prefs
+                        .get(feature.name())
+                        .and_then(|v| {
+                            dereth_client_contract::options::draw_distance::parse_value(
+                                feature.name(),
+                                v,
+                            )
+                        })
+                        .and_then(|v| u32::try_from(v).ok())
+                }
                 // A box the page ticked; a number the file holds otherwise (from an older
                 // build) is not read, as the page does not read it.
                 _ => prefs.bool(feature.name()).map(u32::from),
@@ -750,8 +789,9 @@ impl FidelityPreferences {
 
     /// Whether any option is on in effect. Without one the presentation is not installed. The
     /// switches that turn something off (the retail look's, the anti-aliasing's, the slope
-    /// materials', the damp's), the presentation choices and depth mapping, drawn inside the
-    /// better lighting, draw nothing of their own, so they alone are none.
+    /// materials', the damp's, the wind's), the presentation choices, depth mapping, drawn inside
+    /// the better lighting, and the draw distances draw nothing of their own, so they alone are
+    /// none.
     #[must_use]
     pub fn any_effective(&self) -> bool {
         FidelityFeature::ALL
@@ -763,8 +803,11 @@ impl FidelityPreferences {
                         FidelityFeature::RetailLook
                             | FidelityFeature::NoAntiAliasing
                             | FidelityFeature::NoSlopeMaterials
+                            | FidelityFeature::NoWind
                             | FidelityFeature::NoDamp
                             | FidelityFeature::DepthMapping
+                            | FidelityFeature::TreeDrawDistance
+                            | FidelityFeature::GroundCoverDrawDistance
                     )
             })
             .any(|f| self.effective(f) != 0)
@@ -909,7 +952,9 @@ mod tests {
                     | FidelityFeature::Weather
                     | FidelityFeature::VSync
             );
-            let at = if f == FidelityFeature::DepthMapping {
+            let at = if f == FidelityFeature::TreeDrawDistance {
+                150
+            } else if f == FidelityFeature::DepthMapping {
                 3
             } else {
                 u32::from(on)
@@ -1020,6 +1065,38 @@ mod tests {
             "depth mapping draws inside the better lighting, and turning the damp off nothing"
         );
         assert!(switched("Lighting=1,DepthMapping=1").any_effective());
+    }
+
+    #[test]
+    #[cfg(feature = "hifi")]
+    fn a_draw_distance_is_read_by_its_words_and_draws_nothing_alone() {
+        let read = |line: &str| {
+            FidelityPreferences::from_preferences(&Preferences::parse(&format!(
+                "[UI]\nInterface=Horizon\n[Fidelity]\n{line}\n"
+            )))
+        };
+        let tree = FidelityFeature::TreeDrawDistance;
+        let cover = FidelityFeature::GroundCoverDrawDistance;
+        assert_eq!(read("TreeDrawDistance=3x").effective(tree), 300);
+        assert_eq!(read("TreeDrawDistance=150").effective(tree), 150);
+        assert_eq!(
+            read("TreeDrawDistance=9x").effective(tree),
+            150,
+            "a word it does not know leaves it at its default"
+        );
+        assert_eq!(read("GroundCoverDrawDistance=Off").effective(cover), 1);
+        assert_eq!(read("TreeDrawDistance=Off").effective(tree), 150);
+        assert!(
+            !FidelityPreferences::parse_switch("TreeDrawDistance=500,NoWind=1")
+                .unwrap()
+                .any_effective()
+        );
+        let switched = FidelityPreferences::parse_switch("Lighting=1,GroundCoverDrawDistance=1")
+            .expect("a switch");
+        assert_eq!(switched.effective(cover), 1);
+        assert_eq!(FidelityFeature::TreeDrawDistance.clamp(20), 0);
+        assert_eq!(FidelityFeature::TreeDrawDistance.clamp(1), 0);
+        assert_eq!(FidelityFeature::NoWind.clamp(3), 1);
     }
 
     /// Behaviour: hifi.options.the-fidelity-section-reaches-the-render-preferences

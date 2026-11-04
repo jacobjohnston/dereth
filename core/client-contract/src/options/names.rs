@@ -139,6 +139,8 @@ pub mod fidelity {
     /// `Fidelity.NoSlopeMaterials`: an art pack's ground is laid without the scree and rock it
     /// lays on steep slopes.
     pub const NO_SLOPE_MATERIALS: &str = "Fidelity.NoSlopeMaterials";
+    /// `Fidelity.NoWind`: an art pack's trees and plants stand still.
+    pub const NO_WIND: &str = "Fidelity.NoWind";
     /// `Fidelity.NoDamp`: the world's walls and floors show no damp sheen or slime.
     pub const NO_DAMP: &str = "Fidelity.NoDamp";
     /// `Fidelity.VSync`: frames are presented on the display's refresh.
@@ -148,6 +150,12 @@ pub mod fidelity {
     /// `Fidelity.DepthMapping`: how much relief surfaces take from a pack, a level: 0 Off,
     /// 1 Low, 2 Medium, 3 High.
     pub const DEPTH_MAPPING: &str = "Fidelity.DepthMapping";
+    /// `Fidelity.TreeDrawDistance`: how far an art pack's trees are drawn, a share of the distance
+    /// they are drawn to with nothing changed, percent.
+    pub const TREE_DRAW_DISTANCE: &str = "Fidelity.TreeDrawDistance";
+    /// `Fidelity.GroundCoverDrawDistance`: how far an art pack's ground cover is drawn, a share of
+    /// the distance it is drawn to with nothing changed, percent; 1 leaves it out.
+    pub const GROUND_COVER_DRAW_DISTANCE: &str = "Fidelity.GroundCoverDrawDistance";
     /// `Fidelity.Debug`: a diagnostic view, set only by `--set-at`: 0 Off, 1 Passthrough,
     /// 2 Depth, 3 Normals, 4 AO, 5 Shadows, 6 Census, 7 Parity (re-shaded with no pass).
     pub const DEBUG: &str = "Fidelity.Debug";
@@ -160,7 +168,7 @@ pub mod fidelity {
     /// over it. No box sets it.
     pub const ART_PACK: &str = "Fidelity.ArtPack";
 
-    /// Every name the profile and `--set-at` may set, the thirteen boxes first and the menu after
+    /// Every name the profile and `--set-at` may set, the fourteen boxes first and the menus after
     /// them.
     pub const NAMES: &[&str] = &[
         LIGHTING,
@@ -173,10 +181,13 @@ pub mod fidelity {
         RETAIL_LOOK,
         NO_ANTI_ALIASING,
         NO_SLOPE_MATERIALS,
+        NO_WIND,
         NO_DAMP,
         VSYNC,
         HDR,
         DEPTH_MAPPING,
+        TREE_DRAW_DISTANCE,
+        GROUND_COVER_DRAW_DISTANCE,
         DEBUG,
     ];
 }

@@ -1,6 +1,7 @@
 //! The words and rules of the optional high-fidelity presentation's options: thirteen check boxes
-//! and the Depth Mapping menu ([`super::depth_mapping`]) on the Horizon interface's Display page,
-//! under a heading of their own, below a Graphics menu that chooses standard or enhanced graphics.
+//! and the Depth Mapping ([`super::depth_mapping`]), Tree Draw Distance and Ground Cover
+//! ([`super::draw_distance`]) menus on the Horizon interface's Display page, under a heading of
+//! their own, below a Graphics menu that chooses standard or enhanced graphics.
 //!
 //! The first box is Enhanced Graphics Mode, the better lighting, which the Graphics menu sets. Four
 //! of the effects are drawn inside it and draw nothing without it: the sun shadows, the bounced
@@ -12,12 +13,14 @@
 //! ground are drawn inside the better lighting too, and Keep Retail Look draws the game's own in
 //! their place, all of them or none. The better lighting smooths the world's edges with temporal
 //! anti-aliasing, which a box turns off; an art pack's ground lays scree and rock on steep slopes,
-//! which a box turns off; and two boxes choose how its frames reach the display. The Depth Mapping
-//! menu gives the world's own pictures the relief an art pack has for them, inside the better
-//! lighting, and a box keeps the damp and slime it lays on a room's surfaces.
+//! which a box turns off; the wind moves an art pack's trees and plants, which a box stops; and two
+//! boxes choose how its frames reach the display. The Depth Mapping menu gives the world's own
+//! pictures the relief an art pack has for them, inside the better lighting, and a box keeps the
+//! damp and slime it lays on a room's surfaces. The draw distances choose how far an art pack's
+//! trees and plants are drawn, and the Ground Cover menu also leaves its plants out.
 //!
 //! The effects start on. The enhanced graphics' quality presets set several of them at once
-//! ([`PRESET_VALUES`]), and the defaults of the boxes and the menu are the Medium preset's.
+//! ([`PRESET_VALUES`]), and the defaults of the boxes and the menus are the Medium preset's.
 //!
 //! In a build with the `hifi` feature the options are registered with the value store
 //! ([`register`]), so the page reads and writes them like any other option and the profile keeps
@@ -180,11 +183,30 @@ pub const OPTIONS: [FidelityOption; 13] = [
         inverted: true,
         on_by_default: false,
     },
+    FidelityOption {
+        name: fidelity::NO_WIND,
+        caption: "Foliage Wind",
+        note: "Lets the wind move an art pack's trees and plants; off, they hold still. It \
+               changes at once.",
+        needs: Needs::LightingWithoutRetailLook,
+        inverted: true,
+        on_by_default: false,
+    },
 ];
 
 /// The menus among the effects' rows, each with what it needs. A menu's own module registers it
 /// and gives its choices; a row here gives it the boxes' rules.
-pub const MENUS: &[(&str, Needs)] = &[(fidelity::DEPTH_MAPPING, Needs::LightingWithoutRetailLook)];
+pub const MENUS: &[(&str, Needs)] = &[
+    (fidelity::DEPTH_MAPPING, Needs::LightingWithoutRetailLook),
+    (
+        fidelity::TREE_DRAW_DISTANCE,
+        Needs::LightingWithoutRetailLook,
+    ),
+    (
+        fidelity::GROUND_COVER_DRAW_DISTANCE,
+        Needs::LightingWithoutRetailLook,
+    ),
+];
 
 /// The heading's caption.
 pub const HEADING: &str = "Enhanced Graphics";
@@ -222,6 +244,15 @@ pub const PRESET_VALUES: &[(&str, [PrefValue; PRESET_NAMES.len()])] = &[
     (fidelity::NO_SLOPE_MATERIALS, [OFF, OFF, OFF, OFF]),
     (fidelity::DEPTH_MAPPING, [Int(0), Int(3), Int(3), Int(3)]),
     (fidelity::NO_DAMP, [ON, OFF, OFF, OFF]),
+    (fidelity::NO_WIND, [ON, OFF, OFF, OFF]),
+    (
+        fidelity::TREE_DRAW_DISTANCE,
+        [Int(100), Int(150), Int(300), Int(500)],
+    ),
+    (
+        fidelity::GROUND_COVER_DRAW_DISTANCE,
+        [Int(super::draw_distance::OFF), Int(100), Int(300), Int(500)],
+    ),
 ];
 
 /// One quality preset, by its place in [`PRESET_NAMES`].
@@ -348,9 +379,9 @@ pub fn blocked(name: &str, ticked: impl Fn(&str) -> bool, rays: Option<bool>) ->
     }
 }
 
-/// Register every box with the value store, each at its default, and the Depth Mapping menu at
-/// its own. The store's load then reads the `[Fidelity]` section of the profile into them, and the
-/// page reads and writes them.
+/// Register every box with the value store, each at its default, and the Depth Mapping and draw
+/// distance menus at their own. The store's load then reads the `[Fidelity]` section of the profile
+/// into them, and the page reads and writes them.
 pub fn register() -> usize {
     let boxes: usize = OPTIONS
         .iter()
@@ -367,12 +398,25 @@ pub fn register() -> usize {
         PrefValue::Int(super::depth_mapping::DEFAULT),
         super::store::DataType::UInt,
     );
-    boxes + usize::from(depth)
+    let distances = [
+        fidelity::TREE_DRAW_DISTANCE,
+        fidelity::GROUND_COVER_DRAW_DISTANCE,
+    ]
+    .into_iter()
+    .filter(|name| {
+        super::store::register_preference(
+            name,
+            PrefValue::Int(super::draw_distance::default_of(name)),
+            super::store::DataType::UInt,
+        )
+    })
+    .count();
+    boxes + usize::from(depth) + distances
 }
 
-/// Whether the store's save leaves `name` out of the profile: a box or the Depth Mapping menu still
-/// at its default that the profile does not name, so a profile that never changed one has no
-/// `[Fidelity]` section.
+/// Whether the store's save leaves `name` out of the profile: a box or a menu still at its default
+/// that the profile does not name, so a profile that never changed one has no `[Fidelity]`
+/// section.
 #[must_use]
 pub fn left_out_of_save(
     name: &str,
@@ -381,6 +425,9 @@ pub fn left_out_of_save(
 ) -> bool {
     let unchanged = match find(name) {
         Some(o) => *value == PrefValue::Bool(o.on_by_default),
+        None if super::draw_distance::is_a_distance(name) => {
+            *value == PrefValue::Int(super::draw_distance::default_of(name))
+        }
         None => is_a_menu(name) && *value == PrefValue::Int(super::depth_mapping::DEFAULT),
     };
     unchanged
@@ -633,9 +680,9 @@ mod tests {
     #[test]
     fn what_the_lighting_and_the_retail_look_rule_out_leaves_the_page() {
         use fidelity::{
-            AMBIENT_OCCLUSION, DEPTH_MAPPING, GLOBAL_ILLUMINATION, HDR, LAMPS, LIGHTING,
-            NO_ANTI_ALIASING, NO_DAMP, NO_SLOPE_MATERIALS, RETAIL_LOOK, SHADOWS, SKY, VSYNC,
-            WEATHER,
+            AMBIENT_OCCLUSION, DEPTH_MAPPING, GLOBAL_ILLUMINATION, GROUND_COVER_DRAW_DISTANCE, HDR,
+            LAMPS, LIGHTING, NO_ANTI_ALIASING, NO_DAMP, NO_SLOPE_MATERIALS, NO_WIND, RETAIL_LOOK,
+            SHADOWS, SKY, TREE_DRAW_DISTANCE, VSYNC, WEATHER,
         };
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         let left = |name: &str, on: &'static [&'static str]| {
@@ -653,15 +700,25 @@ mod tests {
             WEATHER,
             NO_ANTI_ALIASING,
             NO_SLOPE_MATERIALS,
+            NO_WIND,
             VSYNC,
             HDR,
             DEPTH_MAPPING,
             NO_DAMP,
+            TREE_DRAW_DISTANCE,
+            GROUND_COVER_DRAW_DISTANCE,
         ] {
             assert!(left(name, &[]), "{name}");
         }
         // The retail look takes off what an art pack draws, and only that.
-        let pack = [NO_SLOPE_MATERIALS, DEPTH_MAPPING, NO_DAMP];
+        let pack = [
+            NO_SLOPE_MATERIALS,
+            DEPTH_MAPPING,
+            NO_DAMP,
+            NO_WIND,
+            TREE_DRAW_DISTANCE,
+            GROUND_COVER_DRAW_DISTANCE,
+        ];
         for name in pack {
             assert!(
                 left(name, &[LIGHTING, DEPTH_MAPPING, RETAIL_LOOK]),
@@ -686,6 +743,7 @@ mod tests {
                 fidelity::RETAIL_LOOK
                     | fidelity::NO_ANTI_ALIASING
                     | fidelity::NO_SLOPE_MATERIALS
+                    | fidelity::NO_WIND
                     | fidelity::HDR
                     | fidelity::NO_DAMP
             );
@@ -714,7 +772,12 @@ mod tests {
             .collect();
         assert_eq!(
             inverted,
-            ["Anti-Aliasing", "Slope Materials", "Damp and Slime"]
+            [
+                "Anti-Aliasing",
+                "Slope Materials",
+                "Damp and Slime",
+                "Foliage Wind"
+            ]
         );
     }
 
@@ -733,14 +796,23 @@ mod tests {
             fidelity::DEPTH_MAPPING,
             Int(super::super::depth_mapping::OFF)
         )));
+        assert!(low.contains(&(fidelity::NO_WIND, PrefValue::Bool(true))));
+        assert!(low.contains(&(
+            fidelity::GROUND_COVER_DRAW_DISTANCE,
+            Int(super::super::draw_distance::OFF)
+        )));
         let ultra = PRESETS[3].values();
         assert!(ultra.iter().all(|(name, v)| match find(name) {
             Some(o) => *v == PrefValue::Bool(!o.inverted),
+            None if super::super::draw_distance::is_a_distance(name) => *v == Int(500),
             None => *v == Int(super::super::depth_mapping::MOST),
         }));
-        // The defaults of the boxes and the menu are the Medium preset's.
+        // The defaults of the boxes and the menus are the Medium preset's.
         let defaults = |name: &str| match find(name) {
             Some(o) => Some(PrefValue::Bool(o.on_by_default)),
+            None if super::super::draw_distance::is_a_distance(name) => {
+                Some(Int(super::super::draw_distance::default_of(name)))
+            }
             None => is_a_menu(name).then_some(Int(super::super::depth_mapping::DEFAULT)),
         };
         assert_eq!(preset_in_use(defaults), Some(PRESETS[1]));
@@ -820,6 +892,54 @@ mod tests {
             fidelity::NO_DAMP,
             &PrefValue::Bool(false),
             &empty
+        ));
+    }
+
+    #[test]
+    fn the_wind_box_and_the_draw_distances_need_the_better_lighting_without_the_retail_look() {
+        use fidelity::{
+            GROUND_COVER_DRAW_DISTANCE, LIGHTING, NO_WIND, RETAIL_LOOK, TREE_DRAW_DISTANCE,
+        };
+        let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
+        for name in [NO_WIND, TREE_DRAW_DISTANCE, GROUND_COVER_DRAW_DISTANCE] {
+            assert_eq!(blocked(name, with(&[]), None), Some(Blocked::NeedsLighting));
+            assert_eq!(blocked(name, with(&[LIGHTING]), Some(false)), None);
+            assert_eq!(
+                blocked(name, with(&[LIGHTING, RETAIL_LOOK]), None),
+                Some(Blocked::RetailLook)
+            );
+        }
+        assert!(find(TREE_DRAW_DISTANCE).is_none(), "the menu is no box");
+    }
+
+    /// The draw distances start as the Medium preset has them, and the save leaves them out until
+    /// they are changed.
+    #[test]
+    fn the_draw_distances_start_at_medium_and_are_left_out_of_the_profile_until_chosen() {
+        use super::super::draw_distance::{default_of, OFF};
+        use crate::persist::preferences::UserPreferences;
+        let empty = UserPreferences::parse("").expect("an empty profile");
+        for name in [
+            fidelity::TREE_DRAW_DISTANCE,
+            fidelity::GROUND_COVER_DRAW_DISTANCE,
+        ] {
+            let medium = PrefValue::Int(default_of(name));
+            assert!(left_out_of_save(name, &medium, &empty), "{name}");
+            assert!(!left_out_of_save(name, &PrefValue::Int(300), &empty));
+        }
+        assert!(!left_out_of_save(
+            fidelity::GROUND_COVER_DRAW_DISTANCE,
+            &PrefValue::Int(OFF),
+            &empty
+        ));
+        assert_eq!(default_of(fidelity::TREE_DRAW_DISTANCE), 150);
+        assert_eq!(default_of(fidelity::GROUND_COVER_DRAW_DISTANCE), 100);
+        let named =
+            UserPreferences::parse("[Fidelity]\r\nTreeDrawDistance=1.5x\r\n").expect("reads");
+        assert!(!left_out_of_save(
+            fidelity::TREE_DRAW_DISTANCE,
+            &PrefValue::Int(150),
+            &named
         ));
     }
 

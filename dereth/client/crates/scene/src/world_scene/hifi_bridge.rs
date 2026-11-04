@@ -78,6 +78,16 @@ pub(crate) struct Shadow {
         u64,
         std::sync::Arc<dereth_render_hifi::snapshot::HifiFarTrees>,
     )>,
+    /// The ground cover as the presentation draws it, made once per change (by its serial).
+    ground_cover: Option<(
+        u64,
+        std::sync::Arc<dereth_render_hifi::snapshot::HifiGroundCover>,
+    )>,
+    /// The distant trees as the presentation draws them, made once per change (by their serial).
+    distant_trees: Option<(
+        u64,
+        std::sync::Arc<dereth_render_hifi::snapshot::HifiGroundCover>,
+    )>,
     /// The forest cover as the presentation draws it, made once per cover (by its serial).
     cover: Option<(
         u64,
@@ -274,6 +284,7 @@ fn pack_for_presentation(
             .map(|m| HifiPackModel {
                 id: m.id.0,
                 foliage: m.foliage,
+                wind: m.wind,
                 lods: m
                     .lods
                     .iter()
@@ -449,6 +460,29 @@ fn ground_knobs(k: &Knobs) -> HifiGroundKnobs {
 /// each block's list is handed over as it is.
 pub(crate) type FarTree = dereth_render_hifi::snapshot::HifiFarTree;
 
+/// The plants of one outside cell, as the presentation draws them: the ground cover's thread
+/// writes them so, and each block's list is handed over as it is.
+pub(crate) type CoverPatch = dereth_render_hifi::snapshot::HifiCoverPatch;
+/// One plant of a patch, placed as an art pack's model is.
+pub(crate) type CoverPlacement = dereth_render_hifi::snapshot::HifiPackPlacement;
+/// How far an art pack's trees are drawn at the whole distance, meters.
+pub(crate) const TREE_REACH: f32 = dereth_render_hifi::snapshot::TREE_REACH;
+
+/// How far the player asks an art pack's trees and ground cover to be drawn, shares of the whole
+/// distance, percent: the choices while the better lighting they are offered for is drawn, and
+/// the whole distance otherwise.
+pub(crate) fn draw_distances(prefs: &FidelityPreferences) -> (u32, u32) {
+    let lit = settings(prefs, false).lighting.is_on();
+    let share = |feature| match prefs.effective(feature) {
+        share @ 50.. if lit => share,
+        _ => 100,
+    };
+    (
+        share(FidelityFeature::TreeDrawDistance),
+        share(FidelityFeature::GroundCoverDrawDistance),
+    )
+}
+
 /// How the far trees and the forest cover are drawn, from the knobs.
 fn far_knobs(k: &Knobs) -> dereth_render_hifi::snapshot::HifiFarKnobs {
     dereth_render_hifi::snapshot::HifiFarKnobs {
@@ -477,6 +511,25 @@ fn far_trees_for_presentation(
         .collect();
     dereth_render_hifi::snapshot::HifiFarTrees {
         serial: far.serial,
+        blocks,
+    }
+}
+
+/// The ground cover within reach as the presentation draws it.
+fn ground_cover_for_presentation(
+    cover: &super::ground_cover::PatchField,
+) -> dereth_render_hifi::snapshot::HifiGroundCover {
+    let blocks = cover
+        .within()
+        .map(|((bx, by), list)| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            // LINT-OK: block indices are 0..=0xFE. Not a float conversion.
+            let id = ((bx as u16) << 8) | (by as u16);
+            (id, std::sync::Arc::clone(list))
+        })
+        .collect();
+    dereth_render_hifi::snapshot::HifiGroundCover {
+        serial: cover.serial,
         blocks,
     }
 }
@@ -675,6 +728,13 @@ pub(crate) fn settings(prefs: &FidelityPreferences, rays: bool) -> HifiSettings 
         // And the scree and rock an art pack's ground lays on steep slopes, until they are
         // turned off.
         slope_materials: lit && raw(FidelityFeature::NoSlopeMaterials) == 0,
+        // And the plants an art pack lays over the land, unless the Ground Cover menu leaves
+        // them out.
+        ground_cover: lit
+            && i64::from(raw(FidelityFeature::GroundCoverDrawDistance))
+                != i64::from(dereth_client_contract::options::draw_distance::OFF),
+        // And the wind in its trees and plants, until it is stopped.
+        wind: lit && raw(FidelityFeature::NoWind) == 0,
         // And the damp and slime on a room's surfaces, until they are turned off.
         damp: lit && raw(FidelityFeature::NoDamp) == 0,
         // And a pack's relief on the world's own pictures, at the level asked for.
@@ -1110,6 +1170,44 @@ fn snapshot(
         sh.far_trees = None;
         None
     };
+    frame.tree_distance = draw.distant_trees.share;
+    frame.ground_cover_distance = draw.ground_cover.share;
+    frame.distant_trees = if draw.distant_trees.field.active && frame.art_pack.is_some() {
+        if sh
+            .distant_trees
+            .as_ref()
+            .is_none_or(|(serial, _)| *serial != draw.distant_trees.field.serial)
+        {
+            sh.distant_trees = Some((
+                draw.distant_trees.field.serial,
+                std::sync::Arc::new(ground_cover_for_presentation(&draw.distant_trees.field)),
+            ));
+        }
+        sh.distant_trees
+            .as_ref()
+            .map(|(_, c)| std::sync::Arc::clone(c))
+    } else {
+        sh.distant_trees = None;
+        None
+    };
+    frame.ground_cover = if draw.ground_cover.field.active && frame.art_pack.is_some() {
+        if sh
+            .ground_cover
+            .as_ref()
+            .is_none_or(|(serial, _)| *serial != draw.ground_cover.field.serial)
+        {
+            sh.ground_cover = Some((
+                draw.ground_cover.field.serial,
+                std::sync::Arc::new(ground_cover_for_presentation(&draw.ground_cover.field)),
+            ));
+        }
+        sh.ground_cover
+            .as_ref()
+            .map(|(_, c)| std::sync::Arc::clone(c))
+    } else {
+        sh.ground_cover = None;
+        None
+    };
     // --- the art pack's materials for retail pictures ---------------------------------------
     frame.materials = match draw
         .land
@@ -1393,6 +1491,7 @@ mod tests {
             n::NO_ANTI_ALIASING => s.lighting.is_on() && !s.anti_aliasing,
             n::NO_SLOPE_MATERIALS => s.art_pack && !s.slope_materials,
             n::NO_DAMP => s.depth_mapping > 0 && !s.damp,
+            n::NO_WIND => s.art_pack && !s.wind,
             _ => unreachable!("{name}"),
         }
     }
@@ -1486,6 +1585,24 @@ mod tests {
         assert!(!settings(&boxes(0), true).anti_aliasing);
         assert!(lit.slope_materials);
         assert!(!settings(&boxes(0), true).slope_materials);
+        // So are the ground cover, until its menu leaves it out, and the wind, until it is stopped.
+        assert!(lit.ground_cover);
+        assert!(!settings(&boxes(0), true).ground_cover);
+        let bare =
+            FidelityPreferences::parse_switch("Lighting=1,GroundCoverDrawDistance=1").unwrap();
+        assert!(!settings(&bare, true).ground_cover);
+        assert!(lit.wind);
+        assert!(!settings(&boxes(0), true).wind);
+        // The draw distances are the whole distance until chosen, and outside the better lighting.
+        assert_eq!(draw_distances(&boxes(0b1)), (100, 100));
+        assert_eq!(draw_distances(&bare), (100, 100));
+        let far = FidelityPreferences::parse_switch(
+            "Lighting=1,TreeDrawDistance=300,GroundCoverDrawDistance=50",
+        )
+        .unwrap();
+        assert_eq!(draw_distances(&far), (300, 50));
+        let unlit = FidelityPreferences::parse_switch("Sky=1,TreeDrawDistance=300").unwrap();
+        assert_eq!(draw_distances(&unlit), (100, 100));
         // A capture's level past a tick is kept.
         let mut rig = FidelityPreferences::parse_switch("Lighting=3,Shadows=4,Debug=6").unwrap();
         assert_eq!(settings(&rig, true).lighting, Level::High);

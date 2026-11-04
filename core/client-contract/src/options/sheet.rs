@@ -1026,7 +1026,7 @@ const CLIENT_SHARED: [Heading; 5] = [
 const CLIENT: [Heading; 5] = CLIENT_SHARED;
 
 /// With the optional high-fidelity presentation built in, the Client Options page ends with its
-/// thirteen boxes and its Depth Mapping menu under a heading of their own, on the Horizon
+/// fourteen boxes and its three menus under a heading of their own, on the Horizon
 /// interface's page alone: it is the only interface the presentation draws under.
 #[cfg(feature = "hifi")]
 const CLIENT: [Heading; 6] = {
@@ -1045,11 +1045,11 @@ const CLIENT: [Heading; 6] = {
     ]
 };
 
-/// The thirteen boxes and the Depth Mapping menu, each at its default and on the Horizon page
-/// alone: the two switches, then how frames reach the display, then the effects, with what an art
-/// pack draws last.
+/// The fourteen boxes, the Depth Mapping menu and the two draw distances, each at its default and
+/// on the Horizon page alone: the two switches, then how frames reach the display, then the
+/// effects, with what an art pack draws last.
 #[cfg(feature = "hifi")]
-const FIDELITY_ROWS: [Row; 14] = [
+const FIDELITY_ROWS: [Row; 17] = [
     fidelity_box(0),
     fidelity_box(1),
     fidelity_box(8),
@@ -1074,6 +1074,29 @@ const FIDELITY_ROWS: [Row; 14] = [
     ),
     fidelity_box(12),
     fidelity_box(9),
+    fidelity_box(12),
+    only(
+        Shown::Only(Interface::Horizon),
+        noted(
+            super::draw_distance::TREE_NOTE,
+            pref(
+                super::draw_distance::TREE_CAPTION,
+                Value::Menu(crate::options::names::fidelity::TREE_DRAW_DISTANCE),
+                Int(super::draw_distance::TREE_DEFAULT),
+            ),
+        ),
+    ),
+    only(
+        Shown::Only(Interface::Horizon),
+        noted(
+            super::draw_distance::GROUND_COVER_NOTE,
+            pref(
+                super::draw_distance::GROUND_COVER_CAPTION,
+                Value::Menu(crate::options::names::fidelity::GROUND_COVER_DRAW_DISTANCE),
+                Int(super::draw_distance::GROUND_COVER_DEFAULT),
+            ),
+        ),
+    ),
 ];
 
 /// The row of the `i`th box.
@@ -1332,8 +1355,8 @@ mod tests {
     }
 
     /// The experimental rendering effects' boxes are on the Horizon interface's Client page
-    /// alone, last, under their own heading, each at its default, with the Depth Mapping menu
-    /// among them at its default; the classic and the modern
+    /// alone, last, under their own heading, each at its default, with the Depth Mapping menu and
+    /// the draw distances among them at their defaults; the classic and the modern
     /// interfaces' pages are exactly the shared headings', row for row; and a build without the
     /// effects has no such heading anywhere.
     ///
@@ -1356,7 +1379,7 @@ mod tests {
         if cfg!(feature = "hifi") {
             let (heading, rows) = horizon.last().expect("Horizon's Client page has headings");
             assert_eq!(heading.title, fidelity::HEADING);
-            assert_eq!(rows.len(), fidelity::OPTIONS.len() + 1);
+            assert_eq!(rows.len(), fidelity::OPTIONS.len() + fidelity::MENUS.len());
             for o in &fidelity::OPTIONS {
                 let row = rows
                     .iter()
@@ -1379,6 +1402,20 @@ mod tests {
                 Some(Int(crate::options::depth_mapping::DEFAULT))
             );
             assert_eq!(menu.shown, Shown::Only(Interface::Horizon));
+            for name in [
+                crate::options::names::fidelity::TREE_DRAW_DISTANCE,
+                crate::options::names::fidelity::GROUND_COVER_DRAW_DISTANCE,
+            ] {
+                let menu = rows
+                    .iter()
+                    .find(|r| r.value == Value::Menu(name))
+                    .expect("the draw distance's menu");
+                assert_eq!(
+                    menu.default,
+                    Some(Int(crate::options::draw_distance::default_of(name)))
+                );
+                assert_eq!(menu.shown, Shown::Only(Interface::Horizon));
+            }
             // The rest of Horizon's page is the shared headings'.
             let rest: Vec<&Row> = horizon[..horizon.len() - 1]
                 .iter()

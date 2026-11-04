@@ -170,6 +170,11 @@ pub struct HifiSettings {
     /// Scree and rock laid by slope over an art pack's ground, as its knobs lay them (asked for
     /// with `lighting` on, whose light the ground is laid for).
     pub slope_materials: bool,
+    /// The plants an art pack lays over the land (asked for with `lighting` on, whose light they
+    /// are drawn for).
+    pub ground_cover: bool,
+    /// The wind moves an art pack's trees and plants (asked for with `lighting` on).
+    pub wind: bool,
     /// The damp and slime on a room's surfaces (asked for with `lighting` on).
     pub damp: bool,
     /// How much of an art pack's relief reaches the world's own pictures: 0 none, to 3 all of it

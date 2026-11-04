@@ -14,6 +14,9 @@ pre-release leaves it for the final release, and its notes show it as it is);
 
 ## Unreleased
 
+- An administrator can learn Ethangar's Wrath (spell 6341, from a world's data overlay) with `@addspell 6341`: it strikes down every creature attacking them and the one they have selected.
+- A caster weapon of several elements gives its damage bonus to each of them.
+
 ## 0.3.8 (2026-11-02)
 
 ## 0.3.7 (2026-11-01)

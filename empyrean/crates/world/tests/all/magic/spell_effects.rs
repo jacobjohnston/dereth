@@ -1302,6 +1302,55 @@ fn build_spell_list_joins_like_ace() {
     );
 }
 
+/// Ethangar's Wrath finds the creatures attacking the caster and the one it has selected, and no
+/// others: nothing unattackable, and never a player.
+#[test]
+fn wrath_victims_are_attackers_and_the_selection() {
+    use empyrean_entity::enums::properties::PropertyBool;
+    use empyrean_world::world_objects::monster_combat::set_attack_target;
+    let mut w = world();
+    assert_eq!(magic::wrath_victims(&w, PLAYER), []);
+
+    set_attack_target(&mut w, MONSTER, Some(PLAYER));
+    assert_eq!(magic::wrath_victims(&w, PLAYER), [MONSTER]);
+    assert_eq!(magic::wrath_victims(&w, MONSTER), []);
+    set_attack_target(&mut w, MONSTER, None);
+    assert_eq!(magic::wrath_victims(&w, PLAYER), []);
+
+    let selected = Some(MONSTER.full());
+    w.objects
+        .get_mut(PLAYER)
+        .unwrap()
+        .set_health_query_target(selected);
+    assert_eq!(magic::wrath_victims(&w, PLAYER), [MONSTER]);
+    w.objects
+        .get_mut(PLAYER)
+        .unwrap()
+        .set_health_query_target(None);
+    w.objects
+        .get_mut(PLAYER)
+        .unwrap()
+        .set_current_appraisal_target(selected);
+    assert_eq!(magic::wrath_victims(&w, PLAYER), [MONSTER]);
+
+    w.objects
+        .get_mut(MONSTER)
+        .unwrap()
+        .set_property(PropertyBool::Attackable, false);
+    assert_eq!(magic::wrath_victims(&w, PLAYER), []);
+    w.objects
+        .get_mut(MONSTER)
+        .unwrap()
+        .set_property(PropertyBool::Attackable, true);
+
+    let me = Some(PLAYER.full());
+    w.objects
+        .get_mut(PLAYER)
+        .unwrap()
+        .set_current_appraisal_target(me);
+    assert_eq!(magic::wrath_victims(&w, PLAYER), []);
+}
+
 /// `TryCastSpell` for a spell with no database row tells a player target it is not implemented;
 /// `HandleCastSpell` on an unhandled `MetaSpellType` tells a player caster and answers false; a
 /// Life spell with a target type needs a live target creature.

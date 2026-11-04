@@ -1,6 +1,7 @@
-//! The words and rules of the optional high-fidelity presentation's options: twelve check boxes on
-//! the Horizon interface's Display page, under a heading of their own, below a Graphics menu that
-//! chooses standard or enhanced graphics.
+//! The words and rules of the optional high-fidelity presentation's options: thirteen check boxes
+//! and the Tree Draw Distance and Ground Cover menus ([`super::draw_distance`]) on the Horizon
+//! interface's Display page, under a heading of their own, below a Graphics menu that chooses
+//! standard or enhanced graphics.
 //!
 //! The first box is Enhanced Graphics Mode, the better lighting, which the Graphics menu sets. Four
 //! of the effects are drawn inside it and draw nothing without it: the sun shadows, the bounced
@@ -12,10 +13,12 @@
 //! ground are drawn inside the better lighting too, and Keep Retail Look draws the game's own in
 //! their place, all of them or none. The better lighting smooths the world's edges with temporal
 //! anti-aliasing, which a box turns off; an art pack's ground lays scree and rock on steep slopes,
-//! which a box turns off; and the last two boxes choose how its frames reach the display.
+//! which a box turns off; the wind moves an art pack's trees and plants, which a box stops; and two
+//! boxes choose how its frames reach the display. The draw distances choose how far an art pack's
+//! trees and plants are drawn, and the Ground Cover menu also leaves its plants out.
 //!
 //! The effects start on. The enhanced graphics' quality presets set several of them at once
-//! ([`PRESET_VALUES`]), and the boxes' defaults are the Medium preset's.
+//! ([`PRESET_VALUES`]), and the defaults of the boxes and the menus are the Medium preset's.
 //!
 //! In a build with the `hifi` feature the options are registered with the value store
 //! ([`register`]), so the page reads and writes them like any other option and the profile keeps
@@ -55,8 +58,8 @@ pub struct FidelityOption {
     pub on_by_default: bool,
 }
 
-/// The twelve boxes, each above the boxes it can take off the page.
-pub const OPTIONS: [FidelityOption; 12] = [
+/// The thirteen boxes, each above the boxes it can take off the page.
+pub const OPTIONS: [FidelityOption; 13] = [
     FidelityOption {
         name: fidelity::LIGHTING,
         caption: "Enhanced Graphics",
@@ -165,6 +168,13 @@ pub const OPTIONS: [FidelityOption; 12] = [
         needs: Needs::Lighting,
         inverted: false,
         on_by_default: false,
+    },
+    FidelityOption {
+        name: fidelity::NO_WIND,
+        caption: "No Wind",
+        note: "Holds an art pack's trees and plants still instead of letting the wind move them. \
+               It changes at once.",
+        needs: Needs::Lighting,
     },
 ];
 
@@ -325,10 +335,11 @@ pub fn blocked(name: &str, ticked: impl Fn(&str) -> bool, rays: Option<bool>) ->
     }
 }
 
-/// Register every box with the value store, each at its default. The store's load then reads the
-/// `[Fidelity]` section of the profile into them, and the page reads and writes them.
+/// Register every box with the value store, each at its default, and the draw distances at their
+/// own. The store's load then reads the `[Fidelity]` section of the profile into them, and the page
+/// reads and writes them.
 pub fn register() -> usize {
-    OPTIONS
+    let boxes: usize = OPTIONS
         .iter()
         .map(|o| {
             usize::from(super::store::register_preference(
@@ -337,18 +348,37 @@ pub fn register() -> usize {
                 super::store::DataType::Bool,
             ))
         })
-        .sum()
+        .sum();
+    let distances = [
+        fidelity::TREE_DRAW_DISTANCE,
+        fidelity::GROUND_COVER_DRAW_DISTANCE,
+    ]
+    .into_iter()
+    .filter(|name| {
+        super::store::register_preference(
+            name,
+            PrefValue::Int(super::draw_distance::default_of(name)),
+            super::store::DataType::UInt,
+        )
+    })
+    .count();
+    boxes + distances
 }
 
-/// Whether the store's save leaves `name` out of the profile: a box still at its default that the
-/// profile does not name, so a profile that never changed one has no `[Fidelity]` section.
+/// Whether the store's save leaves `name` out of the profile: a box or a menu still at its default
+/// that the profile does not name, so a profile that never changed one has no `[Fidelity]`
+/// section.
 #[must_use]
 pub fn left_out_of_save(
     name: &str,
     value: &PrefValue,
     ini: &crate::persist::preferences::UserPreferences,
 ) -> bool {
-    find(name).is_some_and(|o| *value == PrefValue::Bool(o.on_by_default))
+    let unchanged = match find(name) {
+        Some(o) => *value == PrefValue::Bool(o.on_by_default),
+        None => is_a_menu(name) && *value == PrefValue::Int(super::draw_distance::default_of(name)),
+    };
+    unchanged
         && !ini
             .entries
             .iter()
@@ -702,6 +732,46 @@ mod tests {
             }
         };
         assert_eq!(preset_in_use(own), None);
+    }
+
+    #[test]
+    fn the_wind_box_and_the_draw_distances_need_the_better_lighting() {
+        use fidelity::{GROUND_COVER_DRAW_DISTANCE, LIGHTING, NO_WIND, TREE_DRAW_DISTANCE};
+        let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
+        for name in [NO_WIND, TREE_DRAW_DISTANCE, GROUND_COVER_DRAW_DISTANCE] {
+            assert_eq!(blocked(name, with(&[]), None), Some(Blocked::NeedsLighting));
+            assert_eq!(blocked(name, with(&[LIGHTING]), Some(false)), None);
+        }
+        assert!(find(TREE_DRAW_DISTANCE).is_none(), "the menu is no box");
+    }
+
+    /// The draw distances are registered at the whole distance, and the save leaves them out
+    /// until they are changed.
+    #[test]
+    fn the_draw_distances_are_whole_and_left_out_of_the_profile_until_chosen() {
+        use super::super::draw_distance::{default_of, OFF};
+        use crate::persist::preferences::UserPreferences;
+        let empty = UserPreferences::parse("").expect("an empty profile");
+        for name in [
+            fidelity::TREE_DRAW_DISTANCE,
+            fidelity::GROUND_COVER_DRAW_DISTANCE,
+        ] {
+            let whole = PrefValue::Int(default_of(name));
+            assert_eq!(whole, PrefValue::Int(100));
+            assert!(left_out_of_save(name, &whole, &empty), "{name}");
+            assert!(!left_out_of_save(name, &PrefValue::Int(300), &empty));
+        }
+        assert!(!left_out_of_save(
+            fidelity::GROUND_COVER_DRAW_DISTANCE,
+            &PrefValue::Int(OFF),
+            &empty
+        ));
+        let named = UserPreferences::parse("[Fidelity]\r\nTreeDrawDistance=1x\r\n").expect("reads");
+        assert!(!left_out_of_save(
+            fidelity::TREE_DRAW_DISTANCE,
+            &PrefValue::Int(100),
+            &named
+        ));
     }
 
     #[test]

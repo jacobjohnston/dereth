@@ -922,6 +922,60 @@ license = "CC0-1.0"
         assert_eq!(packed.pack.models, folder.models);
     }
 
+    /// A kind of ground cover packs the files and pictures its levels name, and opens from the
+    /// packed file as from its folder, with how much the wind moves it.
+    #[test]
+    fn ground_cover_packs_the_files_its_levels_name() {
+        let manifest = r#"
+[pack]
+name = "Meadow"
+format = 1
+[[ground_cover]]
+ground = [1, 9]
+density = 0.5
+wind = 1.5
+author = "a"
+tool = "t"
+license = "CC0-1.0"
+[[ground_cover.lod]]
+file = "grass/lod0.gltf"
+distance = 30
+"#;
+        let mut files = files();
+        let bin = files["tree/tri.bin"].clone();
+        files.insert(
+            "grass/lod0.gltf".to_owned(),
+            triangle("blade.png", "MASK").into_bytes(),
+        );
+        files.insert("grass/tri.bin".to_owned(), bin);
+        files.insert("grass/empty.bin".to_owned(), Vec::new());
+        files.insert(
+            "grass/blade.png".to_owned(),
+            png_of(4, 4, &ramp(4, 4, [60, 140, 40, 255])),
+        );
+        let folder = ArtPack::open(manifest, &mut reader(&files)).expect("the folder opens");
+        assert_eq!(folder.ground_cover.len(), 1);
+        assert!(folder.problems.is_empty(), "{:?}", folder.problems);
+        let packed = pack(manifest, &mut reader(&files)).expect("the pack packs");
+        let file = PackedFile::from_storage("test.dat", Box::new(packed.bytes)).expect("opens");
+        let keys: Vec<&str> = file
+            .contents()
+            .records
+            .iter()
+            .map(|r| r.key.as_str())
+            .collect();
+        assert!(keys.contains(&"grass/lod0.gltf"), "{keys:?}");
+        assert!(keys.contains(&"grass/tri.bin"), "{keys:?}");
+        assert!(
+            keys.iter().any(|k| k.ends_with("grass/blade.png")),
+            "{keys:?}"
+        );
+        let opened = ArtPack::from_packed(&file).expect("the packed pack opens");
+        assert_eq!(opened.ground_cover, folder.ground_cover);
+        assert_eq!(opened.models, folder.models);
+        assert_eq!(opened.models[0].wind, 1.5);
+    }
+
     #[test]
     fn a_folder_or_its_packed_file_opens_by_its_path() {
         let root =

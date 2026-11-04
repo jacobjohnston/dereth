@@ -21,6 +21,9 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Enhanced Graphics: a Quality Preset menu, from a light Low to a full Ultra, and the settings start at Medium. VSync and HDR Output are new.
 - Enhanced Graphics Mode: it always draws the best texture filtering and detail, models that hold their detail, and frames on the display's refresh unless VSync is off, whatever the Graphics settings say.
 - Enhanced Graphics Mode: Screen Brightness scales the whole picture alike.
+- Better Lighting: an art pack can plant grass and low plants over the land, and a Ground Cover menu chooses how far they are drawn, from 0.5x to 5x, or Off.
+- Better Lighting: a Tree Draw Distance menu chooses how far an art pack's trees are drawn, from 0.5x to 5x.
+- Better Lighting: the wind moves an art pack's trees and plants, and No Wind holds them still.
 
 ## 0.4.12 (2026-11-03)
 

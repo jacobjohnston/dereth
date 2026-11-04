@@ -41,7 +41,10 @@ use crate::passes::lighting::{legacy_light, object_ambient, CASCADES};
 use crate::reshade::ReshadePlan;
 use crate::shared::camera::HEIGHT_UP;
 use crate::shared::pack_image;
-use crate::snapshot::{HifiArtPack, HifiPackImage, HifiPackMaterial, HifiPackPlacement};
+use crate::snapshot::{
+    HifiArtPack, HifiCoverPatch, HifiGroundCover, HifiPackImage, HifiPackMaterial,
+    HifiPackPlacement, TREE_REACH,
+};
 use crate::{
     Caps, DrawAction, DrawNote, HifiError, HifiFrame, HifiSettings, Mark, ReplayFilter, SkipRule,
 };
@@ -118,6 +121,8 @@ struct Placed {
     /// The dither's values the level keeps, `lo..hi` of 0..1: all of them away from a change of
     /// level.
     keep: (f32, f32),
+    /// Its model's height and how much the wind moves it.
+    sway: (f32, f32),
     /// The second of a placement's two levels in a band: drawn into the view, but not into the
     /// sun's shadows, which draw the first.
     second: bool,
@@ -179,12 +184,24 @@ struct State {
     /// the last time the set changed, its taking in.
     far_prepare_us: u64,
     far_taken_us: u64,
+    /// The ground cover's runs drawn into the view, in its own instances.
+    cover_view: Vec<Batch>,
+    /// Whether the ground cover is drawn in this frame, and whether it has been. It is drawn at
+    /// the far trees' command, since a block with none of the pack's objects notes nothing.
+    cover_active: bool,
+    cover_drawn: bool,
+    /// The plants drawn into the view in the last frame.
+    cover_plants: u64,
 }
 
 /// A model on the device.
 #[derive(Debug)]
 struct GpuModel {
     lods: Vec<GpuLod>,
+    /// Cut-out growth: a tree, whose distance the player chooses.
+    foliage: bool,
+    /// Its height and how much the wind moves it.
+    sway: (f32, f32),
     /// The bounding sphere, model space.
     bounds: (Vec3, f32),
     /// The solid stand-in for the crown of cut-out growth, which the far shadow cascades draw in
@@ -235,6 +252,7 @@ struct PackGpu {
     caster_bind: wgpu::BindGroup,
     view_instances: Option<(wgpu::Buffer, u64)>,
     caster_instances: Option<(wgpu::Buffer, u64)>,
+    cover_instances: Option<(wgpu::Buffer, u64)>,
     /// The far trees' layouts and culling.
     far: far::FarPipelines,
     /// The far trees' pictures, placed from the set the culling kept.
@@ -725,7 +743,7 @@ impl PackGpu {
         });
         let caster_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("art pack shadow cascade"),
-            entries: &[uniform_entry(1, true)],
+            entries: &[uniform_entry(0, false), uniform_entry(1, true)],
         });
         let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("art pack material"),
@@ -997,6 +1015,8 @@ impl PackGpu {
             });
             models.push(GpuModel {
                 lods,
+                foliage: model.foliage,
+                sway: (model_height(model), model.wind),
                 bounds: model.bounds,
                 proxy,
             });
@@ -1026,14 +1046,20 @@ impl PackGpu {
         let caster_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("art pack shadow cascades"),
             layout: &caster_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &caster_uniform,
-                    offset: 0,
-                    size: wgpu::BufferSize::new(64),
-                }),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: frame_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &caster_uniform,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(64),
+                    }),
+                },
+            ],
         });
         Self {
             serial: pack.serial,
@@ -1056,6 +1082,7 @@ impl PackGpu {
             caster_bind,
             view_instances: None,
             caster_instances: None,
+            cover_instances: None,
             far: far_pipelines,
             view_far,
             far_models,
@@ -1125,6 +1152,134 @@ pub fn levels_at(lods: &[f32], distance: f32, scale: f32, band: f32) -> Vec<(usi
     level_at(lods, distance, scale)
         .map(|k| vec![(k, 0.0, 1.0)])
         .unwrap_or_default()
+}
+
+/// A model's levels the view draws: their places among its levels, and how far each is drawn.
+type ShownLevels = (Vec<usize>, Vec<f32>);
+
+/// How far a distant tree is sunk into the ground, meters a meter of its distance from the eye:
+/// the landscape's mesh is coarser the farther it lies, and a tree must not float over it.
+const DISTANT_SINK: f32 = 0.0015;
+
+/// `percent` as a share, a frame's 0 for the whole distance.
+fn share_of(percent: u32) -> f32 {
+    if percent == 0 {
+        1.0
+    } else {
+        // LINT-OK: a percentage, far inside f32's exact range.
+        #[allow(clippy::cast_precision_loss)]
+        let share = percent as f32 / 100.0;
+        share
+    }
+}
+
+fn shown_levels(m: &GpuModel) -> ShownLevels {
+    let shown: Vec<usize> = (0..m.lods.len())
+        .filter(|k| !m.lods[*k].shadows_only)
+        .collect();
+    let distances = shown.iter().map(|k| m.lods[*k].distance).collect();
+    (shown, distances)
+}
+
+/// How far each of a plant's levels is drawn at the share `share` of its distance. Nearer, every
+/// level draws in; farther, only the last reaches out, since the levels nearer are all a plant
+/// needs where it is seen closely.
+#[must_use]
+pub fn cover_levels(distances: &[f32], share: f32) -> Vec<f32> {
+    let mut out = distances.to_vec();
+    if share < 1.0 {
+        for d in &mut out {
+            *d *= share;
+        }
+    } else if let Some(last) = out.last_mut() {
+        *last *= share;
+    }
+    out
+}
+
+/// How much of a plant's distance, past the whole distance, every plant stands to; beyond it they
+/// thin out to none at the end.
+const COVER_THICK: f32 = 0.6;
+
+/// Whether a plant at `far` meters stands at the share `share` of its distance. Past the whole
+/// distance they stand as thick as near the eye most of the way out and thin only toward the end,
+/// so the chosen distance has no hard edge; the same ones whenever it is asked.
+#[must_use]
+pub fn cover_stands(p: &HifiPackPlacement, far: f32, distances: &[f32], share: f32) -> bool {
+    let Some(&whole) = distances.last() else {
+        return false;
+    };
+    let whole = whole * p.scale.abs().max(0.05);
+    let end = whole * share;
+    let thick = whole.max(end * COVER_THICK);
+    if share <= 1.0 || far <= thick {
+        return true;
+    }
+    let mut h = p.origin.x.to_bits() ^ p.origin.y.to_bits().rotate_left(13);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2C1B_3C6D);
+    h ^= h >> 12;
+    // LINT-OK: a hash scaled into 0..1; its low bits are not needed.
+    #[allow(clippy::cast_precision_loss)]
+    let unit = (h >> 8) as f32 / (1u32 << 24) as f32;
+    unit < (1.0 - ((far - thick) / (end - thick)).min(1.0)).powi(2)
+}
+
+/// The levels `distances` draws at `far` meters for a model scaled `scale`, no farther than `limit`
+/// meters however large it is.
+#[must_use]
+pub fn levels_within(
+    distances: &[f32],
+    far: f32,
+    scale: f32,
+    band: f32,
+    limit: f32,
+) -> Vec<(usize, f32, f32)> {
+    // The first level that reaches the limit, or nearly, is the last drawn, and fades out at it.
+    let end = limit / scale.max(0.05);
+    let last = distances
+        .iter()
+        .position(|d| *d * (1.0 + band) >= end)
+        .unwrap_or(distances.len().saturating_sub(1));
+    let mut capped = distances.get(..=last).unwrap_or(distances).to_vec();
+    if let Some(d) = capped.last_mut() {
+        *d = end;
+    }
+    levels_at(&capped, far, scale, band)
+}
+
+/// Note the plant or tree `p` at each of its `chosen` levels, sunk `sink` meters.
+#[allow(clippy::too_many_arguments)]
+fn push_placed(
+    placed: &mut Vec<Placed>,
+    m: &GpuModel,
+    model: usize,
+    shown: &[usize],
+    chosen: Vec<(usize, f32, f32)>,
+    p: &HifiPackPlacement,
+    origin: Vec3,
+    sink: f32,
+) {
+    if chosen.is_empty() {
+        return;
+    }
+    let mut rows = placement_rows(p, origin);
+    rows[2].w -= sink;
+    let radius = m.bounds.1 * p.scale.abs();
+    for (i, (k, lo, hi)) in chosen.into_iter().enumerate() {
+        placed.push(Placed {
+            model,
+            lod: shown[k],
+            levels: m.lods.len(),
+            rows,
+            centre: origin + p.origin,
+            radius,
+            seen: true,
+            keep: (lo, hi),
+            sway: m.sway,
+            second: i > 0,
+        });
+    }
 }
 
 /// How wide the band is where one level of detail fades into the next, a share of the distance
@@ -1253,7 +1408,7 @@ fn batches(placed: &[Placed], mut chosen: Vec<usize>, rows: &mut Vec<Vec4>) -> V
         let p = &placed[i];
         let at = u32::try_from(rows.len() / 4).unwrap_or(u32::MAX);
         rows.extend(p.rows);
-        rows.push(Vec4::new(p.keep.0, p.keep.1, 0.0, 0.0));
+        rows.push(Vec4::new(p.keep.0, p.keep.1, p.sway.0, p.sway.1));
         match out.last_mut() {
             Some(b) if b.model == p.model && b.lod == p.lod => b.instances.end = at + 1,
             _ => out.push(Batch {
@@ -1277,6 +1432,7 @@ impl State {
         let eye = frame.camera.eye;
         let band = lod_band();
         let only = lod_only();
+        let tree_share = share_of(frame.tree_distance);
         for t in &frame.terrain {
             let Some((_, _, placements)) = self.blocks.get(&t.block) else {
                 continue;
@@ -1302,6 +1458,12 @@ impl State {
                 let far = (t.origin + p.origin).distance(eye);
                 let levels = match only {
                     Some(k) => vec![(k.min(m.lods.len().saturating_sub(1)), 0.0, 1.0)],
+                    None if m.foliage && tree_share < 1.0 => {
+                        levels_within(&distances, far, p.scale, band, TREE_REACH * tree_share)
+                            .into_iter()
+                            .map(|(k, lo, hi)| (shown[k], lo, hi))
+                            .collect()
+                    }
                     None => levels_at(&distances, far, p.scale, band)
                         .into_iter()
                         .map(|(k, lo, hi)| (shown[k], lo, hi))
@@ -1317,11 +1479,95 @@ impl State {
                         radius,
                         seen,
                         keep: (lo, hi),
+                        sway: m.sway,
                         second: i > 0,
                     });
                 }
             }
         }
+    }
+
+    /// The ground cover's plants and the distant trees for `frame`: only the patches within reach
+    /// and in the view are looked into, and each fades out past its last level as a model does.
+    /// They cast no shadows: under the crowns and the sun they would cost the most and show the
+    /// least.
+    fn plant(&self, frame: &HifiFrame, clip_from_render: Mat4, cover: bool) -> Vec<Placed> {
+        let mut placed = Vec::new();
+        let Some(gpu) = self.gpu.as_ref() else {
+            return placed;
+        };
+        let planes = frustum(clip_from_render);
+        let eye = frame.camera.eye;
+        let band = lod_band();
+        // ORDER-OK: only looked up, by block.
+        let of_blocks =
+            |set: Option<&'_ Arc<HifiGroundCover>>| -> HashMap<u16, Arc<Vec<HifiCoverPatch>>> {
+                set.map_or_else(HashMap::new, |s| {
+                    s.blocks.iter().map(|(b, p)| (*b, Arc::clone(p))).collect()
+                })
+            };
+        let plants = if cover {
+            of_blocks(frame.ground_cover.as_ref())
+        } else {
+            HashMap::new()
+        };
+        let trees = of_blocks(frame.distant_trees.as_ref());
+        let cover_share = share_of(frame.ground_cover_distance);
+        let tree_limit = TREE_REACH * share_of(frame.tree_distance);
+        // ORDER-OK: only looked up, by model.
+        let mut levels: HashMap<usize, ShownLevels> = HashMap::new();
+        // ORDER-OK: only looked up, by model.
+        let mut cover_reach: HashMap<usize, Vec<f32>> = HashMap::new();
+        for t in &frame.terrain {
+            for patch in plants.get(&t.block).map_or(&[][..], |p| p.as_slice()) {
+                let middle = t.origin + patch.centre;
+                if middle.distance(eye) - patch.radius > patch.reach * cover_share
+                    || !sphere_seen(&planes, middle, patch.radius)
+                {
+                    continue;
+                }
+                for p in &patch.plants {
+                    let Some(&model) = gpu.by_id.get(&p.id) else {
+                        continue;
+                    };
+                    let m = &gpu.models[model];
+                    let (shown, distances) = levels.entry(model).or_insert_with(|| shown_levels(m));
+                    let far = (t.origin + p.origin).distance(eye);
+                    if !cover_stands(p, far, distances, cover_share) {
+                        continue;
+                    }
+                    let reach = cover_reach
+                        .entry(model)
+                        .or_insert_with(|| cover_levels(distances, cover_share));
+                    let chosen = levels_at(reach, far, p.scale, band);
+                    push_placed(&mut placed, m, model, shown, chosen, p, t.origin, 0.0);
+                }
+            }
+            // A block whose own objects stand in the world draws its own trees.
+            if self.blocks.get(&t.block).is_some_and(|b| b.1) {
+                continue;
+            }
+            for patch in trees.get(&t.block).map_or(&[][..], |p| p.as_slice()) {
+                let middle = t.origin + patch.centre;
+                if middle.distance(eye) - patch.radius > tree_limit
+                    || !sphere_seen(&planes, middle, patch.radius)
+                {
+                    continue;
+                }
+                for p in &patch.plants {
+                    let Some(&model) = gpu.by_id.get(&p.id) else {
+                        continue;
+                    };
+                    let m = &gpu.models[model];
+                    let (shown, distances) = levels.entry(model).or_insert_with(|| shown_levels(m));
+                    let far = (t.origin + p.origin).distance(eye);
+                    let chosen = levels_within(distances, far, p.scale, band, tree_limit);
+                    let sink = far * DISTANT_SINK;
+                    push_placed(&mut placed, m, model, shown, chosen, p, t.origin, sink);
+                }
+            }
+        }
+        placed
     }
 
     /// The far trees for `frame`: the set on the device (made again when the set or the pack
@@ -1415,16 +1661,34 @@ impl State {
         let Some(gpu) = self.gpu.as_ref() else {
             return false;
         };
-        let Some((instances, _)) = gpu.view_instances.as_ref() else {
+        Self::draw_runs(gpu, gpu.view_instances.as_ref(), &self.view, pass)
+    }
+
+    /// Draw the ground cover's runs into `pass`, the re-shaded world's.
+    fn draw_cover(&self, pass: &mut wgpu::RenderPass<'_>) -> bool {
+        let Some(gpu) = self.gpu.as_ref() else {
             return false;
         };
-        if self.view.is_empty() {
+        Self::draw_runs(gpu, gpu.cover_instances.as_ref(), &self.cover_view, pass)
+    }
+
+    /// Draw `runs` of `instances` into `pass`.
+    fn draw_runs(
+        gpu: &PackGpu,
+        instances: Option<&(wgpu::Buffer, u64)>,
+        runs: &[Batch],
+        pass: &mut wgpu::RenderPass<'_>,
+    ) -> bool {
+        let Some((instances, _)) = instances else {
+            return false;
+        };
+        if runs.is_empty() {
             return false;
         }
         pass.set_bind_group(0, &gpu.frame_bind, &[]);
         // The pipeline last set: for pictures, for both faces, or for the front alone.
         let mut current: Option<u8> = None;
-        for b in &self.view {
+        for b in runs {
             let lod = &gpu.models[b.model].lods[b.lod];
             for p in &lod.primitives {
                 let (which, pipeline) = if lod.pictures {
@@ -1567,7 +1831,7 @@ fn render_origin(frame: &HifiFrame) -> Option<Vec2> {
 /// The frame's constants: the transforms to clip and view space, the eye, the sun, the old light
 /// the light per pixel divides out, the frame's place in the anti-aliasing's dither, and the
 /// ambient light the world's objects are drawn with.
-fn frame_constants(frame: &HifiFrame, clip_from_render: Mat4) -> Vec<f32> {
+fn frame_constants(frame: &HifiFrame, clip_from_render: Mat4, wind: bool) -> Vec<f32> {
     let cam = &frame.camera;
     let (sun, amb) = legacy_light(frame);
     let objects = object_ambient(frame);
@@ -1581,7 +1845,28 @@ fn frame_constants(frame: &HifiFrame, clip_from_render: Mat4) -> Vec<f32> {
     c.extend([amb[0], amb[1], amb[2], 0.0]);
     c.extend([cam.dither, 0.0, 0.0, 0.0]);
     c.extend([objects[0], objects[1], objects[2], 0.0]);
+    let origin = render_origin(frame).unwrap_or(Vec2::ZERO);
+    // LINT-OK: the clock wraps every hour and a bit, where a skip in the swaying goes unseen.
+    #[allow(clippy::cast_possible_truncation)]
+    let clock = frame.time.rem_euclid(4096.0) as f32;
+    c.extend([clock, if wind { 1.0 } else { 0.0 }, origin.x, origin.y]);
     c
+}
+
+/// How high a model's nearest level stands above its foot.
+fn model_height(model: &crate::snapshot::HifiPackModel) -> f32 {
+    model.lods.first().map_or(0.0, |lod| {
+        lod.primitives
+            .iter()
+            .flat_map(|p| {
+                p.vertices
+                    .as_chunks::<{ crate::snapshot::PACK_VERTEX_FLOATS }>()
+                    .0
+                    .iter()
+                    .map(|v| v[2])
+            })
+            .fold(0.0, f32::max)
+    })
 }
 
 impl HifiPass for ArtPack {
@@ -1600,6 +1885,7 @@ impl HifiPass for ArtPack {
             "art pack far tree bytes",
             s.far.as_ref().map_or(0, |f| f.bytes),
         ));
+        notes.push(("art pack ground cover plants", s.cover_plants));
         notes.push(("art pack far trees prepare us", s.far_prepare_us));
         notes.push(("art pack far trees taken us", s.far_taken_us));
         notes.push(("art pack draws replaced", s.covered.len() as u64));
@@ -1696,9 +1982,20 @@ impl HifiPass for ArtPack {
             queue.write_buffer(
                 &gpu.frame_uniform,
                 0,
-                &floats(&frame_constants(cx.frame, cam.jittered(clip_from_render))),
+                &floats(&frame_constants(
+                    cx.frame,
+                    cam.jittered(clip_from_render),
+                    cx.settings.wind,
+                )),
             );
             write_instances(&device, &queue, &mut gpu.view_instances, &rows);
+        }
+        let plants = s.plant(cx.frame, clip_from_render, cx.settings.ground_cover);
+        s.cover_plants = plants.len() as u64;
+        let mut rows = Vec::with_capacity(plants.len() * 4);
+        s.cover_view = batches(&plants, (0..plants.len()).collect(), &mut rows);
+        if let Some(gpu) = s.gpu.as_mut() {
+            write_instances(&device, &queue, &mut gpu.cover_instances, &rows);
         }
         let started = std::time::Instant::now();
         s.prepare_far(&device, &queue, cx.frame, clip_from_render);
@@ -1717,6 +2014,10 @@ impl HifiPass for ArtPack {
         s.far_active = s.far.is_some()
             && plan.is_some_and(|p| s.far_mark.is_some_and(|m| p.opaque.contains(&m)));
         s.far_drawn = false;
+        s.cover_active = s.gpu.is_some()
+            && !s.cover_view.is_empty()
+            && plan.is_some_and(|p| s.far_mark.is_some_and(|m| p.opaque.contains(&m)));
+        s.cover_drawn = false;
     }
 
     fn encode(&mut self, _cx: &mut EncodeCx<'_, '_>) -> Result<(), HifiError> {
@@ -1776,6 +2077,11 @@ impl ReplayFilter for ArtPack {
             s.far_drawn = true;
             drew |= s.draw_far(pass);
         }
+        // The ground cover there too: a block with none of the pack's objects notes no mark.
+        if matches!(mark, Mark::TerrainCellEnd) && s.cover_active && !s.cover_drawn {
+            s.cover_drawn = true;
+            drew |= s.draw_cover(pass);
+        }
         if !matches!(mark, Mark::ArtPackBlock { .. }) || !s.active || s.drawn {
             return drew;
         }
@@ -1792,6 +2098,63 @@ mod tests {
     use super::*;
     use dereth_primitives::num::math::{cosf, sinf};
     use glam::Quat;
+
+    fn plant_at(x: f32, y: f32) -> HifiPackPlacement {
+        HifiPackPlacement {
+            id: 1,
+            origin: Vec3::new(x, y, 0.0),
+            rotation: Quat::IDENTITY,
+            scale: 1.0,
+        }
+    }
+
+    #[test]
+    fn a_plants_levels_all_draw_in_below_the_whole_distance_and_only_its_last_reaches_past_it() {
+        assert_eq!(cover_levels(&[10.0, 20.0, 40.0], 0.5), [5.0, 10.0, 20.0]);
+        assert_eq!(cover_levels(&[10.0, 20.0, 40.0], 1.0), [10.0, 20.0, 40.0]);
+        assert_eq!(cover_levels(&[10.0, 20.0, 40.0], 3.0), [10.0, 20.0, 120.0]);
+    }
+
+    #[test]
+    fn past_the_whole_distance_plants_stay_thick_most_of_the_way_and_thin_toward_the_end() {
+        let d = [40.0];
+        let plants: Vec<HifiPackPlacement> = (0..4000)
+            .map(|i| plant_at(i as f32 * 0.37, (i % 97) as f32 * 1.13))
+            .collect();
+        let standing = |far: f32, share: f32| {
+            plants
+                .iter()
+                .filter(|p| cover_stands(p, far, &d, share))
+                .count()
+        };
+        // Within the whole distance, and at the whole share, every one stands.
+        assert_eq!(standing(30.0, 3.0), 4000);
+        assert_eq!(standing(100.0, 1.0), 4000);
+        // At three times the distance, every one to 72 m of the 120 m it reaches.
+        assert_eq!(standing(70.0, 3.0), 4000);
+        let halfway = standing(96.0, 3.0);
+        assert!((850..1150).contains(&halfway), "{halfway}");
+        // At five times, every one to 120 m of the 200 m.
+        assert_eq!(standing(115.0, 5.0), 4000);
+        assert_eq!(standing(200.0, 5.0), 0);
+        // A share a little past the whole keeps every one to the whole distance.
+        assert_eq!(standing(40.0, 1.5), 4000);
+    }
+
+    #[test]
+    fn a_tree_is_drawn_no_farther_than_the_limit_however_it_is_scaled_and_fades_out_at_it() {
+        let d = [60.0, 180.0, f32::INFINITY];
+        // A tree scaled three times over still stops at the limit.
+        assert!(levels_within(&d, 200.0, 3.0, 0.15, 144.0).is_empty());
+        assert!(!levels_within(&d, 100.0, 3.0, 0.15, 144.0).is_empty());
+        // Near the limit it fades: its one level keeps only part of the dither.
+        let fading = levels_within(&d, 144.0, 1.0, 0.15, 144.0);
+        assert_eq!(fading.len(), 1);
+        assert!(fading[0].1 > 0.0, "{fading:?}");
+        // No share of the frame's means the whole distance.
+        assert_eq!(share_of(0), 1.0);
+        assert_eq!(share_of(250), 2.5);
+    }
 
     #[test]
     fn the_pack_shader_parses_and_validates_with_its_entry_points() {
@@ -1847,11 +2210,11 @@ mod tests {
         frame.sky.ambient_color = [255, 204, 102];
         frame.sky.sun_brightness = 1.5;
         frame.sky.sun_color = [255, 255, 255];
-        let c = frame_constants(&frame, Mat4::IDENTITY);
+        let c = frame_constants(&frame, Mat4::IDENTITY, true);
         assert_eq!(
             c.len(),
-            56,
-            "two transforms and six rows, as the shader's frame"
+            60,
+            "two transforms and seven rows, as the shader's frame"
         );
         assert!(c.len() * 4 <= 256, "inside the frame's uniform");
         // The landscape's ambient, which the light per pixel divides out, and the objects': a
@@ -1989,6 +2352,7 @@ mod tests {
             radius: 5.0,
             seen: false,
             keep: (0.0, 1.0),
+            sway: (0.0, 0.0),
             second: false,
         };
         for floor in CASTER_FLOORS {
@@ -2053,6 +2417,7 @@ mod tests {
             radius: 1.0,
             seen: true,
             keep: (0.25, 1.0),
+            sway: (0.0, 0.0),
             second: false,
         };
         let placed = [at(1, 0), at(0, 2), at(1, 0), at(0, 2), at(0, 1)];

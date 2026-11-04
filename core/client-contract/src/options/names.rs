@@ -139,10 +139,18 @@ pub mod fidelity {
     /// `Fidelity.NoSlopeMaterials`: an art pack's ground is laid without the scree and rock it
     /// lays on steep slopes.
     pub const NO_SLOPE_MATERIALS: &str = "Fidelity.NoSlopeMaterials";
+    /// `Fidelity.NoWind`: an art pack's trees and plants stand still.
+    pub const NO_WIND: &str = "Fidelity.NoWind";
     /// `Fidelity.VSync`: frames are presented on the display's refresh.
     pub const VSYNC: &str = "Fidelity.VSync";
     /// `Fidelity.Hdr`: the frame is presented with the display's extended range.
     pub const HDR: &str = "Fidelity.Hdr";
+    /// `Fidelity.TreeDrawDistance`: how far an art pack's trees are drawn, a share of the distance
+    /// they are drawn to with nothing changed, percent.
+    pub const TREE_DRAW_DISTANCE: &str = "Fidelity.TreeDrawDistance";
+    /// `Fidelity.GroundCoverDrawDistance`: how far an art pack's ground cover is drawn, a share of
+    /// the distance it is drawn to with nothing changed, percent; 1 leaves it out.
+    pub const GROUND_COVER_DRAW_DISTANCE: &str = "Fidelity.GroundCoverDrawDistance";
     /// `Fidelity.Debug`: a diagnostic view, set only by `--set-at`: 0 Off, 1 Passthrough,
     /// 2 Depth, 3 Normals, 4 AO, 5 Shadows, 6 Census, 7 Parity (re-shaded with no pass).
     pub const DEBUG: &str = "Fidelity.Debug";
@@ -155,7 +163,8 @@ pub mod fidelity {
     /// over it. No box sets it.
     pub const ART_PACK: &str = "Fidelity.ArtPack";
 
-    /// Every name the profile and `--set-at` may set, the twelve boxes first.
+    /// Every name the profile and `--set-at` may set, the thirteen boxes first and the menus after
+    /// them.
     pub const NAMES: &[&str] = &[
         LIGHTING,
         SHADOWS,
@@ -167,8 +176,11 @@ pub mod fidelity {
         RETAIL_LOOK,
         NO_ANTI_ALIASING,
         NO_SLOPE_MATERIALS,
+        NO_WIND,
         VSYNC,
         HDR,
+        TREE_DRAW_DISTANCE,
+        GROUND_COVER_DRAW_DISTANCE,
         DEBUG,
     ];
 }

@@ -31,6 +31,9 @@ struct Frame {
     // The ambient light the world's objects took from the old light: the landscape's and a share
     // of the sun's more.
     amb_objects: vec4<f32>,
+    // The wind: x the clock, y its strength (nought for none), zw render space's origin in the
+    // world, so a plant keeps its place in the gusts as the origin moves.
+    wind: vec4<f32>,
 };
 
 struct Material {
@@ -76,8 +79,9 @@ struct Vertex {
     @location(4) color: vec4<f32>,
 };
 
-// The model's placement: the three rows of its model-to-render transform, and in `keep.xy` the
-// values of the screen's dither its level keeps (all of 0..1 away from a change of level).
+// The model's placement: the three rows of its model-to-render transform, in `keep.xy` the
+// values of the screen's dither its level keeps (all of 0..1 away from a change of level), and in
+// `keep.zw` its model's height and how much the wind moves it.
 struct Instance {
     @location(5) r0: vec4<f32>,
     @location(6) r1: vec4<f32>,
@@ -109,10 +113,42 @@ struct VsOut {
     @location(6) @interpolate(flat) keep: vec2<f32>,
 };
 
+// How far the wind can bend a point `rise` (0 at its foot, 1 at its top) up a plant `tall` metres
+// high: a blade of grass bends a large share of its height, a tree a small one, and nothing bends
+// at its foot, so what is rooted stays rooted.
+fn wind_reach(tall: f32, rise: f32) -> f32 {
+    let r = clamp(rise, 0.0, 1.0);
+    let share = mix(0.16, 0.028, smoothstep(1.5, 12.0, tall));
+    return min(tall * share, 0.85) * r * r;
+}
+
+// Where the wind has moved the point `p` of the placement `i`, in render space.
+fn in_the_wind(i: Instance, p: vec3<f32>, at: vec3<f32>) -> vec3<f32> {
+    let moved = i.keep.w * frame.wind.y;
+    if (moved <= 0.0 || i.keep.z <= 0.0) {
+        return at;
+    }
+    let scale = length(i.r0.xyz);
+    let reach = wind_reach(i.keep.z * scale, p.z / i.keep.z) * moved;
+    let t = frame.wind.x;
+    let spot = vec2<f32>(i.r0.w, i.r1.w) + frame.wind.zw;
+    let gust = 0.55 + 0.45 * sin(t * 0.31 + dot(spot, vec2<f32>(0.021, 0.017)));
+    let phase = dot(spot, vec2<f32>(0.13, 0.09));
+    let bend = sin(t * 1.3 + phase) + 0.45 * sin(t * 2.9 + phase * 1.6);
+    // Each leaf and blade flutters on its own, finer and faster than the whole plant sways.
+    let flutter = sin(t * 6.1 + dot(p * scale, vec3<f32>(2.1, 1.7, 2.9))) * 0.14;
+    let across = sin(t * 0.9 + phase * 0.7) * 0.35;
+    return at + reach * gust * vec3<f32>(
+        0.8 * (bend + flutter) - 0.6 * across,
+        0.6 * (bend - flutter) + 0.8 * across,
+        flutter * 0.5,
+    );
+}
+
 @vertex
 fn vs_main(v: Vertex, i: Instance) -> VsOut {
     var o: VsOut;
-    let world = place(i, v.position);
+    let world = in_the_wind(i, v.position, place(i, v.position));
     o.position = frame.clip_from_render * vec4<f32>(world, 1.0);
     o.world = world;
     o.local = v.position;
@@ -531,7 +567,8 @@ struct CasterOut {
 @vertex
 fn vs_caster(v: Vertex, i: Instance) -> CasterOut {
     var o: CasterOut;
-    o.position = caster.light_from_render * vec4<f32>(place(i, v.position), 1.0);
+    let at = in_the_wind(i, v.position, place(i, v.position));
+    o.position = caster.light_from_render * vec4<f32>(at, 1.0);
     o.uv = v.uv;
     o.alpha = v.color.a;
     return o;

@@ -16,6 +16,9 @@ pre-release leaves it for the final release, and its notes show it as it is);
 
 - Better Lighting: a building's doors and windows no longer show through the ground in front of them, near or far, and a door no longer sticks out below a rise of ground that hides the rest of its house.
 - Better Lighting: objects behind a nearby building's walls no longer show through them when the camera stands just outside it.
+- Better Lighting: the doors and windows of buildings behind an art pack's trees and plants no longer show through them.
+- Better Lighting: an art pack's trees and plants past a nearby building no longer show through its walls.
+- Better Lighting: a wielded weapon stays in its holder's hand where an art pack's ground stands above the original.
 
 ## 0.4.12 (2026-11-03)
 

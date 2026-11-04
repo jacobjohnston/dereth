@@ -3,11 +3,13 @@
 //! The scene draws every object as it always does, and notes around the draws of the objects an
 //! art pack has models for ([`Mark::ArtPackCovered`]), and where each block that has such objects
 //! draws them ([`Mark::ArtPackBlock`]). In a re-shaded frame this pass leaves those draws out of
-//! the world's replay and, at the first block's note, draws the pack's models of every block that
-//! noted one into the re-shaded targets: the colour the light per pixel divides its old light out
-//! of, and the normal with the surface's class. They then take the light, the shadows, the
-//! occlusion and the bounced light as everything else does. The sun's shadow cascades take the
-//! models in place of the objects too ([`PackCasters`]).
+//! the world's replay and, when the landscape walk is done (the first object pass,
+//! [`Mark::Objects`]), draws the pack's models of every block that noted one into the re-shaded
+//! targets: the colour the light per pixel divides its old light out of, and the normal with the
+//! surface's class. Drawn any sooner, a later building's openings would cut through them. What
+//! stands past the buildings near the eye is drawn before their door stamps instead. They then
+//! take the light, the shadows, the occlusion and the bounced light as everything else does. The
+//! sun's shadow cascades take the models in place of the objects too ([`PackCasters`]).
 //!
 //! Only pixels change. What can be picked, where the camera may go and everything the game reads
 //! come from the ordinary frame, which draws the original objects whether or not the pack is
@@ -159,6 +161,11 @@ struct State {
     placed: Vec<Placed>,
     /// The runs drawn into the view.
     view: Vec<Batch>,
+    /// The runs of what stands past the near buildings, drawn before their door stamps.
+    view_far: Vec<Batch>,
+    /// The building mark those are drawn at, and whether they have been.
+    far_stamp_mark: Option<Mark>,
+    view_far_drawn: bool,
     /// The runs drawn into each shadow cascade.
     casters: [Vec<Batch>; CASCADES],
     /// Whether the pack is drawn in this frame.
@@ -169,8 +176,7 @@ struct State {
     drawn_instances: u64,
     /// The far trees on the device, for the set the frames carry.
     far: Option<far::FarGpu>,
-    /// The command the far trees are drawn at: the end of the first landscape cell's ground,
-    /// where the drawn ground they stand on is drawn too.
+    /// The command the pack is drawn at: the first object pass, once the landscape walk is done.
     far_mark: Option<u32>,
     /// Whether the far trees are drawn in this frame, and whether they have been.
     far_active: bool,
@@ -1415,16 +1421,34 @@ impl State {
         let Some(gpu) = self.gpu.as_ref() else {
             return false;
         };
-        let Some((instances, _)) = gpu.view_instances.as_ref() else {
+        Self::draw_runs(gpu, gpu.view_instances.as_ref(), &self.view, pass)
+    }
+
+    /// Draw the runs of what stands past the near buildings into `pass`.
+    fn draw_view_far(&self, pass: &mut wgpu::RenderPass<'_>) -> bool {
+        let Some(gpu) = self.gpu.as_ref() else {
             return false;
         };
-        if self.view.is_empty() {
+        Self::draw_runs(gpu, gpu.view_instances.as_ref(), &self.view_far, pass)
+    }
+
+    /// Draw `runs` of `instances` into `pass`.
+    fn draw_runs(
+        gpu: &PackGpu,
+        instances: Option<&(wgpu::Buffer, u64)>,
+        runs: &[Batch],
+        pass: &mut wgpu::RenderPass<'_>,
+    ) -> bool {
+        let Some((instances, _)) = instances else {
+            return false;
+        };
+        if runs.is_empty() {
             return false;
         }
         pass.set_bind_group(0, &gpu.frame_bind, &[]);
         // The pipeline last set: for pictures, for both faces, or for the front alone.
         let mut current: Option<u8> = None;
-        for b in &self.view {
+        for b in runs {
             let lod = &gpu.models[b.model].lods[b.lod];
             for p in &lod.primitives {
                 let (which, pipeline) = if lod.pictures {
@@ -1672,7 +1696,7 @@ impl HifiPass for ArtPack {
                     s.marked.insert(*block);
                     s.first_mark.get_or_insert(*at);
                 }
-                Mark::TerrainCellEnd => {
+                Mark::Objects => {
                     s.far_mark.get_or_insert(*at);
                 }
                 _ => {}
@@ -1690,7 +1714,21 @@ impl HifiPass for ArtPack {
             .collect();
         s.drawn_instances = chosen.len() as u64;
         let mut rows = Vec::with_capacity(chosen.len() * 3);
-        s.view = batches(&s.placed, chosen, &mut rows);
+        // What stands past the near buildings is drawn before their door stamps, which would let
+        // it show through a wall they cross.
+        let stamps = render_origin(cx.frame).and_then(|global| {
+            let eye = cam.eye.truncate() + global;
+            crate::passes::drawn::near_stamps_begin(&cx.seam.tables().marks, eye)
+        });
+        s.far_stamp_mark = stamps.map(|(_, m, _)| m);
+        let (near, far): (Vec<usize>, Vec<usize>) = chosen.into_iter().partition(|i| {
+            stamps.is_none_or(|(.., nearest)| {
+                (s.placed[*i].centre - cam.eye).truncate().length() < nearest
+            })
+        });
+        s.view = batches(&s.placed, near, &mut rows);
+        s.view_far = batches(&s.placed, far, &mut rows);
+        s.view_far_drawn = false;
         if let Some(gpu) = s.gpu.as_mut() {
             // Drawn at the frame's jitter, as the world is.
             queue.write_buffer(
@@ -1713,9 +1751,10 @@ impl HifiPass for ArtPack {
     fn planned(&mut self, plan: Option<&ReshadePlan>) {
         let mut s = self.0.borrow_mut();
         s.active = s.gpu.is_some()
-            && plan.is_some_and(|p| s.first_mark.is_some_and(|m| p.opaque.contains(&m)));
+            && s.first_mark.is_some()
+            && plan.is_some_and(|p| s.far_mark.is_some_and(|m| p.replays_mark_at(m)));
         s.far_active = s.far.is_some()
-            && plan.is_some_and(|p| s.far_mark.is_some_and(|m| p.opaque.contains(&m)));
+            && plan.is_some_and(|p| s.far_mark.is_some_and(|m| p.replays_mark_at(m)));
         s.far_drawn = false;
     }
 
@@ -1765,23 +1804,38 @@ impl ReplayFilter for ArtPack {
     }
 
     fn mark(&mut self, mark: Mark, pass: &mut wgpu::RenderPass<'_>) -> bool {
-        if !matches!(mark, Mark::ArtPackBlock { .. } | Mark::TerrainCellEnd) {
+        let mut s = self.0.borrow_mut();
+        // What stands past the near buildings, before their door stamps.
+        if matches!(mark, Mark::BuildingCell { .. }) && s.far_stamp_mark == Some(mark) {
+            let mut drew = false;
+            if s.far_active && !s.far_drawn {
+                s.far_drawn = true;
+                drew |= s.draw_far(pass);
+            }
+            if s.active && !s.view_far_drawn {
+                s.view_far_drawn = true;
+                drew |= s.draw_view_far(pass);
+            }
+            return drew;
+        }
+        if !matches!(mark, Mark::Objects) {
             return false;
         }
-        let mut s = self.0.borrow_mut();
         let mut drew = false;
-        // The far trees at the end of the first landscape cell's ground in the opaque world,
-        // once, where the drawn ground is drawn.
-        if matches!(mark, Mark::TerrainCellEnd) && s.far_active && !s.far_drawn {
+        // The far trees once the landscape walk is done, as the first object pass begins.
+        if s.far_active && !s.far_drawn {
             s.far_drawn = true;
             drew |= s.draw_far(pass);
         }
-        if !matches!(mark, Mark::ArtPackBlock { .. }) || !s.active || s.drawn {
+        if !s.active || s.drawn {
             return drew;
         }
-        // The first block's note in the opaque world: every noted block's models are drawn
-        // here, once.
+        // Every noted block's models are drawn here, once.
         s.drawn = true;
+        if !s.view_far_drawn {
+            s.view_far_drawn = true;
+            drew |= s.draw_view_far(pass);
+        }
         drew | s.draw_view(pass)
     }
 }

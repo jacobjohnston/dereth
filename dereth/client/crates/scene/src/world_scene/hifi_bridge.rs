@@ -115,6 +115,7 @@ fn materials_for_presentation(pack: &crate::art_pack::ArtPack) -> HifiMaterials 
                 damp_floors: m.damp_floors,
                 slime: m.slime,
                 ice: m.ice,
+                sheen: m.sheen,
             })
             .collect(),
         grits: pack.grits.iter().map(picture).collect(),

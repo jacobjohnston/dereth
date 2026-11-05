@@ -273,6 +273,8 @@ pub struct HifiTextureMaterial {
     pub slime: bool,
     /// Whether it is glacier ice: deep blue, opaque, with light bent through it.
     pub ice: bool,
+    /// How strongly it shines as silk or satin does, from 0 to 1.
+    pub sheen: f32,
 }
 
 /// The landscape the presentation draws itself.

@@ -383,9 +383,17 @@ impl Materials {
             let floors = if m.damp_floors { 1.0f32 } else { 0.0 };
             let slime = if m.slime { 1.0f32 } else { 0.0 };
             let ice = if m.ice { 1.0f32 } else { 0.0 };
-            for (v, to) in [m.grit_repeat[0], m.grit_repeat[1], on, floors, slime, ice]
-                .iter()
-                .zip(at.chunks_mut(4))
+            for (v, to) in [
+                m.grit_repeat[0],
+                m.grit_repeat[1],
+                on,
+                floors,
+                slime,
+                ice,
+                m.sheen,
+            ]
+            .iter()
+            .zip(at.chunks_mut(4))
             {
                 to.copy_from_slice(&v.to_le_bytes());
             }

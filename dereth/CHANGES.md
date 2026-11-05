@@ -22,12 +22,12 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Enhanced Graphics Mode: it always draws the best texture filtering and detail, models that hold their detail, and frames on the display's refresh unless VSync is off, whatever the Graphics settings say.
 - Enhanced Graphics Mode: Screen Brightness scales the whole picture alike.
 - Better Lighting: an art pack can plant grass and low plants over the land, and a Ground Cover menu chooses how far they are drawn, from 0.5x to 5x, or Off.
-- Better Lighting: a Tree Draw Distance menu chooses how far an art pack's trees are drawn, from 0.5x to 5x.
 - Better Lighting: the wind moves an art pack's trees and plants, and No Wind holds them still.
-- Enhanced Graphics: No Wind is now Foliage Wind, ticked when it is on. Tree Draw Distance starts at 1.5x, as the Medium preset has it; the Low preset leaves out the ground cover and stops the wind, and High and Ultra draw the trees and plants 3x and 5x as far. The wind and the draw distances leave the page under Keep Retail Look.
+- Enhanced Graphics: No Wind is now Foliage Wind, ticked when it is on. The Low preset leaves out the ground cover and stops the wind, and High and Ultra draw the plants 3x and 5x as far. The wind and the ground cover's draw distance leave the page under Keep Retail Look.
 - Enhanced Graphics: a Render Scale menu draws the world at 85%, 75%, 67% or 50% of the screen's pixels each way, for a higher frame rate on large screens. On a Mac MetalFX rebuilds the picture at full size; elsewhere it is enlarged. Anti-Aliasing stays on below 100%, and pictures are read for the full frame.
 - Enhanced Graphics: Render Scale starts at Dynamic, as the Low, Medium and High presets have it (Ultra draws 100%): it lowers the render scale to hold the Dynamic Resolution Frame Rate (60 FPS unless chosen), shown only while Dynamic is chosen.
 - Performance Panel: SCALE shows the render scale drawn now, as a Dynamic render scale moves it.
+- Enhanced Graphics: No Wind is now Foliage Wind, ticked when it is on. The Low preset leaves out the ground cover and stops the wind, and High and Ultra draw the plants 3x and 5x as far. The wind and the ground cover's draw distance leave the page under Keep Retail Look.
 
 ## 0.4.12 (2026-11-03)
 

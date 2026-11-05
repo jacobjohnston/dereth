@@ -85,11 +85,6 @@ pub(crate) struct Shadow {
         u64,
         std::sync::Arc<dereth_render_hifi::snapshot::HifiGroundCover>,
     )>,
-    /// The distant trees as the presentation draws them, made once per change (by their serial).
-    distant_trees: Option<(
-        u64,
-        std::sync::Arc<dereth_render_hifi::snapshot::HifiGroundCover>,
-    )>,
     /// The forest cover as the presentation draws it, made once per cover (by its serial).
     cover: Option<(
         u64,
@@ -461,22 +456,15 @@ pub(crate) type FarTree = dereth_render_hifi::snapshot::HifiFarTree;
 pub(crate) type CoverPatch = dereth_render_hifi::snapshot::HifiCoverPatch;
 /// One plant of a patch, placed as an art pack's model is.
 pub(crate) type CoverPlacement = dereth_render_hifi::snapshot::HifiPackPlacement;
-/// How far an art pack's trees are drawn at the whole distance, meters.
-pub(crate) const TREE_REACH: f32 = dereth_render_hifi::snapshot::TREE_REACH;
-
-/// How far the player asks an art pack's trees and ground cover to be drawn, shares of the whole
-/// distance, percent: the choices while the better lighting they are offered for is drawn, and
-/// the whole distance otherwise.
-pub(crate) fn draw_distances(prefs: &FidelityPreferences) -> (u32, u32) {
+/// How far the player asks an art pack's ground cover to be drawn, a share of the whole distance,
+/// percent: the choice while the better lighting it is offered for is drawn, and the whole
+/// distance otherwise.
+pub(crate) fn ground_cover_distance(prefs: &FidelityPreferences) -> u32 {
     let lit = settings(prefs, false).lighting.is_on();
-    let share = |feature| match prefs.effective(feature) {
+    match prefs.effective(FidelityFeature::GroundCoverDrawDistance) {
         share @ 50.. if lit => share,
         _ => 100,
-    };
-    (
-        share(FidelityFeature::TreeDrawDistance),
-        share(FidelityFeature::GroundCoverDrawDistance),
-    )
+    }
 }
 
 /// How the far trees and the forest cover are drawn, from the knobs.
@@ -1282,26 +1270,7 @@ fn snapshot(
         sh.far_trees = None;
         None
     };
-    frame.tree_distance = draw.distant_trees.share;
     frame.ground_cover_distance = draw.ground_cover.share;
-    frame.distant_trees = if draw.distant_trees.field.active && frame.art_pack.is_some() {
-        if sh
-            .distant_trees
-            .as_ref()
-            .is_none_or(|(serial, _)| *serial != draw.distant_trees.field.serial)
-        {
-            sh.distant_trees = Some((
-                draw.distant_trees.field.serial,
-                std::sync::Arc::new(ground_cover_for_presentation(&draw.distant_trees.field)),
-            ));
-        }
-        sh.distant_trees
-            .as_ref()
-            .map(|(_, c)| std::sync::Arc::clone(c))
-    } else {
-        sh.distant_trees = None;
-        None
-    };
     frame.ground_cover = if draw.ground_cover.field.active && frame.art_pack.is_some() {
         if sh
             .ground_cover
@@ -1770,16 +1739,17 @@ mod tests {
         assert!(!settings(&bare, true).ground_cover);
         assert!(lit.wind);
         assert!(!settings(&boxes(0), true).wind);
-        // The draw distances are the whole distance until chosen, and outside the better lighting.
-        assert_eq!(draw_distances(&boxes(0b1)), (100, 100));
-        assert_eq!(draw_distances(&bare), (100, 100));
+        // The ground cover is the whole distance until chosen, and outside the better lighting.
+        assert_eq!(ground_cover_distance(&boxes(0b1)), 100);
+        assert_eq!(ground_cover_distance(&bare), 100);
+        // The trees' old draw distance in a capture's line is read as nothing.
         let far = FidelityPreferences::parse_switch(
             "Lighting=1,TreeDrawDistance=300,GroundCoverDrawDistance=50",
         )
         .unwrap();
-        assert_eq!(draw_distances(&far), (300, 50));
-        let unlit = FidelityPreferences::parse_switch("Sky=1,TreeDrawDistance=300").unwrap();
-        assert_eq!(draw_distances(&unlit), (100, 100));
+        assert_eq!(ground_cover_distance(&far), 50);
+        let unlit = FidelityPreferences::parse_switch("Sky=1,GroundCoverDrawDistance=300").unwrap();
+        assert_eq!(ground_cover_distance(&unlit), 100);
         // A capture's level past a tick is kept.
         let mut rig = FidelityPreferences::parse_switch("Lighting=3,Shadows=4,Debug=6").unwrap();
         assert_eq!(settings(&rig, true).lighting, Level::High);

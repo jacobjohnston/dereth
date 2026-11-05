@@ -567,8 +567,6 @@ pub enum FidelityFeature {
     VSync,
     /// `Fidelity.Hdr`.
     Hdr,
-    /// `Fidelity.TreeDrawDistance`.
-    TreeDrawDistance,
     /// `Fidelity.GroundCoverDrawDistance`.
     GroundCoverDrawDistance,
     /// `Fidelity.DynamicResolution`.
@@ -582,7 +580,7 @@ pub enum FidelityFeature {
 #[cfg(feature = "hifi")]
 impl FidelityFeature {
     /// Every option, in the order the names list them.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 17] = [
         Self::Lighting,
         Self::Shadows,
         Self::GlobalIllumination,
@@ -596,7 +594,6 @@ impl FidelityFeature {
         Self::NoWind,
         Self::VSync,
         Self::Hdr,
-        Self::TreeDrawDistance,
         Self::GroundCoverDrawDistance,
         Self::DynamicResolution,
         Self::RenderScale,
@@ -620,7 +617,6 @@ impl FidelityFeature {
             Self::NoWind => fidelity::NO_WIND,
             Self::VSync => fidelity::VSYNC,
             Self::Hdr => fidelity::HDR,
-            Self::TreeDrawDistance => fidelity::TREE_DRAW_DISTANCE,
             Self::GroundCoverDrawDistance => fidelity::GROUND_COVER_DRAW_DISTANCE,
             Self::DynamicResolution => fidelity::DYNAMIC_RESOLUTION,
             Self::RenderScale => fidelity::RENDER_SCALE,
@@ -648,9 +644,7 @@ impl FidelityFeature {
     pub const fn max(self) -> u32 {
         match self {
             Self::Debug => 7,
-            Self::TreeDrawDistance | Self::GroundCoverDrawDistance => {
-                dereth_client_contract::options::draw_distance::MOST
-            }
+            Self::GroundCoverDrawDistance => dereth_client_contract::options::draw_distance::MOST,
             Self::RenderScale => 99,
             Self::DynamicResolution => 120,
             Self::RetailLook
@@ -664,12 +658,11 @@ impl FidelityFeature {
     }
 
     /// What the option holds where the profile names nothing, when it is not 0: a box's default,
-    /// or the Tree Draw Distance, Render Scale and Dynamic Resolution menus'.
+    /// or the Render Scale and Dynamic Resolution menus'.
     #[must_use]
     pub fn default_value(self) -> Option<u32> {
         use dereth_client_contract::options as o;
         match self {
-            Self::TreeDrawDistance => u32::try_from(o::draw_distance::TREE_DEFAULT).ok(),
             Self::RenderScale => Some(o::fidelity::SCALE_DEFAULT),
             Self::DynamicResolution => u32::try_from(o::dynamic_resolution::DEFAULT).ok(),
             _ => o::fidelity::find(self.name())
@@ -691,7 +684,7 @@ impl FidelityFeature {
             } else {
                 0
             }
-        } else if matches!(self, Self::TreeDrawDistance | Self::GroundCoverDrawDistance) {
+        } else if matches!(self, Self::GroundCoverDrawDistance) {
             use dereth_client_contract::options::draw_distance::{LEAST, OFF};
             #[allow(clippy::cast_sign_loss)] // a small positive constant
             let off = matches!(self, Self::GroundCoverDrawDistance) && raw == OFF as u32;
@@ -738,17 +731,15 @@ impl FidelityPreferences {
                 // The view a diagnostic run asks for, by number.
                 FidelityFeature::Debug => prefs.u32(feature.name()),
                 // A share by its words, or the ground cover's Off.
-                FidelityFeature::TreeDrawDistance | FidelityFeature::GroundCoverDrawDistance => {
-                    prefs
-                        .get(feature.name())
-                        .and_then(|v| {
-                            dereth_client_contract::options::draw_distance::parse_value(
-                                feature.name(),
-                                v,
-                            )
-                        })
-                        .and_then(|v| u32::try_from(v).ok())
-                }
+                FidelityFeature::GroundCoverDrawDistance => prefs
+                    .get(feature.name())
+                    .and_then(|v| {
+                        dereth_client_contract::options::draw_distance::parse_value(
+                            feature.name(),
+                            v,
+                        )
+                    })
+                    .and_then(|v| u32::try_from(v).ok()),
                 // The share the page chose, or Dynamic, in its words.
                 FidelityFeature::RenderScale => prefs
                     .get(feature.name())
@@ -827,7 +818,6 @@ impl FidelityPreferences {
                             | FidelityFeature::NoAntiAliasing
                             | FidelityFeature::NoSlopeMaterials
                             | FidelityFeature::NoWind
-                            | FidelityFeature::TreeDrawDistance
                             | FidelityFeature::GroundCoverDrawDistance
                     )
             })
@@ -835,16 +825,12 @@ impl FidelityPreferences {
     }
 
     /// These preferences with the presentation choices taken out, the render scale among them, and
-    /// the draw distances, which each frame reads: a change to one alone needs no new start.
+    /// the ground cover's draw distance, which each frame reads: a change to one alone needs no new
+    /// start.
     #[must_use]
     pub fn without_presentation_choices(mut self) -> Self {
         for (i, f) in FidelityFeature::ALL.iter().enumerate() {
-            if f.is_presentation_choice()
-                || matches!(
-                    f,
-                    FidelityFeature::TreeDrawDistance | FidelityFeature::GroundCoverDrawDistance
-                )
-            {
+            if f.is_presentation_choice() || matches!(f, FidelityFeature::GroundCoverDrawDistance) {
                 self.values[i] = 0;
             }
         }
@@ -900,6 +886,13 @@ impl FidelityPreferences {
             } else {
                 format!("Fidelity.{}", name.trim())
             };
+            // A name no option takes any more is read as nothing.
+            if fidelity::RETIRED
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(&full))
+            {
+                continue;
+            }
             if !f.set_named(
                 &full,
                 &dereth_client_contract::PrefValue::Int(i32::try_from(value).unwrap_or(i32::MAX)),
@@ -978,9 +971,7 @@ mod tests {
                     | FidelityFeature::Weather
                     | FidelityFeature::VSync
             );
-            let at = if f == FidelityFeature::TreeDrawDistance {
-                150
-            } else if f == FidelityFeature::RenderScale {
+            let at = if f == FidelityFeature::RenderScale {
                 dereth_client_contract::options::render_scale::DYNAMIC
             } else if f == FidelityFeature::DynamicResolution {
                 60
@@ -1078,19 +1069,19 @@ mod tests {
                 "[UI]\nInterface=Horizon\n[Fidelity]\n{line}\n"
             )))
         };
-        let tree = FidelityFeature::TreeDrawDistance;
         let cover = FidelityFeature::GroundCoverDrawDistance;
-        assert_eq!(read("TreeDrawDistance=3x").effective(tree), 300);
-        assert_eq!(read("TreeDrawDistance=150").effective(tree), 150);
+        assert_eq!(read("GroundCoverDrawDistance=3x").effective(cover), 300);
+        assert_eq!(read("GroundCoverDrawDistance=150").effective(cover), 150);
         assert_eq!(
-            read("TreeDrawDistance=9x").effective(tree),
-            150,
-            "a word it does not know leaves it at its default"
+            read("GroundCoverDrawDistance=9x").effective(cover),
+            0,
+            "a word it does not know leaves it at the whole distance"
         );
         assert_eq!(read("GroundCoverDrawDistance=Off").effective(cover), 1);
-        assert_eq!(read("TreeDrawDistance=Off").effective(tree), 150);
+        // The trees' old draw distance is read as nothing, from a profile or a capture's line.
+        assert_eq!(read("TreeDrawDistance=5x"), read(""));
         assert!(
-            !FidelityPreferences::parse_switch("TreeDrawDistance=500,NoWind=1")
+            !FidelityPreferences::parse_switch("GroundCoverDrawDistance=500,NoWind=1")
                 .unwrap()
                 .any_effective()
         );
@@ -1098,8 +1089,8 @@ mod tests {
             .expect("a switch");
         assert_eq!(switched.effective(cover), 1);
         assert_eq!(switched.without_presentation_choices().value(cover), 0);
-        assert_eq!(FidelityFeature::TreeDrawDistance.clamp(20), 0);
-        assert_eq!(FidelityFeature::TreeDrawDistance.clamp(1), 0);
+        assert_eq!(FidelityFeature::GroundCoverDrawDistance.clamp(20), 0);
+        assert_eq!(FidelityFeature::GroundCoverDrawDistance.clamp(1), 1);
         assert_eq!(FidelityFeature::NoWind.clamp(3), 1);
     }
 

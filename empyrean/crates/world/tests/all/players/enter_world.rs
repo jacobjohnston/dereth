@@ -383,7 +383,7 @@ fn set_ephemeral_values_grants_the_sessions_staff_flags_when_permissions_are_ove
     assert_staff_flags_by_access_level(&mut w, true);
 }
 
-/// DIVERGE: V461. By default an account's level gives its characters no staff flags.
+/// DIVERGE: V508. By default an account's level gives its characters no staff flags.
 #[test]
 fn set_ephemeral_values_grants_no_staff_flags_under_the_default_permissions() {
     let mut w = world();

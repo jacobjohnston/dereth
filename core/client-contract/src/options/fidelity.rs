@@ -195,19 +195,16 @@ pub fn register() -> usize {
             ))
         })
         .sum();
-    let distances = [
-        fidelity::TREE_DRAW_DISTANCE,
-        fidelity::GROUND_COVER_DRAW_DISTANCE,
-    ]
-    .into_iter()
-    .filter(|name| {
-        super::store::register_preference(
-            name,
-            PrefValue::Int(super::draw_distance::default_of(name)),
-            super::store::DataType::UInt,
-        )
-    })
-    .count();
+    let distances = [fidelity::GROUND_COVER_DRAW_DISTANCE]
+        .into_iter()
+        .filter(|name| {
+            super::store::register_preference(
+                name,
+                PrefValue::Int(super::draw_distance::default_of(name)),
+                super::store::DataType::UInt,
+            )
+        })
+        .count();
     boxes + distances
 }
 
@@ -456,43 +453,35 @@ mod tests {
     }
 
     #[test]
-    fn the_wind_box_and_the_draw_distances_need_the_better_lighting() {
-        use fidelity::{GROUND_COVER_DRAW_DISTANCE, LIGHTING, NO_WIND, TREE_DRAW_DISTANCE};
+    fn the_wind_box_and_the_draw_distance_need_the_better_lighting() {
+        use fidelity::{GROUND_COVER_DRAW_DISTANCE, LIGHTING, NO_WIND};
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
-        for name in [NO_WIND, TREE_DRAW_DISTANCE, GROUND_COVER_DRAW_DISTANCE] {
+        for name in [NO_WIND, GROUND_COVER_DRAW_DISTANCE] {
             assert_eq!(blocked(name, with(&[]), None), Some(Blocked::NeedsLighting));
             assert_eq!(blocked(name, with(&[LIGHTING]), Some(false)), None);
         }
-        assert!(find(TREE_DRAW_DISTANCE).is_none(), "the menu is no box");
+        assert!(
+            find(GROUND_COVER_DRAW_DISTANCE).is_none(),
+            "the menu is no box"
+        );
     }
 
-    /// The draw distances are registered at the whole distance, and the save leaves them out
-    /// until they are changed.
+    /// The draw distance is registered at the whole distance, and the save leaves it out until
+    /// it is changed.
     #[test]
-    fn the_draw_distances_are_whole_and_left_out_of_the_profile_until_chosen() {
+    fn the_draw_distance_is_whole_and_left_out_of_the_profile_until_chosen() {
         use super::super::draw_distance::{default_of, OFF};
         use crate::persist::preferences::UserPreferences;
         let empty = UserPreferences::parse("").expect("an empty profile");
-        for name in [
-            fidelity::TREE_DRAW_DISTANCE,
-            fidelity::GROUND_COVER_DRAW_DISTANCE,
-        ] {
-            let whole = PrefValue::Int(default_of(name));
-            assert_eq!(whole, PrefValue::Int(100));
-            assert!(left_out_of_save(name, &whole, &empty), "{name}");
-            assert!(!left_out_of_save(name, &PrefValue::Int(300), &empty));
-        }
-        assert!(!left_out_of_save(
-            fidelity::GROUND_COVER_DRAW_DISTANCE,
-            &PrefValue::Int(OFF),
-            &empty
-        ));
-        let named = UserPreferences::parse("[Fidelity]\r\nTreeDrawDistance=1x\r\n").expect("reads");
-        assert!(!left_out_of_save(
-            fidelity::TREE_DRAW_DISTANCE,
-            &PrefValue::Int(100),
-            &named
-        ));
+        let name = fidelity::GROUND_COVER_DRAW_DISTANCE;
+        let whole = PrefValue::Int(default_of(name));
+        assert_eq!(whole, PrefValue::Int(100));
+        assert!(left_out_of_save(name, &whole, &empty));
+        assert!(!left_out_of_save(name, &PrefValue::Int(300), &empty));
+        assert!(!left_out_of_save(name, &PrefValue::Int(OFF), &empty));
+        let named =
+            UserPreferences::parse("[Fidelity]\r\nGroundCoverDrawDistance=1x\r\n").expect("reads");
+        assert!(!left_out_of_save(name, &whole, &named));
     }
 
     #[test]

@@ -551,8 +551,6 @@ pub enum FidelityFeature {
     NoSlopeMaterials,
     /// `Fidelity.NoWind`.
     NoWind,
-    /// `Fidelity.TreeDrawDistance`.
-    TreeDrawDistance,
     /// `Fidelity.GroundCoverDrawDistance`.
     GroundCoverDrawDistance,
     /// `Fidelity.Debug`.
@@ -562,7 +560,7 @@ pub enum FidelityFeature {
 #[cfg(feature = "hifi")]
 impl FidelityFeature {
     /// Every option, in the order the names list them.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 13] = [
         Self::Lighting,
         Self::Shadows,
         Self::GlobalIllumination,
@@ -574,7 +572,6 @@ impl FidelityFeature {
         Self::NoAntiAliasing,
         Self::NoSlopeMaterials,
         Self::NoWind,
-        Self::TreeDrawDistance,
         Self::GroundCoverDrawDistance,
         Self::Debug,
     ];
@@ -594,7 +591,6 @@ impl FidelityFeature {
             Self::NoAntiAliasing => fidelity::NO_ANTI_ALIASING,
             Self::NoSlopeMaterials => fidelity::NO_SLOPE_MATERIALS,
             Self::NoWind => fidelity::NO_WIND,
-            Self::TreeDrawDistance => fidelity::TREE_DRAW_DISTANCE,
             Self::GroundCoverDrawDistance => fidelity::GROUND_COVER_DRAW_DISTANCE,
             Self::Debug => fidelity::DEBUG,
         }
@@ -607,9 +603,7 @@ impl FidelityFeature {
     pub const fn max(self) -> u32 {
         match self {
             Self::Debug => 7,
-            Self::TreeDrawDistance | Self::GroundCoverDrawDistance => {
-                dereth_client_contract::options::draw_distance::MOST
-            }
+            Self::GroundCoverDrawDistance => dereth_client_contract::options::draw_distance::MOST,
             Self::RetailLook | Self::NoAntiAliasing | Self::NoSlopeMaterials | Self::NoWind => 1,
             _ => 4,
         }
@@ -620,7 +614,7 @@ impl FidelityFeature {
     /// cover's Off.
     #[must_use]
     pub const fn clamp(self, raw: u32) -> u32 {
-        if matches!(self, Self::TreeDrawDistance | Self::GroundCoverDrawDistance) {
+        if matches!(self, Self::GroundCoverDrawDistance) {
             use dereth_client_contract::options::draw_distance::{LEAST, OFF};
             #[allow(clippy::cast_sign_loss)] // a small positive constant
             let off = matches!(self, Self::GroundCoverDrawDistance) && raw == OFF as u32;
@@ -647,7 +641,7 @@ impl FidelityFeature {
 pub struct FidelityPreferences {
     /// Each option's stored value, in [`FidelityFeature::ALL`] order. 0 is off for every one; a
     /// ticked box is 1.
-    pub values: [u32; 14],
+    pub values: [u32; 13],
     /// Whether the interface shown is Horizon. Never kept in the profile: it is read from the
     /// interface choice at start-up and follows the interface shown after that. Off, every option
     /// is off in effect, whatever it stores.
@@ -666,17 +660,15 @@ impl FidelityPreferences {
                 // The view a diagnostic run asks for, by number.
                 FidelityFeature::Debug => prefs.u32(feature.name()),
                 // A share by its words, or the ground cover's Off.
-                FidelityFeature::TreeDrawDistance | FidelityFeature::GroundCoverDrawDistance => {
-                    prefs
-                        .get(feature.name())
-                        .and_then(|v| {
-                            dereth_client_contract::options::draw_distance::parse_value(
-                                feature.name(),
-                                v,
-                            )
-                        })
-                        .and_then(|v| u32::try_from(v).ok())
-                }
+                FidelityFeature::GroundCoverDrawDistance => prefs
+                    .get(feature.name())
+                    .and_then(|v| {
+                        dereth_client_contract::options::draw_distance::parse_value(
+                            feature.name(),
+                            v,
+                        )
+                    })
+                    .and_then(|v| u32::try_from(v).ok()),
                 // A box the page ticked; a number the file holds otherwise (from an older
                 // build) is not read, as the page does not read it.
                 _ => prefs.bool(feature.name()).map(u32::from),
@@ -734,7 +726,6 @@ impl FidelityPreferences {
                         | FidelityFeature::NoAntiAliasing
                         | FidelityFeature::NoSlopeMaterials
                         | FidelityFeature::NoWind
-                        | FidelityFeature::TreeDrawDistance
                         | FidelityFeature::GroundCoverDrawDistance
                 )
             })
@@ -786,6 +777,13 @@ impl FidelityPreferences {
             } else {
                 format!("Fidelity.{}", name.trim())
             };
+            // A name no option takes any more is read as nothing.
+            if fidelity::RETIRED
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(&full))
+            {
+                continue;
+            }
             if !f.set_named(
                 &full,
                 &dereth_client_contract::PrefValue::Int(i32::try_from(value).unwrap_or(i32::MAX)),
@@ -919,19 +917,29 @@ mod tests {
                 "[UI]\nInterface=Horizon\n[Fidelity]\n{line}\n"
             )))
         };
-        let tree = FidelityFeature::TreeDrawDistance;
         let cover = FidelityFeature::GroundCoverDrawDistance;
-        assert_eq!(read("TreeDrawDistance=3x").effective(tree), 300);
-        assert_eq!(read("TreeDrawDistance=150").effective(tree), 150);
-        assert_eq!(read("TreeDrawDistance=9x").effective(tree), 0, "the whole");
+        assert_eq!(read("GroundCoverDrawDistance=3x").effective(cover), 300);
+        assert_eq!(read("GroundCoverDrawDistance=150").effective(cover), 150);
+        assert_eq!(
+            read("GroundCoverDrawDistance=9x").effective(cover),
+            0,
+            "the whole"
+        );
         assert_eq!(read("GroundCoverDrawDistance=Off").effective(cover), 1);
-        assert_eq!(read("TreeDrawDistance=Off").effective(tree), 0);
-        assert!(!read("TreeDrawDistance=5x\nNoWind=True").any_effective());
+        assert!(!read("GroundCoverDrawDistance=5x\nNoWind=True").any_effective());
+        // The trees' old draw distance is read as nothing, from a profile or a capture's line.
+        assert_eq!(read("TreeDrawDistance=5x"), read(""));
+        let switched = FidelityPreferences::parse_switch("Lighting=1,TreeDrawDistance=300")
+            .expect("a retired name is passed over");
+        assert_eq!(
+            switched,
+            FidelityPreferences::parse_switch("Lighting=1").unwrap()
+        );
         let switched = FidelityPreferences::parse_switch("Lighting=1,GroundCoverDrawDistance=1")
             .expect("a switch");
         assert_eq!(switched.effective(cover), 1);
-        assert_eq!(FidelityFeature::TreeDrawDistance.clamp(20), 0);
-        assert_eq!(FidelityFeature::TreeDrawDistance.clamp(1), 0);
+        assert_eq!(FidelityFeature::GroundCoverDrawDistance.clamp(20), 0);
+        assert_eq!(FidelityFeature::GroundCoverDrawDistance.clamp(1), 1);
         assert_eq!(FidelityFeature::NoWind.clamp(3), 1);
     }
 

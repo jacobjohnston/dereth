@@ -522,6 +522,8 @@ struct HeldCascades {
     turn: u64,
     view: Mat4,
     size: u32,
+    // A landscape block and where it stood: a block crossing moves every point the matrices hold.
+    anchor: Option<(u16, Vec3)>,
     cascades: Cascades,
     drawn: [bool; CASCADES],
 }
@@ -560,9 +562,17 @@ pub(crate) fn frame_cascades(frame: &HifiFrame, size: u32) -> (Cascades, [bool; 
     let mut out = fresh;
     let mut drawn = [true; CASCADES];
     // The frame after the last, a few stamps on: a stamp counts more than frames.
-    let next = held
-        .as_ref()
-        .filter(|h| h.size == size && frame.stamp > h.stamp && frame.stamp - h.stamp <= 16);
+    let next = held.as_ref().filter(|h| {
+        h.size == size
+            && frame.stamp > h.stamp
+            && frame.stamp - h.stamp <= 16
+            && h.anchor.is_none_or(|(block, at)| {
+                frame
+                    .terrain
+                    .iter()
+                    .any(|t| t.block == block && t.origin.distance_squared(at) < 1e-4)
+            })
+    });
     let turn = next.map_or(0, |h| h.turn + 1);
     if let Some(last) = next {
         #[allow(clippy::needless_range_loop)] // a cascade's index picks it in four arrays
@@ -580,6 +590,7 @@ pub(crate) fn frame_cascades(frame: &HifiFrame, size: u32) -> (Cascades, [bool; 
         turn,
         view,
         size,
+        anchor: frame.terrain.first().map(|t| (t.block, t.origin)),
         cascades: out,
         drawn,
     });

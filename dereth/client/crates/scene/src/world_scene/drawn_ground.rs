@@ -788,14 +788,12 @@ impl super::SceneDraw {
         self.drawn.eye = ws.camera.position;
         self.drawn.keep_fields(store);
         self.far_trees_step(store);
-        let (tree_share, cover_share) =
-            super::hifi_bridge::draw_distances(&self.cfg.render.fidelity);
+        let cover_share = super::hifi_bridge::ground_cover_distance(&self.cfg.render.fidelity);
         self.ground_cover_step(
             cover_share,
             settings.art_pack && settings.ground_cover && presented,
             store,
         );
-        self.distant_trees_step(tree_share, settings.art_pack && presented, store);
         let want = if self.drawn.active {
             self.drawn.bake_generation
         } else {
@@ -837,31 +835,6 @@ impl super::SceneDraw {
 }
 
 impl super::SceneDraw {
-    /// The distant trees' upkeep for this frame: `wanted` with an art pack, at the share `share`.
-    fn distant_trees_step(&mut self, share: u32, wanted: bool, store: &Arc<RetailDatStore>) {
-        let pack = self.land.art_pack.clone();
-        let region = || Arc::new((*self.land.region).clone());
-        let drawn = &mut self.drawn;
-        let build = if drawn.active {
-            drawn.bake_generation
-        } else {
-            0
-        };
-        let viewer = drawn.viewer;
-        let mut shift = |block| drawn.scenery_shift_for(store, block);
-        self.distant_trees.step(
-            share,
-            wanted,
-            pack.as_ref(),
-            build,
-            store,
-            &region,
-            &self.land.table,
-            viewer,
-            &mut shift,
-        );
-    }
-
     /// The ground cover's upkeep for this frame: `wanted` with an art pack that lays any, at the
     /// share `share`.
     fn ground_cover_step(&mut self, share: u32, wanted: bool, store: &Arc<RetailDatStore>) {
@@ -961,7 +934,6 @@ impl super::WorldScene {
         self.draw.drawn.wait_for_world();
         self.draw.far.wait();
         self.draw.ground_cover.field.wait();
-        self.draw.distant_trees.field.wait();
     }
 
     /// The far trees worked out so far: the blocks, the trees within reach, the milliseconds

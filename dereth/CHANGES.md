@@ -22,9 +22,8 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Enhanced Graphics Mode: it always draws the best texture filtering and detail, models that hold their detail, and frames on the display's refresh unless VSync is off, whatever the Graphics settings say.
 - Enhanced Graphics Mode: Screen Brightness scales the whole picture alike.
 - Better Lighting: an art pack can plant grass and low plants over the land, and a Ground Cover menu chooses how far they are drawn, from 0.5x to 5x, or Off.
-- Better Lighting: a Tree Draw Distance menu chooses how far an art pack's trees are drawn, from 0.5x to 5x.
 - Better Lighting: the wind moves an art pack's trees and plants, and No Wind holds them still.
-- Enhanced Graphics: No Wind is now Foliage Wind, ticked when it is on. Tree Draw Distance starts at 1.5x, as the Medium preset has it; the Low preset leaves out the ground cover and stops the wind, and High and Ultra draw the trees and plants 3x and 5x as far. The wind and the draw distances leave the page under Keep Retail Look.
+- Enhanced Graphics: No Wind is now Foliage Wind, ticked when it is on. The Low preset leaves out the ground cover and stops the wind, and High and Ultra draw the plants 3x and 5x as far. The wind and the ground cover's draw distance leave the page under Keep Retail Look.
 
 ## 0.4.12 (2026-11-03)
 

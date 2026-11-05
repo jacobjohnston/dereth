@@ -74,12 +74,6 @@ pub struct HifiFrame {
     /// How far the ground cover is drawn, a share of the distance its pack names, percent; 0 for
     /// the whole distance.
     pub ground_cover_distance: u32,
-    /// The trees past the blocks whose own objects stand in the world, while the player asks for
-    /// them.
-    pub distant_trees: Option<Arc<HifiGroundCover>>,
-    /// How far an art pack's trees are drawn, a share of [`TREE_REACH`], percent; 0 for the whole
-    /// distance.
-    pub tree_distance: u32,
     /// The Remastered sky, as the scene's tuning has it, while an art pack is open and its sky
     /// is wanted: retail's clouds, sun, moons and stars drawn again over the physical sky.
     pub sky_knobs: Option<HifiSkyKnobs>,
@@ -148,11 +142,6 @@ impl Default for HifiSkyKnobs {
         }
     }
 }
-
-/// How far an art pack's trees are drawn at the whole distance, meters from the eye: where the
-/// blocks whose objects stand in the world end, on average, seen from within the middle one. The
-/// tree draw distance is a share of it.
-pub const TREE_REACH: f32 = 288.0;
 
 /// The plants an art pack lays over the land, gathered into patches in the blocks near the viewer.
 /// Each block's patches are worked out off the frame once and shared.

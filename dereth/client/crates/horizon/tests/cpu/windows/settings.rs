@@ -233,6 +233,22 @@ fn keep_retail_look_takes_what_an_art_pack_draws_off_the_page() {
     assert!(on_the_page(&mut h, &state, caption(names::SHADOWS)));
 }
 
+/// Cloud Detail starts at Medium, and is on the page only with Enhanced Graphics Mode on.
+#[test]
+#[cfg(feature = "hifi")]
+fn cloud_detail_starts_medium_and_shows_only_with_enhanced_graphics() {
+    let clouds = dereth_client_contract::options::cloud_detail::CAPTION;
+    let (mut h, state) = client_page(READY);
+    assert_eq!(
+        store::inq_value(names::CLOUD_DETAIL),
+        Some(PrefValue::Int(1))
+    );
+    assert!(!on_the_page(&mut h, &state, clouds));
+    tick(&mut h, &state, caption(names::LIGHTING));
+    h.frame(&state);
+    assert!(on_the_page(&mut h, &state, clouds));
+}
+
 /// Open the Quality Preset menu's list: its names, and the one the box shows. The list is closed
 /// again with that one chosen, which changes nothing.
 #[cfg(feature = "hifi")]

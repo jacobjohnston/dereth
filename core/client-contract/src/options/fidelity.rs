@@ -206,6 +206,15 @@ pub const PRESET_VALUES: &[(&str, [PrefValue; PRESET_NAMES.len()])] = &[
     (fidelity::WEATHER, [OFF, ON, ON, ON]),
     (fidelity::NO_ANTI_ALIASING, [ON, OFF, OFF, OFF]),
     (fidelity::NO_SLOPE_MATERIALS, [OFF, OFF, OFF, OFF]),
+    (
+        fidelity::CLOUD_DETAIL,
+        [
+            PrefValue::Int(super::cloud_detail::LOW),
+            PrefValue::Int(super::cloud_detail::MEDIUM),
+            PrefValue::Int(super::cloud_detail::HIGH),
+            PrefValue::Int(super::cloud_detail::HIGH),
+        ],
+    ),
 ];
 
 /// One quality preset, by its place in [`PRESET_NAMES`].
@@ -693,12 +702,20 @@ mod tests {
         let low = PRESETS[0].values();
         assert!(low.contains(&(fidelity::GLOBAL_ILLUMINATION, PrefValue::Bool(false))));
         assert!(low.contains(&(fidelity::NO_ANTI_ALIASING, PrefValue::Bool(true))));
+        assert!(low.contains(&(
+            fidelity::CLOUD_DETAIL,
+            PrefValue::Int(super::super::cloud_detail::LOW)
+        )));
         let ultra = PRESETS[3].values();
-        assert!(ultra
-            .iter()
-            .all(|(name, v)| *v == PrefValue::Bool(!find(name).unwrap().inverted)));
-        // The boxes' defaults are the Medium preset's.
-        let defaults = |name: &str| find(name).map(|o| PrefValue::Bool(o.on_by_default));
+        assert!(ultra.iter().all(|(name, v)| match find(name) {
+            Some(o) => *v == PrefValue::Bool(!o.inverted),
+            None => *v == PrefValue::Int(super::super::cloud_detail::HIGH),
+        }));
+        // The defaults of the boxes and the menu are the Medium preset's.
+        let defaults = |name: &str| match find(name) {
+            Some(o) => Some(PrefValue::Bool(o.on_by_default)),
+            None => is_a_menu(name).then_some(PrefValue::Int(super::super::cloud_detail::DEFAULT)),
+        };
         assert_eq!(preset_in_use(defaults), Some(PRESETS[1]));
         // Each preset is in use once set, and a value of the player's own is none.
         for p in PRESETS {

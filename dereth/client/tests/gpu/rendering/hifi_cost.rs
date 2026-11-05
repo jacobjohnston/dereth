@@ -155,12 +155,12 @@ fn the_depth_seen_through_openings_draws_again_only_what_follows_the_first_build
     }
 }
 
-/// The ambient occlusion searches every pixel of a 1920x1080 or a 2560x1440 picture, and one
-/// texel for each two by two pixels of a 5120x2160 one.
+/// The ambient occlusion searches every pixel of a 1600x900 picture, and one texel for each two by
+/// two pixels of a 1920x1080 or a 5120x2160 one.
 #[test]
-fn on_a_picture_larger_than_1440p_the_occlusion_searches_a_quarter_of_the_texels() {
+fn on_a_picture_of_1080p_and_up_the_occlusion_searches_a_quarter_of_the_texels() {
     let _gpu = crate::common::gpu_lock();
-    for (width, height, share) in [(1920, 1080, 1), (2560, 1440, 1), (5120, 2160, 4)] {
+    for (width, height, share) in [(1600, 900, 1), (1920, 1080, 4), (5120, 2160, 4)] {
         let report = town_sized("AmbientOcclusion=1", width, height);
         let searched = note(&report, "occlusion texels searched");
         assert_eq!(

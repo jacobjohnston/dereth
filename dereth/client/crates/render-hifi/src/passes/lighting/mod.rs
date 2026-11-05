@@ -506,11 +506,91 @@ fn caster_positions(
     (out, runs)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Cascades {
     pub(crate) matrices: [Mat4; CASCADES],
     pub(crate) texel: [f32; CASCADES],
     pub(crate) depth_range: [f32; CASCADES],
+}
+
+/// The cascades a frame's shadows were last fitted to: its stamp and view, the map's side, the
+/// cascades, and which of them it draws.
+#[derive(Debug, Clone, Copy)]
+struct HeldCascades {
+    stamp: u64,
+    // Frames since the far cascades last all drew together; its parity picks whose turn it is.
+    turn: u64,
+    view: Mat4,
+    size: u32,
+    cascades: Cascades,
+    drawn: [bool; CASCADES],
+}
+
+/// The last frame's cascades, shared by every pass that reads the shadows.
+static HELD: std::sync::Mutex<Option<HeldCascades>> = std::sync::Mutex::new(None);
+
+/// The first cascade drawn every other frame: the far ones, whose texels span metres, keep their
+/// map and matrix a frame while the other draws.
+const STAGGER_FROM: usize = 2;
+
+/// Whether the far cascades take turns; `DERETH_HIFI_SHADOW_STAGGER=0` draws them every frame,
+/// to compare.
+fn staggered() -> bool {
+    env_f32("DERETH_HIFI_SHADOW_STAGGER", 1.0) > 0.5
+}
+
+/// `frame`'s cascades for a map `size` texels on a side, and which of them it draws: each far
+/// cascade every other frame, keeping last frame's matrix between, while the frames run on one
+/// after another; every cascade otherwise. Every pass asking for the same frame gets the same.
+pub(crate) fn frame_cascades(frame: &HifiFrame, size: u32) -> (Cascades, [bool; CASCADES]) {
+    let fresh = cascades(frame, size);
+    if !staggered() {
+        return (fresh, [true; CASCADES]);
+    }
+    let Ok(mut held) = HELD.lock() else {
+        return (fresh, [true; CASCADES]);
+    };
+    let view = frame.camera.view;
+    if let Some(h) = held
+        .as_ref()
+        .filter(|h| h.stamp == frame.stamp && h.size == size && h.view == view)
+    {
+        return (h.cascades, h.drawn);
+    }
+    let mut out = fresh;
+    let mut drawn = [true; CASCADES];
+    // The frame after the last, a few stamps on: a stamp counts more than frames.
+    let next = held
+        .as_ref()
+        .filter(|h| h.size == size && frame.stamp > h.stamp && frame.stamp - h.stamp <= 16);
+    let turn = next.map_or(0, |h| h.turn + 1);
+    if let Some(last) = next {
+        #[allow(clippy::needless_range_loop)] // a cascade's index picks it in four arrays
+        for c in STAGGER_FROM..CASCADES {
+            if (turn + c as u64) % 2 == 1 && last.drawn[c] {
+                out.matrices[c] = last.cascades.matrices[c];
+                out.texel[c] = last.cascades.texel[c];
+                out.depth_range[c] = last.cascades.depth_range[c];
+                drawn[c] = false;
+            }
+        }
+    }
+    *held = Some(HeldCascades {
+        stamp: frame.stamp,
+        turn,
+        view,
+        size,
+        cascades: out,
+        drawn,
+    });
+    (out, drawn)
+}
+
+/// Forget the held cascades: their map is gone.
+fn forget_cascades() {
+    if let Ok(mut held) = HELD.lock() {
+        *held = None;
+    }
 }
 
 /// A block's side, metres.
@@ -751,6 +831,18 @@ fn fullscreen_targets(
     entry: &str,
     targets: &[Option<wgpu::ColorTargetState>],
 ) -> wgpu::RenderPipeline {
+    fullscreen_targets_from(device, layout, module, "vs", entry, targets)
+}
+
+/// [`fullscreen_targets`] with the vertex entry `vs`.
+fn fullscreen_targets_from(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    module: &wgpu::ShaderModule,
+    vs: &str,
+    entry: &str,
+    targets: &[Option<wgpu::ColorTargetState>],
+) -> wgpu::RenderPipeline {
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("high-fidelity lighting"),
         bind_group_layouts: &[Some(layout)],
@@ -761,7 +853,7 @@ fn fullscreen_targets(
         layout: Some(&pl),
         vertex: wgpu::VertexState {
             module,
-            entry_point: Some("vs"),
+            entry_point: Some(vs),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: &[],
         },
@@ -950,18 +1042,23 @@ impl LightingGpu {
                 tex_entry(0, float, d2),
                 tex_entry(1, float, d2),
                 tex_entry(2, wgpu::TextureSampleType::Depth, d2),
-                tex_entry(
-                    3,
-                    wgpu::TextureSampleType::Depth,
-                    wgpu::TextureViewDimension::D2Array,
-                ),
+                // The shadow maps, their sampler and the constants serve the corners too, which
+                // work out the eye's shade.
+                wgpu::BindGroupLayoutEntry {
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ..tex_entry(
+                        3,
+                        wgpu::TextureSampleType::Depth,
+                        wgpu::TextureViewDimension::D2Array,
+                    )
+                },
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
-                buf_entry(5, wgpu::ShaderStages::FRAGMENT, false),
+                buf_entry(5, wgpu::ShaderStages::VERTEX_FRAGMENT, false),
                 buf_entry(6, wgpu::ShaderStages::FRAGMENT, false),
                 tex_entry(7, float, d2),
                 tex_entry(8, float, d2),
@@ -979,10 +1076,11 @@ impl LightingGpu {
             blend: None,
             write_mask: wgpu::ColorWrites::ALL,
         };
-        let relight = fullscreen_targets(
+        let relight = fullscreen_targets_from(
             device,
             &relight_layout,
             &module,
+            "vs_relight",
             "fs_relight",
             &[Some(target.clone()), Some(target.clone())],
         );
@@ -1360,8 +1458,9 @@ impl HifiPass for Lighting {
                 ..wgpu::TextureViewDescriptor::default()
             });
             self.shadow = Some((texture, layers, all, map));
+            forget_cascades();
         }
-        let cas = cascades(frame, map);
+        let (cas, fresh) = frame_cascades(frame, map);
         let Some(shadow) = self.shadow.as_ref() else {
             return Ok(());
         };
@@ -1472,6 +1571,10 @@ impl HifiPass for Lighting {
             self.leaves.retain(|slot, _| used.contains(slot));
             #[allow(clippy::needless_range_loop)] // a cascade's index picks its blocks and offsets
             for c in 0..CASCADES {
+                // A far cascade whose turn it is not keeps last frame's map.
+                if !fresh[c] {
+                    continue;
+                }
                 let mut pass = cx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("sun shadow cascade"),
                     color_attachments: &[],

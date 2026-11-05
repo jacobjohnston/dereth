@@ -50,7 +50,7 @@ struct Params {
 
 const PI: f32 = 3.14159265;
 const HALF_PI: f32 = 1.57079633;
-const SLICES: i32 = 3;
+const SLICES: i32 = 2;
 const STEPS: i32 = 14;
 
 @vertex

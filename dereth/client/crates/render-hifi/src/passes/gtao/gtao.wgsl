@@ -19,7 +19,8 @@ struct Params {
     // Debug view, whether the target stores encoded (gamma) values, blur depth tolerance,
     // blur step in pixels.
     misc: vec4<f32>,
-    // The pixels a working texel spans on each axis (1 or 2), and three unused.
+    // The pixels a working texel spans on each axis (1 or 2); 1 where only the rooms and the
+    // leaves take the term, `picture` then holding the normals' classes; two unused.
     grid: vec4<f32>,
 };
 
@@ -133,6 +134,25 @@ fn search_pixel(t: vec2<i32>) -> vec2<i32> {
     return vec2<i32>(-1);
 }
 
+// Whether a pixel of working texel `t` takes the term: every one, unless only the rooms and the
+// leaves do.
+fn takes_term(t: vec2<i32>) -> bool {
+    if (params.grid.y < 0.5) {
+        return true;
+    }
+    let g = i32(params.grid.x);
+    for (var k = 0; k < g * g; k++) {
+        let p = t * g + vec2<i32>(k % g, k / g);
+        if (inside(p)) {
+            let kind = textureLoad(picture, p, 0).w;
+            if ((kind > 1.2 && kind < 1.3) || (kind > 1.5 && kind < 2.5) || (kind > 3.5 && kind < 6.0)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // The surface's step along `axis` at `px`, from the side that continues the surface best.
 fn tangent(px: vec2<i32>, p: vec3<f32>, axis: vec2<i32>) -> vec3<f32> {
     let a1 = px - axis;
@@ -169,7 +189,7 @@ fn fs_ao(@builtin(position) frag: vec4<f32>) -> @location(0) vec2<f32> {
         return vec2<f32>(1.0, -1.0);
     }
     let px = search_pixel(t);
-    if (px.x < 0) {
+    if (px.x < 0 || !takes_term(t)) {
         return vec2<f32>(1.0, -1.0);
     }
     let centre = vec2<f32>(px) + 0.5;

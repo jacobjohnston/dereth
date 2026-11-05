@@ -15,6 +15,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 ## Unreleased
 
 - Better Lighting: a God Rays menu, Off to High: sunlight shows in the air in shafts where walls, roofs and trees break it, most at dawn and dusk, in fog and under trees.
+- Better Lighting: frames draw faster outdoors, about a fifth in a forest and nearly a third in open country, with the same look.
 
 ## 0.4.12 (2026-11-03)
 

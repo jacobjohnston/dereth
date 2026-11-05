@@ -16,6 +16,8 @@ pre-release leaves it for the final release, and its notes show it as it is);
 
 - Better Lighting: an art pack can plant grass and low plants over the land, and a Ground Cover menu chooses how far they are drawn, from 0.5x to 5x, or Off.
 - Better Lighting: the wind moves an art pack's trees and plants, and No Wind holds them still.
+- Better Lighting: everything past the blocks round the viewer is drawn out to the landscape's draw distance: retail's scenery, statics and buildings as pictures baked from them as the world loads, an art pack's models among them, shaded as the objects are and sparse where their crowns are.
+- Better Lighting: objects keep their whole shape out to the edge of the loaded blocks, without retail's simpler stand-ins far off.
 
 ## 0.4.12 (2026-11-03)
 

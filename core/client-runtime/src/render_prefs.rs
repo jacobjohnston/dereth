@@ -565,6 +565,8 @@ pub enum FidelityFeature {
     VSync,
     /// `Fidelity.Hdr`.
     Hdr,
+    /// `Fidelity.CloudDetail`.
+    CloudDetail,
     /// `Fidelity.Debug`.
     Debug,
 }
@@ -572,7 +574,7 @@ pub enum FidelityFeature {
 #[cfg(feature = "hifi")]
 impl FidelityFeature {
     /// Every option, in the order the names list them.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Lighting,
         Self::Shadows,
         Self::GlobalIllumination,
@@ -585,6 +587,7 @@ impl FidelityFeature {
         Self::NoSlopeMaterials,
         Self::VSync,
         Self::Hdr,
+        Self::CloudDetail,
         Self::Debug,
     ];
 
@@ -604,6 +607,7 @@ impl FidelityFeature {
             Self::NoSlopeMaterials => fidelity::NO_SLOPE_MATERIALS,
             Self::VSync => fidelity::VSYNC,
             Self::Hdr => fidelity::HDR,
+            Self::CloudDetail => fidelity::CLOUD_DETAIL,
             Self::Debug => fidelity::DEBUG,
         }
     }
@@ -617,11 +621,12 @@ impl FidelityFeature {
 
     /// The highest value the option takes: 4 for an effect (Ultra), 1 for the switches that
     /// turn something off (the retail look's, the anti-aliasing's, the slope materials') and the
-    /// presentation choices, the last view for the diagnostic views.
+    /// presentation choices, 3 for Cloud Detail's levels, the last view for the diagnostic views.
     #[must_use]
     pub const fn max(self) -> u32 {
         match self {
             Self::Debug => 7,
+            Self::CloudDetail => 3,
             Self::RetailLook
             | Self::NoAntiAliasing
             | Self::NoSlopeMaterials
@@ -680,6 +685,15 @@ impl FidelityPreferences {
             let raw = match feature {
                 // The view a diagnostic run asks for, by number.
                 FidelityFeature::Debug => prefs.u32(feature.name()),
+                // A level by its name or stored number; the menu's default otherwise.
+                FidelityFeature::CloudDetail => {
+                    let cloud = dereth_client_contract::options::cloud_detail::parse_value;
+                    prefs
+                        .get(feature.name())
+                        .and_then(|v| cloud(feature.name(), v))
+                        .or(Some(dereth_client_contract::options::cloud_detail::DEFAULT))
+                        .and_then(|v| u32::try_from(v).ok())
+                }
                 // A box the page ticked; a number the file holds otherwise (from an older
                 // build) is not read, as the page does not read it.
                 _ => prefs.bool(feature.name()).map(u32::from),
@@ -724,7 +738,8 @@ impl FidelityPreferences {
 
     /// Whether any option is on in effect. Without one the presentation is not installed. The
     /// switches that turn something off (the retail look's, the anti-aliasing's, the slope
-    /// materials') and the presentation choices draw nothing of their own, so they alone are none.
+    /// materials'), the presentation choices and Cloud Detail, drawn inside the better lighting,
+    /// draw nothing of their own, so they alone are none.
     #[must_use]
     pub fn any_effective(&self) -> bool {
         FidelityFeature::ALL
@@ -736,6 +751,7 @@ impl FidelityPreferences {
                         FidelityFeature::RetailLook
                             | FidelityFeature::NoAntiAliasing
                             | FidelityFeature::NoSlopeMaterials
+                            | FidelityFeature::CloudDetail
                     )
             })
             .any(|f| self.effective(f) != 0)
@@ -787,20 +803,24 @@ impl FidelityPreferences {
             let (name, value) = item
                 .split_once('=')
                 .ok_or_else(|| format!("a fidelity setting is Name=value, not {item:?}"))?;
-            let value = match value.trim().to_ascii_lowercase().as_str() {
-                "off" => 0,
-                "on" | "low" => 1,
-                "medium" => 2,
-                "high" => 3,
-                "ultra" => 4,
-                v => v
-                    .parse::<u32>()
-                    .map_err(|_| format!("{value:?} is not a value for {name}"))?,
-            };
             let full = if name.trim().to_ascii_lowercase().starts_with("fidelity.") {
                 name.trim().to_owned()
             } else {
                 format!("Fidelity.{}", name.trim())
+            };
+            // Cloud Detail stores its levels in an order of its own.
+            let level = dereth_client_contract::options::cloud_detail::parse_value(&full, value)
+                .and_then(|v| u32::try_from(v).ok());
+            let value = match (level, value.trim().to_ascii_lowercase().as_str()) {
+                (Some(level), _) => level,
+                (None, "off") => 0,
+                (None, "on" | "low") => 1,
+                (None, "medium") => 2,
+                (None, "high") => 3,
+                (None, "ultra") => 4,
+                (None, v) => v
+                    .parse::<u32>()
+                    .map_err(|_| format!("{value:?} is not a value for {name}"))?,
             };
             if !f.set_named(
                 &full,
@@ -880,7 +900,12 @@ mod tests {
                     | FidelityFeature::Weather
                     | FidelityFeature::VSync
             );
-            assert_eq!(d.value(f), u32::from(on), "{f:?}");
+            let at = if f == FidelityFeature::CloudDetail {
+                u32::try_from(dereth_client_contract::options::cloud_detail::DEFAULT).unwrap_or(0)
+            } else {
+                u32::from(on)
+            };
+            assert_eq!(d.value(f), at, "{f:?}");
         }
         // A box the profile turned off stays off.
         let off = FidelityPreferences::from_preferences(&Preferences::parse(
@@ -928,6 +953,41 @@ mod tests {
         for f in FidelityFeature::ALL {
             assert!(fidelity::NAMES.contains(&f.name()), "{f:?}");
         }
+    }
+
+    #[test]
+    #[cfg(feature = "hifi")]
+    fn the_cloud_detail_level_is_read_by_name_starts_medium_and_draws_nothing_alone() {
+        use dereth_client_contract::options::cloud_detail::{HIGH, LOW, MEDIUM, OFF};
+        let read = |v: &str| {
+            FidelityPreferences::from_preferences(&Preferences::parse(&format!(
+                "[UI]\nInterface=Horizon\n[Fidelity]\nCloudDetail={v}\n"
+            )))
+        };
+        let level =
+            |p: FidelityPreferences| i32::try_from(p.effective(FidelityFeature::CloudDetail));
+        assert_eq!(level(read("Medium")), Ok(MEDIUM));
+        assert_eq!(level(read("off")), Ok(OFF));
+        assert_eq!(
+            level(read("9")),
+            Ok(MEDIUM),
+            "a word it does not know leaves it at its default"
+        );
+        assert_eq!(level(FidelityPreferences::default()), Ok(LOW));
+        assert!(
+            !FidelityPreferences::parse_switch("CloudDetail=high")
+                .unwrap()
+                .any_effective(),
+            "Cloud Detail draws inside the better lighting"
+        );
+        let switched = FidelityPreferences::parse_switch("Lighting=1,CloudDetail=high").unwrap();
+        assert_eq!(level(switched), Ok(HIGH));
+        let numbered = FidelityPreferences::parse_switch("Lighting=1,Sky=high").unwrap();
+        assert_eq!(
+            numbered.effective(FidelityFeature::Sky),
+            3,
+            "other words are as before"
+        );
     }
 
     #[test]

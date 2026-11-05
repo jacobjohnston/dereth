@@ -21,6 +21,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Enhanced Graphics: a Quality Preset menu, from a light Low to a full Ultra, and the settings start at Medium. VSync and HDR Output are new.
 - Enhanced Graphics Mode: it always draws the best texture filtering and detail, models that hold their detail, and frames on the display's refresh unless VSync is off, whatever the Graphics settings say.
 - Enhanced Graphics Mode: Screen Brightness scales the whole picture alike.
+- Better Lighting: a Cloud Detail menu, Off to High: Medium and High draw the Remastered sky's clouds with two and four times the steps, smoothing the stripes along their edges; Off draws retail's flat cloud deck.
 
 ## 0.4.12 (2026-11-03)
 

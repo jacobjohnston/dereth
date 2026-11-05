@@ -170,7 +170,7 @@ pub const OPTIONS: [FidelityOption; 12] = [
 
 /// The menus among the effects' rows, each with what it needs. A menu's own module registers it
 /// and gives its choices; a row here gives it the boxes' rules.
-pub const MENUS: &[(&str, Needs)] = &[];
+pub const MENUS: &[(&str, Needs)] = &[(fidelity::CLOUD_DETAIL, Needs::Lighting)];
 
 /// The heading's caption.
 pub const HEADING: &str = "Enhanced Graphics";
@@ -325,10 +325,11 @@ pub fn blocked(name: &str, ticked: impl Fn(&str) -> bool, rays: Option<bool>) ->
     }
 }
 
-/// Register every box with the value store, each at its default. The store's load then reads the
-/// `[Fidelity]` section of the profile into them, and the page reads and writes them.
+/// Register every box with the value store, each at its default, and the Cloud Detail menu at its
+/// default. The store's load then reads the `[Fidelity]` section of the profile into them, and the
+/// page reads and writes them.
 pub fn register() -> usize {
-    OPTIONS
+    let boxes: usize = OPTIONS
         .iter()
         .map(|o| {
             usize::from(super::store::register_preference(
@@ -337,18 +338,29 @@ pub fn register() -> usize {
                 super::store::DataType::Bool,
             ))
         })
-        .sum()
+        .sum();
+    let clouds = super::store::register_preference(
+        fidelity::CLOUD_DETAIL,
+        PrefValue::Int(super::cloud_detail::DEFAULT),
+        super::store::DataType::UInt,
+    );
+    boxes + usize::from(clouds)
 }
 
-/// Whether the store's save leaves `name` out of the profile: a box still at its default that the
-/// profile does not name, so a profile that never changed one has no `[Fidelity]` section.
+/// Whether the store's save leaves `name` out of the profile: a box or the Cloud Detail menu still
+/// at its default that the profile does not name, so a profile that never changed one has no
+/// `[Fidelity]` section.
 #[must_use]
 pub fn left_out_of_save(
     name: &str,
     value: &PrefValue,
     ini: &crate::persist::preferences::UserPreferences,
 ) -> bool {
-    find(name).is_some_and(|o| *value == PrefValue::Bool(o.on_by_default))
+    let unchanged = match find(name) {
+        Some(o) => *value == PrefValue::Bool(o.on_by_default),
+        None => is_a_menu(name) && *value == PrefValue::Int(super::cloud_detail::DEFAULT),
+    };
+    unchanged
         && !ini
             .entries
             .iter()
@@ -959,5 +971,35 @@ mod tests {
         );
         assert_eq!(Availability::default().status(true), None, "not built");
         assert!(!Availability::default().offered());
+    }
+
+    #[test]
+    fn the_cloud_detail_menu_needs_the_better_lighting() {
+        use fidelity::{CLOUD_DETAIL, LIGHTING};
+        let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
+        assert_eq!(
+            blocked(CLOUD_DETAIL, with(&[]), None),
+            Some(Blocked::NeedsLighting)
+        );
+        assert_eq!(blocked(CLOUD_DETAIL, with(&[LIGHTING]), Some(false)), None);
+        assert!(find(CLOUD_DETAIL).is_none(), "the menu is no box");
+    }
+
+    /// The Cloud Detail menu is registered at its default, and the save leaves it out until it is
+    /// changed.
+    #[test]
+    fn the_cloud_detail_menu_is_left_out_of_the_profile_until_chosen() {
+        use super::super::cloud_detail::{DEFAULT, HIGH};
+        use crate::persist::preferences::UserPreferences;
+        let empty = UserPreferences::parse("").expect("an empty profile");
+        let default = PrefValue::Int(DEFAULT);
+        assert!(left_out_of_save(fidelity::CLOUD_DETAIL, &default, &empty));
+        assert!(!left_out_of_save(
+            fidelity::CLOUD_DETAIL,
+            &PrefValue::Int(HIGH),
+            &empty
+        ));
+        let named = UserPreferences::parse("[Fidelity]\r\nCloudDetail=Medium\r\n").expect("reads");
+        assert!(!left_out_of_save(fidelity::CLOUD_DETAIL, &default, &named));
     }
 }

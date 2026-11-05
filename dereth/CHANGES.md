@@ -19,6 +19,17 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: an art pack can plant grass and low plants over the land, and a Ground Cover menu chooses how far they are drawn, from 0.5x to 5x, or Off.
 - Better Lighting: a Tree Draw Distance menu chooses how far an art pack's trees are drawn, from 0.5x to 5x.
 - Better Lighting: the wind moves an art pack's trees and plants, and No Wind holds them still.
+## 0.4.13 (2026-11-05)
+
+- Classic: resting the pointer on a button, bar or slot says what it does.
+- Refused stances and emotes now say why.
+- Launch worlds: Classic's spellbook, chat menu and messages match the 1999 client.
+- Web: the launcher opens much faster, fetching the game only when you play.
+- The client now updates on its own, apart from the launcher.
+- Launch worlds: the Charge bar and each spell's duration range.
+- Fixed spell components missing from the Components tab when they arrived before their pack.
+
+- macOS: Intel Macs are no longer supported; Apple silicon only.
 
 ## 0.4.12 (2026-11-03)
 
@@ -40,6 +51,9 @@ pre-release leaves it for the final release, and its notes show it as it is);
 ## 0.4.9 (2026-11-01)
 
 - Launcher: each realm lists only its own game's worlds.
+- Commands, help, travel routes and the character sheet follow the systems the world says it has.
+- Launcher: 1999 data files are their own kind, which Launch worlds need.
+- Launcher: a world shows its era and what it changes, and hosting offers the systems you'd look for by name.
 
 ## 0.4.8 (2026-10-28)
 

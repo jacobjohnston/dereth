@@ -8,19 +8,25 @@
     python3 build.py --dereth-only    build the app alone
 
 Settings live in build.ini beside this file. The packaging itself is the project's own
-`cargo xtask package dereth` and `cargo xtask package empyrean`; this script supplies their
-environment and checks the result. Dereth.app is the whole launcher, which asks for your game data
+`cargo xtask package launcher`, `cargo xtask package dereth` (around that launcher) and
+`cargo xtask package empyrean`; this script supplies their environment and checks the result.
+The launcher carries the AC2 retail client's friends library, which only builds on Windows, so it
+is taken from upstream's launcher release of the same version. Dereth.app is the whole launcher, which asks for your game data
 and your art packs in its Library. `python3 local.py` runs what this builds.
 """
 
 import argparse
 import configparser
+import hashlib
+import io
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tarfile
+import urllib.request
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -30,6 +36,11 @@ CONFIG = ROOT / "build.ini"
 BUILD_DIRS = ["target"]
 # Where the packager writes its archives, before they are unpacked into out_dir.
 STAGE = "target/build-py-package"
+# Where friends libraries taken from upstream's launcher releases are kept, one per version.
+FRIENDS_CACHE = "target/build-py-friends"
+FRIENDS_FILE = "auberean_friends.dll"
+# The repository whose launcher releases carry a friends library built on Windows.
+LAUNCHER_RELEASES = "https://github.com/dereth-network/dereth/releases/download"
 # The programs in an Empyrean package, each signed here.
 EMPYREAN_PROGRAMS = ["empyrean-server", "empyrean-import"]
 # Dropbox on macOS File Provider skips anything carrying this attribute.
@@ -73,6 +84,9 @@ def load_config():
                 str(resolve(p)) for p in cfg["build"].get("path_prepend", "").split(",") if p.strip()
             ],
             "applications_dir": cfg["install"].get("applications_dir", "").strip(),
+            "friends_dll": (
+                resolve(cfg["build"]["friends_dll"]) if cfg["build"].get("friends_dll", "").strip() else None
+            ),
         }
     except KeyError as e:
         raise Failed(f"{CONFIG.name} is missing {e}") from None
@@ -174,13 +188,44 @@ def unpack_outputs(stage, out):
     return unpacked
 
 
-def package(product, stage, cfg, env, allow_dirty):
+def launcher_version():
+    text = (ROOT / "launcher/Cargo.toml").read_text()
+    return re.search(r'^version\s*=\s*"([^"]+)"', text, re.M).group(1)
+
+
+def friends_dll(cfg):
+    """build.ini's friends library, else the one in upstream's launcher release of this tree's
+    launcher version, downloaded once and checked against the release's SHA256SUMS."""
+    if cfg["friends_dll"]:
+        if not cfg["friends_dll"].is_file():
+            raise Failed(f"build.ini's friends_dll {cfg['friends_dll']} is not a file")
+        return cfg["friends_dll"]
+    version = launcher_version()
+    kept = ROOT / FRIENDS_CACHE / version / FRIENDS_FILE
+    if kept.is_file():
+        return kept
+    zip_name = f"launcher-{version}-windows-x86_64.zip"
+    base = f"{LAUNCHER_RELEASES}/launcher-v{version}"
+    print(f"Fetching the friends library from {base}/{zip_name}")
+    try:
+        sums = urllib.request.urlopen(f"{base}/SHA256SUMS").read().decode()
+        data = urllib.request.urlopen(f"{base}/{zip_name}").read()
+    except OSError as e:
+        raise Failed(f"could not fetch the launcher {version} release: {e}") from None
+    want = next((l.split()[0] for l in sums.splitlines() if l.endswith(zip_name)), None)
+    if want != hashlib.sha256(data).hexdigest():
+        raise Failed(f"{zip_name} does not match the release's SHA256SUMS")
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        member = f"launcher-{version}/{FRIENDS_FILE}"
+        kept.parent.mkdir(parents=True, exist_ok=True)
+        kept.write_bytes(z.read(member))
+    return kept
+
+
+def package(product, stage, cfg, env, allow_dirty, extra=()):
     """Run the project's packager for `product`, writing into a new `stage`."""
     shutil.rmtree(stage, ignore_errors=True)
-    command = ["cargo", "xtask", "package", product, "--out", str(stage)]
-    if product == "dereth":
-        # The AC2 retail client's friends DLL only builds on Windows; a Mac build leaves it out.
-        command += ["--moltenvk", str(cfg["moltenvk_dir"]), "--no-friends-dll"]
+    command = ["cargo", "xtask", "package", product, "--out", str(stage), *extra]
     if allow_dirty:
         command.append("--allow-dirty")
     status = subprocess.run(command, cwd=ROOT, env=env).returncode
@@ -189,8 +234,12 @@ def package(product, stage, cfg, env, allow_dirty):
 
 
 def build_dereth(out, cfg, env, allow_dirty):
+    # Dereth's package wraps a launcher release, so the launcher is packaged first.
+    launcher = ROOT / STAGE / "launcher"
+    mvk = ["--moltenvk", str(cfg["moltenvk_dir"])]
+    package("launcher", launcher, cfg, env, allow_dirty, [*mvk, "--friends-dll", str(friends_dll(cfg))])
     stage = ROOT / STAGE / "dereth"
-    package("dereth", stage, cfg, env, allow_dirty)
+    package("dereth", stage, cfg, env, allow_dirty, [*mvk, "--launcher", str(launcher)])
     apps = [p for p in unpack_outputs(stage, out) if p.suffix == ".app"]
     if not apps:
         raise Failed(f"no .app among the archives in {stage}")

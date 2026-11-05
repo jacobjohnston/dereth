@@ -19,6 +19,9 @@ data_dir = data
 # Where Dereth.app, the plugin tool and Empyrean are written, unpacked, one folder per commit. Kept
 # out of Dropbox sync.
 out_dir = dist
+# The AC2 retail client's friends library (auberean_friends.dll), which the launcher carries and
+# only Windows builds. Empty: take it from upstream's launcher release of the tree's version.
+friends_dll =
 # Put before PATH, so cargo and rustup are found without a shell profile.
 path_prepend = /opt/homebrew/opt/rustup/bin, ~/.cargo/bin
 

@@ -44,7 +44,7 @@ const FOLLOW: f32 = 1.5;
 /// How many drops land a second on a square meter of water in full rain.
 const DROPS: f32 = 6.0;
 /// How deep a drop dents the water, meters, in full rain.
-const DROP_DEPTH: f32 = 0.02;
+const DROP_DEPTH: f32 = 0.008;
 /// The rain's lattice, meters a patch: the shader's own.
 const RAIN_PATCH: f32 = 0.4;
 /// The bytes of one step's constants: four vectors, then each body where it starts and ends.

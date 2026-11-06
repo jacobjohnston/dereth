@@ -14,7 +14,6 @@ pre-release leaves it for the final release, and its notes show it as it is);
 
 ## Unreleased
 
-- Launcher: the Library holds art packs as it holds data files, and a world's page chooses which the Dereth client draws, or none.
 - Better Lighting: Retail Look and No Slope Materials say so when no art pack is open.
 - Better Lighting: a Depth Mapping menu, Off to High, gives walls, floors and roofs the relief an art pack has for them: bump and normal maps, parallax, self-shadows and a damp shine in dungeons. In rooms and dungeons the relief casts its small shadows away from the room's own lights.
 - Depth Mapping: roads have relief, their stones standing above sunken joints.
@@ -26,6 +25,9 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Art packs: a material for a retail picture may name a grit, a small picture shared by many materials that adds fine bumps, speckle and roughness at real size.
 - Art packs: a material for a retail picture may be glacier ice: opaque and deep blue, with light bent through it, with or without Depth Mapping.
 - Better Lighting: an art pack's glassy ground mirrors the sky.
+
+## 0.4.14 (2026-11-05)
+
 ## 0.4.13 (2026-11-05)
 
 - Classic: resting the pointer on a button, bar or slot says what it does.
@@ -37,6 +39,8 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Fixed spell components missing from the Components tab when they arrived before their pack.
 
 - macOS: Intel Macs are no longer supported; Apple silicon only.
+- Better Lighting: no more white line across things standing in water.
+- Fixed a right-drag begun away from the window's middle throwing the camera across.
 
 ## 0.4.12 (2026-11-03)
 

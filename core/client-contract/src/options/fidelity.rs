@@ -199,10 +199,6 @@ pub const OPTIONS: [FidelityOption; 14] = [
 pub const MENUS: &[(&str, Needs)] = &[
     (fidelity::DEPTH_MAPPING, Needs::LightingWithoutRetailLook),
     (
-        fidelity::TREE_DRAW_DISTANCE,
-        Needs::LightingWithoutRetailLook,
-    ),
-    (
         fidelity::GROUND_COVER_DRAW_DISTANCE,
         Needs::LightingWithoutRetailLook,
     ),
@@ -245,10 +241,6 @@ pub const PRESET_VALUES: &[(&str, [PrefValue; PRESET_NAMES.len()])] = &[
     (fidelity::DEPTH_MAPPING, [Int(0), Int(3), Int(3), Int(3)]),
     (fidelity::NO_DAMP, [ON, OFF, OFF, OFF]),
     (fidelity::NO_WIND, [ON, OFF, OFF, OFF]),
-    (
-        fidelity::TREE_DRAW_DISTANCE,
-        [Int(100), Int(150), Int(300), Int(500)],
-    ),
     (
         fidelity::GROUND_COVER_DRAW_DISTANCE,
         [Int(super::draw_distance::OFF), Int(100), Int(300), Int(500)],
@@ -398,19 +390,16 @@ pub fn register() -> usize {
         PrefValue::Int(super::depth_mapping::DEFAULT),
         super::store::DataType::UInt,
     );
-    let distances = [
-        fidelity::TREE_DRAW_DISTANCE,
-        fidelity::GROUND_COVER_DRAW_DISTANCE,
-    ]
-    .into_iter()
-    .filter(|name| {
-        super::store::register_preference(
-            name,
-            PrefValue::Int(super::draw_distance::default_of(name)),
-            super::store::DataType::UInt,
-        )
-    })
-    .count();
+    let distances = [fidelity::GROUND_COVER_DRAW_DISTANCE]
+        .into_iter()
+        .filter(|name| {
+            super::store::register_preference(
+                name,
+                PrefValue::Int(super::draw_distance::default_of(name)),
+                super::store::DataType::UInt,
+            )
+        })
+        .count();
     boxes + usize::from(depth) + distances
 }
 
@@ -682,7 +671,7 @@ mod tests {
         use fidelity::{
             AMBIENT_OCCLUSION, DEPTH_MAPPING, GLOBAL_ILLUMINATION, GROUND_COVER_DRAW_DISTANCE, HDR,
             LAMPS, LIGHTING, NO_ANTI_ALIASING, NO_DAMP, NO_SLOPE_MATERIALS, NO_WIND, RETAIL_LOOK,
-            SHADOWS, SKY, TREE_DRAW_DISTANCE, VSYNC, WEATHER,
+            SHADOWS, SKY, VSYNC, WEATHER,
         };
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         let left = |name: &str, on: &'static [&'static str]| {
@@ -705,7 +694,6 @@ mod tests {
             HDR,
             DEPTH_MAPPING,
             NO_DAMP,
-            TREE_DRAW_DISTANCE,
             GROUND_COVER_DRAW_DISTANCE,
         ] {
             assert!(left(name, &[]), "{name}");
@@ -716,7 +704,6 @@ mod tests {
             DEPTH_MAPPING,
             NO_DAMP,
             NO_WIND,
-            TREE_DRAW_DISTANCE,
             GROUND_COVER_DRAW_DISTANCE,
         ];
         for name in pack {
@@ -896,12 +883,10 @@ mod tests {
     }
 
     #[test]
-    fn the_wind_box_and_the_draw_distances_need_the_better_lighting_without_the_retail_look() {
-        use fidelity::{
-            GROUND_COVER_DRAW_DISTANCE, LIGHTING, NO_WIND, RETAIL_LOOK, TREE_DRAW_DISTANCE,
-        };
+    fn the_wind_box_and_the_draw_distance_need_the_better_lighting_without_the_retail_look() {
+        use fidelity::{GROUND_COVER_DRAW_DISTANCE, LIGHTING, NO_WIND, RETAIL_LOOK};
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
-        for name in [NO_WIND, TREE_DRAW_DISTANCE, GROUND_COVER_DRAW_DISTANCE] {
+        for name in [NO_WIND, GROUND_COVER_DRAW_DISTANCE] {
             assert_eq!(blocked(name, with(&[]), None), Some(Blocked::NeedsLighting));
             assert_eq!(blocked(name, with(&[LIGHTING]), Some(false)), None);
             assert_eq!(
@@ -909,38 +894,28 @@ mod tests {
                 Some(Blocked::RetailLook)
             );
         }
-        assert!(find(TREE_DRAW_DISTANCE).is_none(), "the menu is no box");
+        assert!(
+            find(GROUND_COVER_DRAW_DISTANCE).is_none(),
+            "the menu is no box"
+        );
     }
 
-    /// The draw distances start as the Medium preset has them, and the save leaves them out until
-    /// they are changed.
+    /// The draw distance starts as the Medium preset has it, and the save leaves it out until it
+    /// is changed.
     #[test]
-    fn the_draw_distances_start_at_medium_and_are_left_out_of_the_profile_until_chosen() {
+    fn the_draw_distance_starts_at_medium_and_is_left_out_of_the_profile_until_chosen() {
         use super::super::draw_distance::{default_of, OFF};
         use crate::persist::preferences::UserPreferences;
         let empty = UserPreferences::parse("").expect("an empty profile");
-        for name in [
-            fidelity::TREE_DRAW_DISTANCE,
-            fidelity::GROUND_COVER_DRAW_DISTANCE,
-        ] {
-            let medium = PrefValue::Int(default_of(name));
-            assert!(left_out_of_save(name, &medium, &empty), "{name}");
-            assert!(!left_out_of_save(name, &PrefValue::Int(300), &empty));
-        }
-        assert!(!left_out_of_save(
-            fidelity::GROUND_COVER_DRAW_DISTANCE,
-            &PrefValue::Int(OFF),
-            &empty
-        ));
-        assert_eq!(default_of(fidelity::TREE_DRAW_DISTANCE), 150);
-        assert_eq!(default_of(fidelity::GROUND_COVER_DRAW_DISTANCE), 100);
+        let name = fidelity::GROUND_COVER_DRAW_DISTANCE;
+        let medium = PrefValue::Int(default_of(name));
+        assert!(left_out_of_save(name, &medium, &empty));
+        assert!(!left_out_of_save(name, &PrefValue::Int(300), &empty));
+        assert!(!left_out_of_save(name, &PrefValue::Int(OFF), &empty));
+        assert_eq!(default_of(name), 100);
         let named =
-            UserPreferences::parse("[Fidelity]\r\nTreeDrawDistance=1.5x\r\n").expect("reads");
-        assert!(!left_out_of_save(
-            fidelity::TREE_DRAW_DISTANCE,
-            &PrefValue::Int(150),
-            &named
-        ));
+            UserPreferences::parse("[Fidelity]\r\nGroundCoverDrawDistance=1x\r\n").expect("reads");
+        assert!(!left_out_of_save(name, &medium, &named));
     }
 
     #[test]

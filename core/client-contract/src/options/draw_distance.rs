@@ -1,20 +1,10 @@
-//! How far an art pack's trees and ground cover are drawn: two experimental menus after the
-//! effects' boxes, each a share of the distance they are drawn to with nothing changed, and the
-//! ground cover's also Off. They are registered with the boxes ([`super::fidelity::register`]);
-//! the profile keeps a share the player chose, and leaves out one still at its default
-//! ([`super::fidelity::left_out_of_save`]).
+//! How far an art pack's ground cover is drawn: an experimental menu after the effects' boxes, a
+//! share of the distance it is drawn to with nothing changed, or Off. It is registered with the
+//! boxes ([`super::fidelity::register`]); the profile keeps a share the player chose, and leaves
+//! out one still at its default ([`super::fidelity::left_out_of_save`]).
 
-use crate::options::names::fidelity::{GROUND_COVER_DRAW_DISTANCE, TREE_DRAW_DISTANCE};
+use crate::options::names::fidelity::GROUND_COVER_DRAW_DISTANCE;
 use crate::view::PrefValue;
-
-/// The trees' menu's caption.
-pub const TREE_CAPTION: &str = "Tree Draw Distance";
-
-/// What the trees' menu does, for the row's tooltip.
-pub const TREE_NOTE: &str = "How far an art pack's trees are drawn, against the distance they are \
-                             drawn to at 1x. Past 1x they are planted in farther blocks, as \
-                             far as the landscape is drawn, in less detail and with no shadows, \
-                             and the higher shares cost the most. It changes at once.";
 
 /// The ground cover's menu's caption.
 pub const GROUND_COVER_CAPTION: &str = "Ground Cover";
@@ -32,20 +22,13 @@ pub const CHOICES: [u32; 8] = [50, 75, 100, 150, 200, 300, 400, 500];
 /// The distance the pack draws to with nothing changed.
 pub const WHOLE: u32 = 100;
 
-/// The trees' share until the player changes it, as the Medium preset has it.
-pub const TREE_DEFAULT: i32 = 150;
-
 /// The ground cover's share until the player changes it: the whole distance.
 pub const GROUND_COVER_DEFAULT: i32 = 100;
 
 /// The share `name`'s menu holds until the player changes it.
 #[must_use]
-pub fn default_of(name: &str) -> i32 {
-    if name.eq_ignore_ascii_case(TREE_DRAW_DISTANCE) {
-        TREE_DEFAULT
-    } else {
-        GROUND_COVER_DEFAULT
-    }
+pub fn default_of(_name: &str) -> i32 {
+    GROUND_COVER_DEFAULT
 }
 
 /// The ground cover's choice that leaves it out: no share, so no share is mistaken for it.
@@ -60,11 +43,10 @@ pub const LEAST: u32 = 50;
 /// The greatest share.
 pub const MOST: u32 = 500;
 
-/// Whether `name` is one of the two menus.
+/// Whether `name` is the menu.
 #[must_use]
 pub fn is_a_distance(name: &str) -> bool {
-    name.eq_ignore_ascii_case(TREE_DRAW_DISTANCE)
-        || name.eq_ignore_ascii_case(GROUND_COVER_DRAW_DISTANCE)
+    name.eq_ignore_ascii_case(GROUND_COVER_DRAW_DISTANCE)
 }
 
 /// A share in percent as a multiple: `0.5x`, `1x`, `1.5x`.
@@ -165,42 +147,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_menu_offers_half_to_five_times_the_distance_with_the_whole_among_them() {
-        for name in [TREE_DRAW_DISTANCE, GROUND_COVER_DRAW_DISTANCE] {
-            let rows = choice_rows(name).expect("a menu");
-            let shares: Vec<i32> = rows.iter().map(|c| c.value).collect();
-            // The ground cover's menu leaves it out first.
-            let off = usize::from(name == GROUND_COVER_DRAW_DISTANCE);
-            if off == 1 {
-                assert_eq!((rows[0].label.as_str(), rows[0].value), ("Off", OFF));
-            }
-            assert_eq!(shares[off..], [50, 75, 100, 150, 200, 300, 400, 500]);
-            // The trees hold Medium's 1.5x until changed, the ground cover 1x.
-            let default = if off == 1 { 2 } else { 3 };
-            assert!(rows[default + off].label.ends_with("(Default)"), "{name}");
-        }
+    fn the_menu_offers_off_then_half_to_five_times_the_distance_with_the_whole_among_them() {
+        let rows = choice_rows(GROUND_COVER_DRAW_DISTANCE).expect("a menu");
+        let shares: Vec<i32> = rows.iter().map(|c| c.value).collect();
+        assert_eq!((rows[0].label.as_str(), rows[0].value), ("Off", OFF));
+        assert_eq!(shares[1..], [50, 75, 100, 150, 200, 300, 400, 500]);
+        assert!(
+            rows[3].label.ends_with("(Default)"),
+            "it holds 1x until changed"
+        );
         assert!(choice_rows("Fidelity.GodRays").is_none());
+        assert!(
+            choice_rows("Fidelity.TreeDrawDistance").is_none(),
+            "retired"
+        );
     }
 
     #[test]
     fn a_share_is_read_with_or_without_its_sign_and_refused_outside_the_menu_range() {
-        assert_eq!(parse_value(TREE_DRAW_DISTANCE, " 300 % "), Some(300));
-        assert_eq!(parse_value(TREE_DRAW_DISTANCE, "1.5x"), Some(150));
-        assert_eq!(parse_value(TREE_DRAW_DISTANCE, "1x (Default)"), Some(100));
-        assert_eq!(parse_value(TREE_DRAW_DISTANCE, "6x"), None);
-        assert_eq!(parse_value(GROUND_COVER_DRAW_DISTANCE, "50"), Some(50));
-        assert_eq!(parse_value(GROUND_COVER_DRAW_DISTANCE, "off"), Some(OFF));
-        assert_eq!(parse_value(TREE_DRAW_DISTANCE, "off"), None);
-        assert_eq!(parse_value(TREE_DRAW_DISTANCE, "49"), None);
-        assert_eq!(parse_value(TREE_DRAW_DISTANCE, "501"), None);
-        assert_eq!(parse_value(TREE_DRAW_DISTANCE, "far"), None);
+        let name = GROUND_COVER_DRAW_DISTANCE;
+        assert_eq!(parse_value(name, " 300 % "), Some(300));
+        assert_eq!(parse_value(name, "1.5x"), Some(150));
+        assert_eq!(parse_value(name, "1x (Default)"), Some(100));
+        assert_eq!(parse_value(name, "6x"), None);
+        assert_eq!(parse_value(name, "50"), Some(50));
+        assert_eq!(parse_value(name, "off"), Some(OFF));
+        assert_eq!(parse_value(name, "49"), None);
+        assert_eq!(parse_value(name, "501"), None);
+        assert_eq!(parse_value(name, "far"), None);
         assert_eq!(parse_value("Fidelity.GodRays", "100"), None);
         assert_eq!(
-            convert_to_string(TREE_DRAW_DISTANCE, &PrefValue::Int(150)).as_deref(),
-            Some("1.5x (Default)")
+            convert_to_string(name, &PrefValue::Int(100)).as_deref(),
+            Some("1x (Default)")
         );
         assert_eq!(
-            convert_to_string(GROUND_COVER_DRAW_DISTANCE, &PrefValue::Int(OFF)).as_deref(),
+            convert_to_string(name, &PrefValue::Int(OFF)).as_deref(),
             Some("Off")
         );
     }

@@ -1109,8 +1109,9 @@ const CLIENT_SHARED: [Heading; 5] = [
 const CLIENT: [Heading; 5] = CLIENT_SHARED;
 
 /// With the optional high-fidelity presentation built in, the Client Options page ends with its
-/// fourteen boxes and its three menus under a heading of their own, on the Horizon
-/// interface's page alone: it is the only interface the presentation draws under.
+/// fourteen boxes, its Depth Mapping menu and its ground cover's draw distance under a heading of
+/// their own, on the Horizon interface's page alone: it is the only interface the presentation
+/// draws under.
 #[cfg(feature = "hifi")]
 const CLIENT: [Heading; 6] = {
     let s = CLIENT_SHARED;
@@ -1128,11 +1129,11 @@ const CLIENT: [Heading; 6] = {
     ]
 };
 
-/// The fourteen boxes, the Depth Mapping menu and the two draw distances, each at its default and
-/// on the Horizon page alone: the two switches, then how frames reach the display, then the
-/// effects, with what an art pack draws last.
+/// The fourteen boxes, the Depth Mapping menu and the ground cover's draw distance, each at its
+/// default and on the Horizon page alone: the two switches, then how frames reach the display, then
+/// the effects, with what an art pack draws last.
 #[cfg(feature = "hifi")]
-const FIDELITY_ROWS: [Row; 17] = [
+const FIDELITY_ROWS: [Row; 16] = [
     fidelity_box(0),
     fidelity_box(1),
     fidelity_box(8),
@@ -1158,17 +1159,6 @@ const FIDELITY_ROWS: [Row; 17] = [
     fidelity_box(12),
     fidelity_box(9),
     fidelity_box(13),
-    only(
-        Shown::Only(Interface::Horizon),
-        noted(
-            super::draw_distance::TREE_NOTE,
-            pref(
-                super::draw_distance::TREE_CAPTION,
-                Value::Menu(crate::options::names::fidelity::TREE_DRAW_DISTANCE),
-                Int(super::draw_distance::TREE_DEFAULT),
-            ),
-        ),
-    ),
     only(
         Shown::Only(Interface::Horizon),
         noted(
@@ -1534,20 +1524,16 @@ mod tests {
                 Some(Int(crate::options::depth_mapping::DEFAULT))
             );
             assert_eq!(menu.shown, Shown::Only(Interface::Horizon));
-            for name in [
-                crate::options::names::fidelity::TREE_DRAW_DISTANCE,
-                crate::options::names::fidelity::GROUND_COVER_DRAW_DISTANCE,
-            ] {
-                let menu = rows
-                    .iter()
-                    .find(|r| r.value == Value::Menu(name))
-                    .expect("the draw distance's menu");
-                assert_eq!(
-                    menu.default,
-                    Some(Int(crate::options::draw_distance::default_of(name)))
-                );
-                assert_eq!(menu.shown, Shown::Only(Interface::Horizon));
-            }
+            let name = crate::options::names::fidelity::GROUND_COVER_DRAW_DISTANCE;
+            let menu = rows
+                .iter()
+                .find(|r| r.value == Value::Menu(name))
+                .expect("the draw distance's menu");
+            assert_eq!(
+                menu.default,
+                Some(Int(crate::options::draw_distance::default_of(name)))
+            );
+            assert_eq!(menu.shown, Shown::Only(Interface::Horizon));
             // The rest of Horizon's page is the shared headings'.
             let rest: Vec<&Row> = horizon[..horizon.len() - 1]
                 .iter()

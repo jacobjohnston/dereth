@@ -150,9 +150,6 @@ pub mod fidelity {
     /// `Fidelity.DepthMapping`: how much relief surfaces take from a pack, a level: 0 Off,
     /// 1 Low, 2 Medium, 3 High.
     pub const DEPTH_MAPPING: &str = "Fidelity.DepthMapping";
-    /// `Fidelity.TreeDrawDistance`: how far an art pack's trees are drawn, a share of the distance
-    /// they are drawn to with nothing changed, percent.
-    pub const TREE_DRAW_DISTANCE: &str = "Fidelity.TreeDrawDistance";
     /// `Fidelity.GroundCoverDrawDistance`: how far an art pack's ground cover is drawn, a share of
     /// the distance it is drawn to with nothing changed, percent; 1 leaves it out.
     pub const GROUND_COVER_DRAW_DISTANCE: &str = "Fidelity.GroundCoverDrawDistance";
@@ -186,8 +183,11 @@ pub mod fidelity {
         VSYNC,
         HDR,
         DEPTH_MAPPING,
-        TREE_DRAW_DISTANCE,
         GROUND_COVER_DRAW_DISTANCE,
         DEBUG,
     ];
+
+    /// Names an older profile or report may hold that no option takes any more, read as nothing:
+    /// the trees follow the landscape's draw distance.
+    pub const RETIRED: &[&str] = &["Fidelity.TreeDrawDistance"];
 }

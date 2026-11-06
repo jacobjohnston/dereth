@@ -1,7 +1,7 @@
-//! How much relief an art pack gives the world's own pictures: an experimental menu after the
-//! effects' boxes, drawn inside the better lighting. It is registered with them
-//! ([`super::fidelity::register`]); the profile keeps a level the player chose, and leaves out one
-//! still [`DEFAULT`] ([`super::fidelity::left_out_of_save`]).
+//! How much relief an art pack gives the world's own pictures: an experimental menu among the
+//! effects' rows ([`super::fidelity::MENUS`]), drawn inside the better lighting. It is registered
+//! with them ([`super::fidelity::register`]); the profile keeps a level the player chose, and
+//! leaves out one still [`DEFAULT`] ([`super::fidelity::left_out_of_save`]).
 
 use crate::options::names::fidelity::DEPTH_MAPPING;
 use crate::view::PrefValue;
@@ -18,8 +18,8 @@ pub const NOTE: &str = "How much relief walls, floors and roofs take from an art
 /// The level with no relief.
 pub const OFF: i32 = 0;
 
-/// The level until the player changes it: off, as every effect is until it is asked for.
-pub const DEFAULT: i32 = OFF;
+/// The level until the player changes it: the greatest, as the Medium preset has it.
+pub const DEFAULT: i32 = MOST;
 
 /// The levels the menu offers, least first.
 pub const LEVELS: [&str; 4] = ["Off", "Low", "Medium", "High"];

@@ -14,17 +14,17 @@
 //! anti-aliasing, which a box turns off; an art pack's ground lays scree and rock on steep slopes,
 //! which a box turns off; and two boxes choose how its frames reach the display. The Depth Mapping
 //! menu gives the world's own pictures the relief an art pack has for them, inside the better
-//! lighting; the damp and slime it lays on a room's surfaces a box turns off.
+//! lighting, and a box keeps the damp and slime it lays on a room's surfaces.
 //!
 //! The effects start on. The enhanced graphics' quality presets set several of them at once
-//! ([`PRESET_VALUES`]), and the boxes' defaults are the Medium preset's.
+//! ([`PRESET_VALUES`]), and the defaults of the boxes and the menu are the Medium preset's.
 //!
 //! In a build with the `hifi` feature the options are registered with the value store
 //! ([`register`]), so the page reads and writes them like any other option and the profile keeps
 //! them in its `[Fidelity]` section. Without it nothing here is registered and no page shows them.
 
 use super::names::fidelity;
-use crate::PrefValue;
+use crate::PrefValue::{self, Int};
 
 /// What a box needs before it draws anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +41,8 @@ pub enum Needs {
     ArtPack,
     /// The better lighting, an art pack, and Keep Retail Look's box unticked.
     ArtPackWithoutRetailLook,
-    /// The better lighting, and depth mapping on: the relief it is drawn with.
+    /// The better lighting, Keep Retail Look's box unticked, and depth mapping on: the relief it
+    /// is drawn with.
     Relief,
 }
 
@@ -176,16 +177,18 @@ pub const OPTIONS: [FidelityOption; 13] = [
     },
     FidelityOption {
         name: fidelity::NO_DAMP,
-        caption: "No Damp and Slime",
-        note: "Draws the world without the wet sheen depth mapping lays on dungeon walls and \
-               floors, and the slime in pools and runs in the Olthoi's lairs. It changes at once.",
+        caption: "Damp and Slime",
+        note: "A wet sheen on dungeon walls and floors, and slime in pools and runs in the \
+               Olthoi's lairs, catching the light as you move. It changes at once.",
         needs: Needs::Relief,
+        inverted: true,
+        on_by_default: false,
     },
 ];
 
 /// The menus among the effects' rows, each with what it needs. A menu's own module registers it
 /// and gives its choices; a row here gives it the boxes' rules.
-pub const MENUS: &[(&str, Needs)] = &[];
+pub const MENUS: &[(&str, Needs)] = &[(fidelity::DEPTH_MAPPING, Needs::LightingWithoutRetailLook)];
 
 /// The heading's caption.
 pub const HEADING: &str = "Enhanced Graphics";
@@ -221,6 +224,8 @@ pub const PRESET_VALUES: &[(&str, [PrefValue; PRESET_NAMES.len()])] = &[
     (fidelity::WEATHER, [OFF, ON, ON, ON]),
     (fidelity::NO_ANTI_ALIASING, [ON, OFF, OFF, OFF]),
     (fidelity::NO_SLOPE_MATERIALS, [OFF, OFF, OFF, OFF]),
+    (fidelity::DEPTH_MAPPING, [Int(0), Int(3), Int(3), Int(3)]),
+    (fidelity::NO_DAMP, [ON, OFF, OFF, OFF]),
 ];
 
 /// One quality preset, by its place in [`PRESET_NAMES`].
@@ -357,13 +362,8 @@ pub fn blocked_with(
     rays: Option<bool>,
     pack: bool,
 ) -> Option<Blocked> {
-    let wants = if super::depth_mapping::is_depth_mapping(name) {
-        Needs::Lighting
-    } else {
-        needs(name)?
-    };
     let lighting = ticked(fidelity::LIGHTING);
-    match wants {
+    match needs(name)? {
         Needs::Lighting
         | Needs::LightingAndRays
         | Needs::LightingWithoutRetailLook
@@ -377,7 +377,7 @@ pub fn blocked_with(
         Needs::LightingAndRays if rays == Some(false) => Some(Blocked::NeedsRays),
         Needs::ArtPack if !pack && !ticked(fidelity::RETAIL_LOOK) => Some(Blocked::NeedsArtPack),
         Needs::ArtPackWithoutRetailLook if !pack => Some(Blocked::NeedsArtPack),
-        Needs::LightingWithoutRetailLook | Needs::ArtPackWithoutRetailLook
+        Needs::LightingWithoutRetailLook | Needs::ArtPackWithoutRetailLook | Needs::Relief
             if ticked(fidelity::RETAIL_LOOK) =>
         {
             Some(Blocked::RetailLook)
@@ -418,10 +418,9 @@ pub fn left_out_of_save(
     value: &PrefValue,
     ini: &crate::persist::preferences::UserPreferences,
 ) -> bool {
-    let unchanged = if super::depth_mapping::is_depth_mapping(name) {
-        *value == PrefValue::Int(super::depth_mapping::DEFAULT)
-    } else {
-        find(name).is_some_and(|o| *value == PrefValue::Bool(o.on_by_default))
+    let unchanged = match find(name) {
+        Some(o) => *value == PrefValue::Bool(o.on_by_default),
+        None => is_a_menu(name) && *value == PrefValue::Int(super::depth_mapping::DEFAULT),
     };
     unchanged
         && !ini
@@ -690,8 +689,9 @@ mod tests {
     #[test]
     fn what_the_lighting_and_the_retail_look_rule_out_leaves_the_page() {
         use fidelity::{
-            AMBIENT_OCCLUSION, GLOBAL_ILLUMINATION, HDR, LAMPS, LIGHTING, NO_ANTI_ALIASING,
-            NO_SLOPE_MATERIALS, RETAIL_LOOK, SHADOWS, SKY, VSYNC, WEATHER,
+            AMBIENT_OCCLUSION, DEPTH_MAPPING, GLOBAL_ILLUMINATION, HDR, LAMPS, LIGHTING,
+            NO_ANTI_ALIASING, NO_DAMP, NO_SLOPE_MATERIALS, RETAIL_LOOK, SHADOWS, SKY, VSYNC,
+            WEATHER,
         };
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         let left = |name: &str, on: &'static [&'static str]| {
@@ -711,12 +711,20 @@ mod tests {
             NO_SLOPE_MATERIALS,
             VSYNC,
             HDR,
+            DEPTH_MAPPING,
+            NO_DAMP,
         ] {
             assert!(left(name, &[]), "{name}");
         }
         // The retail look takes off what an art pack draws, and only that.
-        assert!(left(NO_SLOPE_MATERIALS, &[LIGHTING, RETAIL_LOOK]));
-        for o in OPTIONS.iter().filter(|o| o.name != NO_SLOPE_MATERIALS) {
+        let pack = [NO_SLOPE_MATERIALS, DEPTH_MAPPING, NO_DAMP];
+        for name in pack {
+            assert!(
+                left(name, &[LIGHTING, DEPTH_MAPPING, RETAIL_LOOK]),
+                "{name}"
+            );
+        }
+        for o in OPTIONS.iter().filter(|o| !pack.contains(&o.name)) {
             assert!(!left(o.name, &[LIGHTING, RETAIL_LOOK]), "{}", o.name);
         }
         // A device without rays stays, with its reason.
@@ -735,6 +743,7 @@ mod tests {
                     | fidelity::NO_ANTI_ALIASING
                     | fidelity::NO_SLOPE_MATERIALS
                     | fidelity::HDR
+                    | fidelity::NO_DAMP
             );
             assert_eq!(o.on_by_default, draws, "{}", o.name);
             assert!(
@@ -759,7 +768,10 @@ mod tests {
             .filter(|o| o.inverted)
             .map(|o| o.caption)
             .collect();
-        assert_eq!(inverted, ["Anti-Aliasing", "Slope Materials"]);
+        assert_eq!(
+            inverted,
+            ["Anti-Aliasing", "Slope Materials", "Damp and Slime"]
+        );
     }
 
     #[test]
@@ -773,12 +785,20 @@ mod tests {
         let low = PRESETS[0].values();
         assert!(low.contains(&(fidelity::GLOBAL_ILLUMINATION, PrefValue::Bool(false))));
         assert!(low.contains(&(fidelity::NO_ANTI_ALIASING, PrefValue::Bool(true))));
+        assert!(low.contains(&(
+            fidelity::DEPTH_MAPPING,
+            Int(super::super::depth_mapping::OFF)
+        )));
         let ultra = PRESETS[3].values();
-        assert!(ultra
-            .iter()
-            .all(|(name, v)| *v == PrefValue::Bool(!find(name).unwrap().inverted)));
-        // The boxes' defaults are the Medium preset's.
-        let defaults = |name: &str| find(name).map(|o| PrefValue::Bool(o.on_by_default));
+        assert!(ultra.iter().all(|(name, v)| match find(name) {
+            Some(o) => *v == PrefValue::Bool(!o.inverted),
+            None => *v == Int(super::super::depth_mapping::MOST),
+        }));
+        // The defaults of the boxes and the menu are the Medium preset's.
+        let defaults = |name: &str| match find(name) {
+            Some(o) => Some(PrefValue::Bool(o.on_by_default)),
+            None => is_a_menu(name).then_some(Int(super::super::depth_mapping::DEFAULT)),
+        };
         assert_eq!(preset_in_use(defaults), Some(PRESETS[1]));
         // Each preset is in use once set, and a value of the player's own is none.
         for p in PRESETS {
@@ -798,7 +818,7 @@ mod tests {
 
     #[test]
     fn the_depth_mapping_menu_needs_the_better_lighting_and_the_damp_box_needs_the_menu() {
-        use fidelity::{DEPTH_MAPPING, LIGHTING, NO_DAMP};
+        use fidelity::{DEPTH_MAPPING, LIGHTING, NO_DAMP, RETAIL_LOOK};
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         assert_eq!(
             blocked(DEPTH_MAPPING, with(&[]), None),
@@ -817,6 +837,14 @@ mod tests {
             blocked(NO_DAMP, with(&[LIGHTING, DEPTH_MAPPING]), Some(false)),
             None
         );
+        // Keep Retail Look leaves out the relief, and the damp with it.
+        for name in [DEPTH_MAPPING, NO_DAMP] {
+            assert_eq!(
+                blocked(name, with(&[LIGHTING, DEPTH_MAPPING, RETAIL_LOOK]), None),
+                Some(Blocked::RetailLook),
+                "{name}"
+            );
+        }
         assert_eq!(
             Blocked::NeedsDepthMapping.reason(),
             "Needs Depth Mapping",
@@ -825,24 +853,25 @@ mod tests {
         assert_eq!(super::super::depth_mapping::CAPTION, "Depth Mapping");
     }
 
-    /// The Depth Mapping menu is registered Off, and the save leaves it out until it is changed.
+    /// The Depth Mapping menu starts at its greatest level, and the save leaves it out until it is
+    /// changed.
     #[test]
-    fn the_depth_mapping_menu_is_off_and_left_out_of_the_profile_until_chosen() {
+    fn the_depth_mapping_menu_starts_high_and_is_left_out_of_the_profile_until_chosen() {
         use crate::persist::preferences::UserPreferences;
         let empty = UserPreferences::parse("").expect("an empty profile");
-        let off = PrefValue::Int(super::super::depth_mapping::OFF);
+        let high = PrefValue::Int(super::super::depth_mapping::MOST);
         assert_eq!(
             super::super::depth_mapping::DEFAULT,
-            super::super::depth_mapping::OFF
+            super::super::depth_mapping::MOST
         );
-        assert!(left_out_of_save(fidelity::DEPTH_MAPPING, &off, &empty));
+        assert!(left_out_of_save(fidelity::DEPTH_MAPPING, &high, &empty));
         assert!(!left_out_of_save(
             fidelity::DEPTH_MAPPING,
-            &PrefValue::Int(2),
+            &PrefValue::Int(super::super::depth_mapping::OFF),
             &empty
         ));
-        let named = UserPreferences::parse("[Fidelity]\r\nDepthMapping=Off\r\n").expect("reads");
-        assert!(!left_out_of_save(fidelity::DEPTH_MAPPING, &off, &named));
+        let named = UserPreferences::parse("[Fidelity]\r\nDepthMapping=High\r\n").expect("reads");
+        assert!(!left_out_of_save(fidelity::DEPTH_MAPPING, &high, &named));
         assert!(left_out_of_save(
             fidelity::NO_DAMP,
             &PrefValue::Bool(false),

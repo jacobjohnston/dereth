@@ -26,11 +26,11 @@ fn upsample(dist: f32, ao: [f32; 4], at: [f32; 4], near: [f32; 4]) -> f32 {
 const QUARTER: [f32; 4] = [9.0 / 16.0, 3.0 / 16.0, 3.0 / 16.0, 1.0 / 16.0];
 
 #[test]
-fn the_search_works_at_half_resolution_only_on_a_picture_larger_than_1440p() {
-    for (w, h) in [(1280, 720), (1920, 1080), (2560, 1080), (2560, 1440)] {
+fn the_search_works_at_half_resolution_on_a_picture_of_1080p_and_up() {
+    for (w, h) in [(1280, 720), (1440, 900), (1600, 900)] {
         assert_eq!(search_grid(w, h), 1, "{w}x{h}");
     }
-    for (w, h) in [(3440, 1440), (3840, 2160), (5120, 2160), (7680, 4320)] {
+    for (w, h) in [(1920, 1080), (2560, 1440), (3840, 2160), (7680, 4320)] {
         assert_eq!(search_grid(w, h), 2, "{w}x{h}");
     }
 }

@@ -43,8 +43,8 @@ pub fn shader_source() -> &'static str {
 }
 
 /// The pixels in the world's viewport above which the search and its blur work at half
-/// resolution: more than 2560x1440.
-pub const HALF_ABOVE: u64 = 2560 * 1440;
+/// resolution: more than 1600x900, so 1080p and up.
+pub const HALF_ABOVE: u64 = 1600 * 900;
 
 /// The pixels a working texel of the search spans on each axis, for a viewport `width` by
 /// `height`: two above [`HALF_ABOVE`] pixels, one otherwise.
@@ -292,7 +292,7 @@ fn pipeline(
 }
 
 /// The constant block for `frame`, its search working on texels `grid` pixels square.
-fn params(s: &HifiSettings, f: &HifiFrame, encoded: bool, grid: u32) -> Vec<u8> {
+fn params(s: &HifiSettings, f: &HifiFrame, encoded: bool, grid: u32, classes: bool) -> Vec<u8> {
     let (slices, steps, _) = effort(s.ambient_occlusion);
     let cam = &f.camera;
     let vp = cam.viewport;
@@ -321,7 +321,7 @@ fn params(s: &HifiSettings, f: &HifiFrame, encoded: bool, grid: u32) -> Vec<u8> 
         [slices as f32, steps as f32, STRENGTH, POWER],
         [fog_min, fog_max, has_fog, fade_end],
         [debug, if encoded { 1.0 } else { 0.0 }, 0.035, THICKNESS],
-        [grid as f32, 0.0, 0.0, 0.0],
+        [grid as f32, if classes { 1.0 } else { 0.0 }, 0.0, 0.0],
     ];
     for v in vecs {
         for x in v {
@@ -487,9 +487,14 @@ impl HifiPass for Gtao {
             }
         };
         let encoded = !format.is_srgb() && reshade.is_none();
-        cx.seam
-            .queue()
-            .write_buffer(&gpu.params, 0, &params(&settings, cx.frame, encoded, grid));
+        // Where only the rooms and the leaves take the term, the search reads the normals'
+        // classes and passes over the rest.
+        let classes = how == Apply::BlendInside;
+        cx.seam.queue().write_buffer(
+            &gpu.params,
+            0,
+            &params(&settings, cx.frame, encoded, grid, classes),
+        );
 
         let bind_with = |ao: &wgpu::TextureView, picture: &wgpu::TextureView| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -570,6 +575,11 @@ impl HifiPass for Gtao {
 
         let from_b = bind(&b);
         let from_a = bind(&a);
+        let classed = match (classes, reshade) {
+            (true, Some(rt)) => Some(bind_with(&b, &rt.normal)),
+            _ => None,
+        };
+        let search_group = classed.as_ref().unwrap_or(&from_b);
         run(
             cx.encoder,
             cx.timer.writes("gtao search"),
@@ -578,7 +588,7 @@ impl HifiPass for Gtao {
             Some(texels),
             0,
             &gpu.search,
-            &from_b,
+            search_group,
         );
         cx.seam.count_pass();
         // Each blur's taps lie a pixel further apart than the last's at full resolution; at half

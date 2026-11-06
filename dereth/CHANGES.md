@@ -51,6 +51,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Enhanced Graphics: Cloud Detail starts at Medium, as the Medium preset has it; the Low preset sets it Low, and High and Ultra set it High. It leaves the page with Enhanced Graphics Mode off.
 - Better Lighting: an art pack can plant grass and low plants over the land, and a Ground Cover menu chooses how far they are drawn, from 0.5x to 5x, or Off.
 - Better Lighting: the wind moves an art pack's trees and plants, and No Wind holds them still.
+- Enhanced Graphics: No Wind is now Foliage Wind, ticked when it is on. The Low preset leaves out the ground cover and stops the wind, and High and Ultra draw the plants 3x and 5x as far. The wind and the ground cover's draw distance leave the page under Keep Retail Look.
 
 ## 0.4.14 (2026-11-05)
 

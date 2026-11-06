@@ -470,6 +470,17 @@ pub static DIVERGENCES: &[Divergence] = &[
               and nothing opens without the player saying so.",
     },
     Divergence {
+        id: "CD-cloud-command",
+        title: "The clouds this client draws can be set from chat",
+        change: "/clouds (or @clouds) is a chat command of this client's own: alone it says which \
+                 cloud options are set here; none, thin or thick sets their cover, and cover, \
+                 speed, height, depth, size, detail, light, shade or shadows with a number sets \
+                 that option of the Remastered sky's clouds; reset returns one option or all of \
+                 them to the sky's own. It changes only what this client draws and is never sent \
+                 to the server. The final client had no such command.",
+        why: "A player can look at the world under any sky without editing a settings file.",
+    },
+    Divergence {
         id: "CD-era-action-availability",
         title: "Commands follow the world's era",
         change: "Commands for systems the world announces it lacks (the Marketplace and PK arena recalls, PK Lite, @die, housing, @corpse, corpse permits, @log, the later allegiance commands) are refused locally, and help leaves them out. Where @lifestone is no recall, as at launch, it asks whether to kill the character, sends only on a Yes, and its help says so. A world without spell tabs keeps one bar of favorites. Navigation only offers the recalls the world has.",

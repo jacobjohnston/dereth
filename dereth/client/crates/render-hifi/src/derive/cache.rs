@@ -194,6 +194,8 @@ fn build(
     }
     let constants: &[(&str, f64)] = if key.adds_in_display_light() {
         &[(super::reshade::ADDITIVE_CONSTANT, 1.0)]
+    } else if key.solid_in_display_light() {
+        &[(super::reshade::SOLID_CONSTANT, 1.0)]
     } else {
         &[]
     };

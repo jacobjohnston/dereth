@@ -99,6 +99,8 @@ impl WorldState {
             weather_sound: dereth_audio::WeatherSound::default(),
             // The sky's own until the player asks for others.
             clouds: crate::clouds::Clouds::default(),
+            // The calendar's until the player asks for others.
+            moons: crate::moon::Moons::default(),
             // Behind and a little above, looking slightly down: the client camera's own
             // defaults are explicitly not reproduced here (see [`crate::camera`]).
             camera_orbit: (0.0, -0.20),

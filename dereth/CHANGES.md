@@ -71,6 +71,8 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Weather Sounds: rain now patters and hisses, harder in a storm with the wind roaring in its gusts and muffled indoors, made as it plays so it never repeats. A new Weather Sounds row in the sound options sets how loud the rain, the wind and the thunder are.
 - Weather: near the camera the rain's drops stir the water they fall on, and the water mirrors a little less while it rains.
 - Weather: a storm's gale bends an art pack's trees and grass hard downwind and thrashes them in its gusts.
+- Better Lighting: an art pack can draw the moons again as round worlds, lit from the sun's side as they wax and wane over months of their own, with lights twinkling on their night sides and clouds of their own.
+- /moon sets the phase of the moons this client draws, both or one at a time, until /moon reset.
 
 ## 0.4.14 (2026-11-05)
 

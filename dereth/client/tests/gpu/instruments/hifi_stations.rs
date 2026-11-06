@@ -1733,6 +1733,10 @@ impl Shot {
     fn hold_reported_camera(&mut self) {
         if let (Some(c), Some(block)) = (self.held, self.scene.viewer_block()) {
             self.scene.camera = c.to_render(block);
+            // Which portals open and which rooms draw is a question about the camera's cell.
+            if let (Some(cell), Some(body)) = (c.cell, self.scene.character.as_mut()) {
+                body.camera.viewer_cell = Some(dereth_primitives::CellId(cell));
+            }
         }
     }
 

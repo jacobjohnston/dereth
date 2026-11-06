@@ -189,7 +189,10 @@ pub const OPTIONS: [FidelityOption; 13] = [
 
 /// The menus among the effects' rows, each with what it needs. A menu's own module registers it
 /// and gives its choices; a row here gives it the boxes' rules.
-pub const MENUS: &[(&str, Needs)] = &[(fidelity::DEPTH_MAPPING, Needs::ArtPackWithoutRetailLook)];
+pub const MENUS: &[(&str, Needs)] = &[
+    (fidelity::DEPTH_MAPPING, Needs::ArtPackWithoutRetailLook),
+    (fidelity::GOD_RAYS, Needs::Lighting),
+];
 
 /// The heading's caption.
 pub const HEADING: &str = "Enhanced Graphics";
@@ -227,6 +230,7 @@ pub const PRESET_VALUES: &[(&str, [PrefValue; PRESET_NAMES.len()])] = &[
     (fidelity::NO_SLOPE_MATERIALS, [OFF, OFF, OFF, OFF]),
     (fidelity::DEPTH_MAPPING, [Int(0), Int(3), Int(3), Int(3)]),
     (fidelity::NO_DAMP, [ON, OFF, OFF, OFF]),
+    (fidelity::GOD_RAYS, [Int(0), Int(1), Int(1), Int(1)]),
 ];
 
 /// One quality preset, by its place in [`PRESET_NAMES`].
@@ -363,13 +367,8 @@ pub fn blocked_with(
     rays: Option<bool>,
     pack: bool,
 ) -> Option<Blocked> {
-    let wants = if super::god_rays::is_god_rays(name) {
-        Needs::Lighting
-    } else {
-        needs(name)?
-    };
     let lighting = ticked(fidelity::LIGHTING);
-    match wants {
+    match needs(name)? {
         Needs::Lighting
         | Needs::LightingAndRays
         | Needs::LightingWithoutRetailLook
@@ -703,7 +702,7 @@ mod tests {
     #[test]
     fn what_the_lighting_and_the_retail_look_rule_out_leaves_the_page() {
         use fidelity::{
-            AMBIENT_OCCLUSION, DEPTH_MAPPING, GLOBAL_ILLUMINATION, HDR, LAMPS, LIGHTING,
+            AMBIENT_OCCLUSION, DEPTH_MAPPING, GLOBAL_ILLUMINATION, GOD_RAYS, HDR, LAMPS, LIGHTING,
             NO_ANTI_ALIASING, NO_DAMP, NO_SLOPE_MATERIALS, RETAIL_LOOK, SHADOWS, SKY, VSYNC,
             WEATHER,
         };
@@ -727,9 +726,11 @@ mod tests {
             HDR,
             DEPTH_MAPPING,
             NO_DAMP,
+            GOD_RAYS,
         ] {
             assert!(left(name, &[]), "{name}");
         }
+        assert!(!left(GOD_RAYS, &[LIGHTING, RETAIL_LOOK]));
         // The retail look takes off what an art pack draws, and only that.
         let pack = [NO_SLOPE_MATERIALS, DEPTH_MAPPING, NO_DAMP];
         for name in pack {
@@ -803,14 +804,17 @@ mod tests {
             fidelity::DEPTH_MAPPING,
             Int(super::super::depth_mapping::OFF)
         )));
+        assert!(low.contains(&(fidelity::GOD_RAYS, Int(super::super::god_rays::OFF))));
         let ultra = PRESETS[3].values();
         assert!(ultra.iter().all(|(name, v)| match find(name) {
             Some(o) => *v == PrefValue::Bool(!o.inverted),
+            None if *name == fidelity::GOD_RAYS => *v == Int(super::super::god_rays::LOW),
             None => *v == Int(super::super::depth_mapping::MOST),
         }));
         // The defaults of the boxes and the menu are the Medium preset's.
         let defaults = |name: &str| match find(name) {
             Some(o) => Some(PrefValue::Bool(o.on_by_default)),
+            None if name == fidelity::GOD_RAYS => Some(Int(super::super::god_rays::DEFAULT)),
             None => is_a_menu(name).then_some(Int(super::super::depth_mapping::DEFAULT)),
         };
         assert_eq!(preset_in_use(defaults), Some(PRESETS[1]));
@@ -915,22 +919,23 @@ mod tests {
         assert!(find(GOD_RAYS).is_none(), "the menu is no box");
     }
 
-    /// The God Rays menu is registered Off, and the save leaves it out until it is changed.
+    /// The God Rays menu starts at Low, as the Medium preset has it, and the save leaves it out
+    /// until it is changed.
     #[test]
-    fn the_god_rays_menu_is_off_and_left_out_of_the_profile_until_chosen() {
-        use super::super::god_rays::{DEFAULT, OFF};
+    fn the_god_rays_menu_starts_low_and_is_left_out_of_the_profile_until_chosen() {
+        use super::super::god_rays::{DEFAULT, LOW, OFF};
         use crate::persist::preferences::UserPreferences;
         let empty = UserPreferences::parse("").expect("an empty profile");
-        assert_eq!(DEFAULT, OFF);
-        let off = PrefValue::Int(OFF);
-        assert!(left_out_of_save(fidelity::GOD_RAYS, &off, &empty));
+        assert_eq!(DEFAULT, LOW);
+        let low = PrefValue::Int(LOW);
+        assert!(left_out_of_save(fidelity::GOD_RAYS, &low, &empty));
         assert!(!left_out_of_save(
             fidelity::GOD_RAYS,
-            &PrefValue::Int(2),
+            &PrefValue::Int(OFF),
             &empty
         ));
-        let named = UserPreferences::parse("[Fidelity]\r\nGodRays=Off\r\n").expect("reads");
-        assert!(!left_out_of_save(fidelity::GOD_RAYS, &off, &named));
+        let named = UserPreferences::parse("[Fidelity]\r\nGodRays=Low\r\n").expect("reads");
+        assert!(!left_out_of_save(fidelity::GOD_RAYS, &low, &named));
     }
 
     #[test]

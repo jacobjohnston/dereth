@@ -1142,6 +1142,17 @@ const FIDELITY_ROWS: [Row; 15] = [
     fidelity_box(3),
     fidelity_box(4),
     fidelity_box(5),
+    only(
+        Shown::Only(Interface::Horizon),
+        noted(
+            super::god_rays::NOTE,
+            pref(
+                super::god_rays::CAPTION,
+                Value::Menu(crate::options::names::fidelity::GOD_RAYS),
+                Int(super::god_rays::DEFAULT),
+            ),
+        ),
+    ),
     fidelity_box(6),
     fidelity_box(7),
     only(
@@ -1157,17 +1168,6 @@ const FIDELITY_ROWS: [Row; 15] = [
     ),
     fidelity_box(12),
     fidelity_box(9),
-    only(
-        Shown::Only(Interface::Horizon),
-        noted(
-            super::god_rays::NOTE,
-            pref(
-                super::god_rays::CAPTION,
-                Value::Menu(crate::options::names::fidelity::GOD_RAYS),
-                Int(super::god_rays::DEFAULT),
-            ),
-        ),
-    ),
 ];
 
 /// The row of the `i`th box.

@@ -25,6 +25,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Art packs: a material for a retail picture may be glacier ice: opaque and deep blue, with light bent through it, with or without Depth Mapping.
 - Art packs: a material for a retail picture may have a sheen (`sheen = 0` to `1`), so that cloth worn outdoors shines as silk or satin does, in soft bands that follow the sun over its folds.
 - Better Lighting: an art pack's glassy ground mirrors the sky.
+
 ## 0.4.14 (2026-11-05)
 
 ## 0.4.13 (2026-11-05)

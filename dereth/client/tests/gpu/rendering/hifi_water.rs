@@ -4,6 +4,9 @@
 //! Retail's water pictures' colors it is drawn with are worked out once for a ground, not again
 //! every frame.
 //!
+//! The door stamps are tested here too, over the Reflective Water box's ground: a door behind a
+//! hill or past a road does not show through the ground in front of it.
+//!
 //! The pack is made in the test: a flat ground of its own color for each dry terrain type and
 //! none for the water, so the water's own color is retail's water picture's.
 //!
@@ -355,6 +358,80 @@ fn the_reflective_water_box_draws_the_water_with_no_art_pack() {
     shot.step_held(gpu);
     assert!(!water_drawn(gpu), "unticked, no water");
     assert!(!shot.scene.drawn_ground_active());
+}
+
+/// What `@report` printed behind a hill at Holtburg, a house's door beyond its crest. At this
+/// draw distance the frame's first block draws no cell, so its end lies on the sky's last command.
+const BEHIND_THE_HILL: &str = "dereth report 1; loc 0xA9B40020 [83.442406 173.377823 62.419792] 0.367503 0.000000 0.000000 -0.930023; camera 0xA9B4 [79.319176 177.73665 63.949776] yaw -2.383948 pitch -0.004999968 cell 0xA9B40020; eye 0xA9B4 [79.319176 177.73665 64.7254]; fov 90 vertical 54.545456 aspect 1; mode orbit; time 0.839 Evensong-and-Half, server's clock; clock 307576472.0926675; weather auto; renderer wgpu; better lighting on; retail look off; effects Lighting=1,Shadows=1,Water=1; render scale 100; art pack none; draw distance 12; window 960x540; viewport 0 0 960 540; build dereth-client 0.4.8 abee60aa2fd707497d8838564480fa036ebf89d5";
+
+/// The ground is drawn again over the buildings' stamps after the viewer's own block has stamped
+/// them, so a door behind a hill stays behind it.
+#[test]
+fn a_door_behind_a_hill_stays_hidden_whatever_block_the_frame_opens_with() {
+    let _gpu = crate::common::gpu_lock();
+    let report = dereth_client_runtime::report::VisualReport::parse(BEHIND_THE_HILL)
+        .expect("the report reads");
+    let station = crate::instruments::hifi_stations::report_station(&report, None);
+    let (mut device, mut shot) = opened_with(&station, None, &format!("{BOXES},Water=1"));
+    let gpu = &mut device;
+    shot.apply_report(&report);
+    for _ in 0..12 {
+        shot.step_held(gpu);
+    }
+    let without = capture(gpu);
+    keep("hill-without-door", &without);
+    shot.create_object(
+        0x8300_0100,
+        (0x0200_19FF, None),
+        0xA9B4,
+        (104.2, 141.2),
+        40.0,
+    );
+    for _ in 0..12 {
+        shot.step_held(gpu);
+    }
+    let with = capture(gpu);
+    keep("hill-with-door", &with);
+    let shown = changed_below_the_sky(&with, &without, 24);
+    assert!(
+        shown < 40,
+        "{shown} pixels of the door show through the hill"
+    );
+}
+
+/// What `@report` printed on the hill above the river at Holtburg: a house's door by the water
+/// lies past the road below it.
+const OVER_THE_KEPT_GROUND: &str = "dereth report 1; loc 0xA9B40033 [150.126495 66.247101 83.329735] -0.998657 0.000000 -0.000000 -0.051816; camera 0xA9B4 [150.62952 61.637173 86.39229] yaw -6.174508 pitch -0.32499987 cell 0xA9B40033; eye 0xA9B4 [150.4786 63.02015 86.18462]; fov 90 vertical 79.07219 aspect 1; mode orbit; time 0.281 Dawnsong, set here; clock 307678878.91440904; weather clear; renderer wgpu; better lighting on; retail look off; effects Lighting=1,Shadows=1,GlobalIllumination=1,AmbientOcclusion=1,Lamps=1,Sky=1,Weather=1,Water=1; draw distance 8; window 3358x2712; viewport 0 0 3358 2712; build dereth-client 0.4.8 86d148d6e9d65f3a54835a7197659488ecebfe3d";
+
+/// A door stamp looks before it cuts: a door past the road, behind the ground the road lies on,
+/// does not show through it.
+#[test]
+fn a_door_past_the_road_does_not_show_through_the_ground() {
+    let _gpu = crate::common::gpu_lock();
+    let report = dereth_client_runtime::report::VisualReport::parse(OVER_THE_KEPT_GROUND)
+        .expect("the report reads");
+    let station = crate::instruments::hifi_stations::report_station(&report, None);
+    let (mut device, mut shot) = opened_with(&station, None, &format!("{BOXES},Water=1"));
+    let gpu = &mut device;
+    shot.apply_report(&report);
+    for _ in 0..12 {
+        shot.step_held(gpu);
+    }
+    let rgba = capture(gpu);
+    keep("kept-ground", &rgba);
+    // Where the road runs, past the lamp beside it.
+    let w = SIZE.0 as usize;
+    let dark = (274..286)
+        .flat_map(|y| (670..680).map(move |x| (x, y)))
+        .filter(|(x, y)| {
+            let p = &rgba[(y * w + x) * 4..][..3];
+            p.iter().all(|c| *c < 60)
+        })
+        .count();
+    assert!(
+        dark < 3,
+        "{dark} black pixels of a door show through the road"
+    );
 }
 
 /// The water's pixels in `with`, drawn beside `without` (the same frame without the water): those

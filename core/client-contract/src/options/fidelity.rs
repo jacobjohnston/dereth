@@ -192,7 +192,7 @@ pub const OPTIONS: [FidelityOption; 13] = [
 pub const MENUS: &[(&str, Needs)] = &[
     (fidelity::DEPTH_MAPPING, Needs::ArtPackWithoutRetailLook),
     (fidelity::GOD_RAYS, Needs::Lighting),
-    (fidelity::CLOUD_DETAIL, Needs::Lighting),
+    (fidelity::CLOUD_DETAIL, Needs::ArtPackWithoutRetailLook),
 ];
 
 /// The heading's caption.
@@ -1222,11 +1222,18 @@ mod tests {
     fn the_cloud_detail_menu_needs_the_better_lighting() {
         use fidelity::{CLOUD_DETAIL, LIGHTING};
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
+        // With an art pack open, whose sky the clouds are drawn in.
+        let blocked = |name, ticked, rays| blocked_with(name, ticked, rays, true);
         assert_eq!(
             blocked(CLOUD_DETAIL, with(&[]), None),
             Some(Blocked::NeedsLighting)
         );
         assert_eq!(blocked(CLOUD_DETAIL, with(&[LIGHTING]), Some(false)), None);
+        // Without one there are no clouds to draw.
+        assert_eq!(
+            blocked_with(CLOUD_DETAIL, with(&[LIGHTING]), None, false),
+            Some(Blocked::NeedsArtPack)
+        );
         assert!(find(CLOUD_DETAIL).is_none(), "the menu is no box");
     }
 

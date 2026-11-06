@@ -65,6 +65,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: the water has waves as large as it is, the sea's swell and surf, a lake's chop and hardly any on a river; foam gathers along the shore and on the crests, and the sun's light ripples over a shallow bed.
 - Better Lighting: near the camera, a body moving through the water stirs it, and the waves spread, cross, meet the shore and die away. Graphics without compute shaders ring the water round a body standing in it instead, as before.
 - Better Lighting: far water is no longer a glassy mirror. Its reflections soften and stretch with distance, and the sun's glitter spreads wider, as on rippled water.
+- Enhanced Graphics: Reflective Water is now Water Reflections and starts on, as the Medium preset has it; the Low preset turns it off. It leaves the page under Keep Retail Look.
 
 ## 0.4.14 (2026-11-05)
 

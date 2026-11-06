@@ -18,6 +18,11 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - A caster weapon of several elements gives its damage bonus to each of them.
 - An account's access level no longer makes its characters staff by default: permissions belong to each character. Worlds without `override_character_permissions` in `empyrean.toml` change too; set it to `true` to keep the old behaviour.
 
+## 0.3.10 (2026-11-05)
+- New relay that lets Dereth play an ac1999 server.
+- Fixed idle WebSocket connections shutting out browser players.
+- Infiltration worlds now leave out what came after February 2005.
+
 ## 0.3.9 (2026-11-05)
 
 - Fixed a crash wielding an item that requires a skill the character doesn't have.

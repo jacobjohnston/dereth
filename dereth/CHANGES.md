@@ -14,11 +14,13 @@ pre-release leaves it for the final release, and its notes show it as it is);
 
 ## Unreleased
 
-- Launcher: the Library holds art packs as it holds data files, and a world's page chooses which the Dereth client draws, or none.
 - Better Lighting: Retail Look and No Slope Materials say so when no art pack is open.
 - Better Lighting: an art pack can plant grass and low plants over the land, and a Ground Cover menu chooses how far they are drawn, from 0.5x to 5x, or Off.
 - Better Lighting: a Tree Draw Distance menu chooses how far an art pack's trees are drawn, from 0.5x to 5x.
 - Better Lighting: the wind moves an art pack's trees and plants, and No Wind holds them still.
+
+## 0.4.14 (2026-11-05)
+
 ## 0.4.13 (2026-11-05)
 
 - Classic: resting the pointer on a button, bar or slot says what it does.
@@ -30,6 +32,8 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Fixed spell components missing from the Components tab when they arrived before their pack.
 
 - macOS: Intel Macs are no longer supported; Apple silicon only.
+- Better Lighting: no more white line across things standing in water.
+- Fixed a right-drag begun away from the window's middle throwing the camera across.
 
 ## 0.4.12 (2026-11-03)
 

@@ -20,6 +20,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: torches, portals and other glowing effects add what the ordinary look adds, so they no longer blow out to a hard-edged panel or all but vanish over a lit wall, and a flame's glow in a dungeon no longer washes the wall behind it pale.
 - Better Lighting: far mountains keep their shape: a narrow peak a few kilometers off is no longer drawn as a pyramid.
 - Better Lighting: walking from one landblock into the next no longer draws the ground a block out of place for a frame, which could hide your character inside a hill.
+- Better Lighting: something new coming into view, such as a block loading as you walk, no longer flashes the whole picture back to the standard look for a frame.
 
 ## 0.4.14 (2026-11-05)
 

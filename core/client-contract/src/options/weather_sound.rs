@@ -47,6 +47,7 @@ mod tests {
     /// at full volume by default.
     #[test]
     fn the_row_follows_ambient_sounds_on_horizons_page_alone() {
+        super::super::store::init();
         let row = sheet::row_of_preference(PageId::Client, WEATHER_SOUND).expect("its row");
         assert_eq!(row.caption, CAPTION);
         assert_eq!(

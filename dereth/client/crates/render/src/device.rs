@@ -787,6 +787,17 @@ impl Gpu {
         dispatch!(self, g => g.set_presentation_sync(full_screen, sync_to_refresh));
     }
 
+    /// Whether Enhanced Graphics Mode draws, which only a `wgpu` device can.
+    pub fn set_enhanced(&mut self, on: bool, vsync: bool) {
+        #[cfg(feature = "wgpu")]
+        #[allow(irrefutable_let_patterns)]
+        if let Gpu::Wgpu(g) = self {
+            g.set_enhanced(on, vsync);
+        }
+        #[cfg(not(feature = "wgpu"))]
+        let _ = (on, vsync);
+    }
+
     #[must_use]
     pub fn present_sync_interval(&self) -> u32 {
         dispatch!(self, g => g.present_sync_interval())
@@ -1246,14 +1257,6 @@ impl Gpu {
         match self {
             Gpu::Wgpu(g) => g.hifi_requested(),
             _ => false,
-        }
-    }
-
-    /// Whether Enhanced Graphics Mode draws, which only a `wgpu` device can.
-    pub fn set_enhanced(&mut self, on: bool, vsync: bool) {
-        #[allow(irrefutable_let_patterns)]
-        if let Gpu::Wgpu(g) = self {
-            g.set_enhanced(on, vsync);
         }
     }
 

@@ -22,7 +22,6 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Enhanced Graphics: a Quality Preset menu, from a light Low to a full Ultra, and the settings start at Medium. VSync and HDR Output are new.
 - Enhanced Graphics Mode: it always draws the best texture filtering and detail, models that hold their detail, and frames on the display's refresh unless VSync is off, whatever the Graphics settings say.
 - Enhanced Graphics Mode: Screen Brightness scales the whole picture alike.
-
 - Better Lighting: a Reflective Water box draws the world's water as water, with ripples, reflections of the sky and the land and a bed seen through it, without an art pack. The land and the Remastered sky are drawn with it, from the game's own pictures.
 - Better Lighting: the water has waves as large as it is, the sea's swell and surf, a lake's chop and hardly any on a river; foam gathers along the shore and on the crests, and the sun's light ripples over a shallow bed.
 - Better Lighting: near the camera, a body moving through the water stirs it, and the waves spread, cross, meet the shore and die away. Graphics without compute shaders ring the water round a body standing in it instead, as before.

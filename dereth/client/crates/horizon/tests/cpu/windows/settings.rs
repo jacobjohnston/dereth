@@ -20,6 +20,7 @@ use crate::Harness;
 /// The Display page, scrolled to its end, with the device `hifi` reports and every box off.
 fn client_page(#[cfg(feature = "hifi")] hifi: Availability) -> (Harness, GameState) {
     store::init();
+    fidelity::note_art_pack();
     for o in &fidelity::OPTIONS {
         store::set_value(o.name, PrefValue::Bool(false));
     }

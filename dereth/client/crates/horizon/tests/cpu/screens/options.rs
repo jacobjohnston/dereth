@@ -372,7 +372,7 @@ fn the_client_page_s_slow_down_in_the_background_box_turns_the_option_off_and_on
     store::clear();
 }
 
-/// The Client page has Status Bar Colors and Large Status Bar Numbers under Display, one after
+/// The Display tab has Status Bar Colors and Large Status Bar Numbers under Display, one after
 /// the other just before the Performance Panel; a choice from the first's list and a click on
 /// the second's box set the options at once.
 ///
@@ -382,7 +382,7 @@ fn the_client_page_s_status_bar_rows_stand_before_the_performance_panel_and_set_
     use dereth_client_contract::options::{performance, status_bars};
     store::init();
     let state = in_world();
-    let mut h = options_on("Client", &state);
+    let mut h = options_on("Display", &state);
     scroll_to(&mut h, &state, performance::CAPTION);
     scroll_to(&mut h, &state, status_bars::COLORS_CAPTION);
     let colors = control(&h, status_bars::COLORS_CAPTION);

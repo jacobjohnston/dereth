@@ -2793,6 +2793,7 @@ name = "empyrean-testkit"
 version = "0.3.10"
 dependencies = [
  "dereth-assets",
+ "dereth-client-model",
  "dereth-client-net",
  "dereth-dat",
  "dereth-network-conformance",

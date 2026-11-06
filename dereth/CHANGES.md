@@ -79,7 +79,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: objects keep their whole shape out to the edge of the loaded blocks, without retail's simpler stand-ins far off.
 - Enhanced Graphics: a Render Scale menu draws the world at 85%, 75%, 67% or 50% of the screen's pixels each way, for a higher frame rate on large screens. On a Mac MetalFX rebuilds the picture at full size. Anti-Aliasing stays on below 100%, and pictures are read for the full frame.
 - Enhanced Graphics: below 100% Render Scale, Windows and Linux rebuild the picture at full size from the frames before it too, and sharpen it, so it is far less soft than enlarged. A frame that cannot be rebuilt, the first after a cut, is enlarged along its edges and sharpened.
-- Horizon: an administrator has an Admin window (Ctrl+Shift+A, or Admin on the System menu) whose buttons send the server's admin commands, and a Teleport button on the map.
+- Horizon: an administrator has an Admin window (Ctrl+Shift+A, Cmd+Shift+A on a Mac, or Admin on the System menu) whose buttons send the server's admin commands, and a Teleport button on the map.
 
 ## 0.4.14 (2026-11-05)
 

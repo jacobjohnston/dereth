@@ -838,6 +838,14 @@ pub(super) fn publish(draw: &SceneDraw, sh: &mut Shadow, ws: &WorldState, gpu: &
     let mut frame = snapshot(draw, ws, stamp, (width, height), sh, reuse);
     frame.brightness = gpu.gamma();
     frame.hdr_headroom = dereth_render::wgpu::hdr_headroom();
+    frame.god_rays = u8::try_from(
+        draw.cfg
+            .render
+            .fidelity
+            .effective(FidelityFeature::GodRays)
+            .min(3),
+    )
+    .unwrap_or(0);
     // The slots holding the retail pictures the pack's materials stand for, as they are now.
     frame.material_slots.clear();
     if frame.materials.is_some() {

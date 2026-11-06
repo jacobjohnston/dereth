@@ -43,7 +43,7 @@ use crate::shared::camera::HEIGHT_UP;
 use crate::shared::pack_image;
 use crate::snapshot::{
     HifiArtPack, HifiCoverPatch, HifiGroundCover, HifiPackImage, HifiPackMaterial,
-    HifiPackPlacement, TREE_REACH,
+    HifiPackPlacement,
 };
 use crate::{
     Caps, DrawAction, DrawNote, HifiError, HifiFrame, HifiSettings, Mark, ReplayFilter, SkipRule,
@@ -198,8 +198,6 @@ struct State {
 #[derive(Debug)]
 struct GpuModel {
     lods: Vec<GpuLod>,
-    /// Cut-out growth: a tree, whose distance the player chooses.
-    foliage: bool,
     /// Its height and how much the wind moves it.
     sway: (f32, f32),
     /// The bounding sphere, model space.
@@ -1015,7 +1013,6 @@ impl PackGpu {
             });
             models.push(GpuModel {
                 lods,
-                foliage: model.foliage,
                 sway: (model_height(model), model.wind),
                 bounds: model.bounds,
                 proxy,
@@ -1157,10 +1154,6 @@ pub fn levels_at(lods: &[f32], distance: f32, scale: f32, band: f32) -> Vec<(usi
 /// A model's levels the view draws: their places among its levels, and how far each is drawn.
 type ShownLevels = (Vec<usize>, Vec<f32>);
 
-/// How far a distant tree is sunk into the ground, meters a meter of its distance from the eye:
-/// the landscape's mesh is coarser the farther it lies, and a tree must not float over it.
-const DISTANT_SINK: f32 = 0.0015;
-
 /// `percent` as a share, a frame's 0 for the whole distance.
 fn share_of(percent: u32) -> f32 {
     if percent == 0 {
@@ -1223,29 +1216,6 @@ pub fn cover_stands(p: &HifiPackPlacement, far: f32, distances: &[f32], share: f
     #[allow(clippy::cast_precision_loss)]
     let unit = (h >> 8) as f32 / (1u32 << 24) as f32;
     unit < (1.0 - ((far - thick) / (end - thick)).min(1.0)).powi(2)
-}
-
-/// The levels `distances` draws at `far` meters for a model scaled `scale`, no farther than `limit`
-/// meters however large it is.
-#[must_use]
-pub fn levels_within(
-    distances: &[f32],
-    far: f32,
-    scale: f32,
-    band: f32,
-    limit: f32,
-) -> Vec<(usize, f32, f32)> {
-    // The first level that reaches the limit, or nearly, is the last drawn, and fades out at it.
-    let end = limit / scale.max(0.05);
-    let last = distances
-        .iter()
-        .position(|d| *d * (1.0 + band) >= end)
-        .unwrap_or(distances.len().saturating_sub(1));
-    let mut capped = distances.get(..=last).unwrap_or(distances).to_vec();
-    if let Some(d) = capped.last_mut() {
-        *d = end;
-    }
-    levels_at(&capped, far, scale, band)
 }
 
 /// Note the plant or tree `p` at each of its `chosen` levels, sunk `sink` meters.
@@ -1432,7 +1402,6 @@ impl State {
         let eye = frame.camera.eye;
         let band = lod_band();
         let only = lod_only();
-        let tree_share = share_of(frame.tree_distance);
         for t in &frame.terrain {
             let Some((_, _, placements)) = self.blocks.get(&t.block) else {
                 continue;
@@ -1458,12 +1427,6 @@ impl State {
                 let far = (t.origin + p.origin).distance(eye);
                 let levels = match only {
                     Some(k) => vec![(k.min(m.lods.len().saturating_sub(1)), 0.0, 1.0)],
-                    None if m.foliage && tree_share < 1.0 => {
-                        levels_within(&distances, far, p.scale, band, TREE_REACH * tree_share)
-                            .into_iter()
-                            .map(|(k, lo, hi)| (shown[k], lo, hi))
-                            .collect()
-                    }
                     None => levels_at(&distances, far, p.scale, band)
                         .into_iter()
                         .map(|(k, lo, hi)| (shown[k], lo, hi))
@@ -1487,7 +1450,7 @@ impl State {
         }
     }
 
-    /// The ground cover's plants and the distant trees for `frame`: only the patches within reach
+    /// The ground cover's plants for `frame`: only the patches within reach
     /// and in the view are looked into, and each fades out past its last level as a model does.
     /// They cast no shadows: under the crowns and the sun they would cost the most and show the
     /// least.
@@ -1511,9 +1474,7 @@ impl State {
         } else {
             HashMap::new()
         };
-        let trees = of_blocks(frame.distant_trees.as_ref());
         let cover_share = share_of(frame.ground_cover_distance);
-        let tree_limit = TREE_REACH * share_of(frame.tree_distance);
         // ORDER-OK: only looked up, by model.
         let mut levels: HashMap<usize, ShownLevels> = HashMap::new();
         // ORDER-OK: only looked up, by model.
@@ -1541,29 +1502,6 @@ impl State {
                         .or_insert_with(|| cover_levels(distances, cover_share));
                     let chosen = levels_at(reach, far, p.scale, band);
                     push_placed(&mut placed, m, model, shown, chosen, p, t.origin, 0.0);
-                }
-            }
-            // A block whose own objects stand in the world draws its own trees.
-            if self.blocks.get(&t.block).is_some_and(|b| b.1) {
-                continue;
-            }
-            for patch in trees.get(&t.block).map_or(&[][..], |p| p.as_slice()) {
-                let middle = t.origin + patch.centre;
-                if middle.distance(eye) - patch.radius > tree_limit
-                    || !sphere_seen(&planes, middle, patch.radius)
-                {
-                    continue;
-                }
-                for p in &patch.plants {
-                    let Some(&model) = gpu.by_id.get(&p.id) else {
-                        continue;
-                    };
-                    let m = &gpu.models[model];
-                    let (shown, distances) = levels.entry(model).or_insert_with(|| shown_levels(m));
-                    let far = (t.origin + p.origin).distance(eye);
-                    let chosen = levels_within(distances, far, p.scale, band, tree_limit);
-                    let sink = far * DISTANT_SINK;
-                    push_placed(&mut placed, m, model, shown, chosen, p, t.origin, sink);
                 }
             }
         }
@@ -2153,16 +2091,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tree_is_drawn_no_farther_than_the_limit_however_it_is_scaled_and_fades_out_at_it() {
-        let d = [60.0, 180.0, f32::INFINITY];
-        // A tree scaled three times over still stops at the limit.
-        assert!(levels_within(&d, 200.0, 3.0, 0.15, 144.0).is_empty());
-        assert!(!levels_within(&d, 100.0, 3.0, 0.15, 144.0).is_empty());
-        // Near the limit it fades: its one level keeps only part of the dither.
-        let fading = levels_within(&d, 144.0, 1.0, 0.15, 144.0);
-        assert_eq!(fading.len(), 1);
-        assert!(fading[0].1 > 0.0, "{fading:?}");
-        // No share of the frame's means the whole distance.
+    fn no_share_of_the_frames_means_the_whole_distance() {
         assert_eq!(share_of(0), 1.0);
         assert_eq!(share_of(250), 2.5);
     }

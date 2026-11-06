@@ -15,11 +15,26 @@ pre-release leaves it for the final release, and its notes show it as it is);
 ## Unreleased
 
 - Better Lighting: an art pack can plant grass and low plants over the land, and a Ground Cover menu chooses how far they are drawn, from 0.5x to 5x, or Off.
-- Better Lighting: a Tree Draw Distance menu chooses how far an art pack's trees are drawn, from 0.5x to 5x.
 - Better Lighting: the wind moves an art pack's trees and plants, and No Wind holds them still.
 - Weather: a storm's gale bends an art pack's trees and grass hard downwind and thrashes them in its gusts.
 - Weather: about one rainy day in eight is now a thunderstorm on your screen, with lightning and its thunder rolling in a few seconds later, a gale that slants heavier rain across the sky, and darker clouds. It is drawn by this client alone; @weather storm (or /weather storm) brings one on at any time.
 - Weather Sounds: rain now patters and hisses, harder in a storm with the wind roaring in its gusts and muffled indoors, made as it plays so it never repeats. A new Weather Sounds row in the sound options sets how loud the rain, the wind and the thunder are.
+
+## 0.4.14 (2026-11-05)
+
+## 0.4.13 (2026-11-05)
+
+- Classic: resting the pointer on a button, bar or slot says what it does.
+- Refused stances and emotes now say why.
+- Launch worlds: Classic's spellbook, chat menu and messages match the 1999 client.
+- Web: the launcher opens much faster, fetching the game only when you play.
+- The client now updates on its own, apart from the launcher.
+- Launch worlds: the Charge bar and each spell's duration range.
+- Fixed spell components missing from the Components tab when they arrived before their pack.
+
+- macOS: Intel Macs are no longer supported; Apple silicon only.
+- Better Lighting: no more white line across things standing in water.
+- Fixed a right-drag begun away from the window's middle throwing the camera across.
 
 ## 0.4.12 (2026-11-03)
 
@@ -41,6 +56,9 @@ pre-release leaves it for the final release, and its notes show it as it is);
 ## 0.4.9 (2026-11-01)
 
 - Launcher: each realm lists only its own game's worlds.
+- Commands, help, travel routes and the character sheet follow the systems the world says it has.
+- Launcher: 1999 data files are their own kind, which Launch worlds need.
+- Launcher: a world shows its era and what it changes, and hosting offers the systems you'd look for by name.
 
 ## 0.4.8 (2026-10-28)
 

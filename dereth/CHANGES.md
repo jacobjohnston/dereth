@@ -24,6 +24,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - macOS: the window can be dragged to any size, and it opens at the size it last closed at.
 - macOS: Command takes the place of Control for shortcuts, copy and paste among them, and the key bindings pages show it as Cmd.
 - macOS: the client draws with Metal directly by default, and can use Game Mode.
+- Better Lighting: Retail Look and No Slope Materials say so when no art pack is open.
 
 ## 0.4.14 (2026-11-05)
 

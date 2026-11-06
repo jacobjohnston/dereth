@@ -91,3 +91,5 @@ impl Harness {
         );
     }
 }
+#[cfg(feature = "hifi")]
+mod ui_shots;

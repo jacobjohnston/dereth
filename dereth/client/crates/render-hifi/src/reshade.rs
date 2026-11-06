@@ -95,6 +95,16 @@ pub struct ReshadePlan {
     pub interiors: Vec<Range<u32>>,
 }
 
+impl ReshadePlan {
+    /// Whether the re-shaded replay of the opaque span reaches a mark at command `at`: a replay
+    /// also hands over the marks that close it. With nothing opaque drawn after the first object
+    /// pass begins, that pass's mark stands on the span's very end.
+    #[must_use]
+    pub fn replays_mark_at(&self, at: u32) -> bool {
+        self.opaque.start <= at && at <= self.opaque.end
+    }
+}
+
 /// The rooms a frame draws once it steps indoors from the outdoors: the depth is cleared, the
 /// rooms' openings are stamped back into it, and the rooms and what stands in them are drawn over
 /// the outdoors.

@@ -1,8 +1,8 @@
 //! How far the lamps light the world and show their glow, Light Draw Distance: an experimental
-//! menu after the effects' boxes, a share of the distance they reach with nothing changed, drawn
-//! inside the better lighting. It is registered with them ([`super::fidelity::register`]); the
-//! profile keeps a share the player chose, and leaves out one still at its default
-//! ([`super::fidelity::left_out_of_save`]).
+//! menu among the effects' rows ([`super::fidelity::MENUS`]), a share of the distance they reach
+//! at 1x, drawn inside the better lighting. It is registered with them
+//! ([`super::fidelity::register`]); the profile keeps a share the player chose, and leaves out one
+//! still at its default ([`super::fidelity::left_out_of_save`]).
 
 use crate::options::names::fidelity::LIGHT_DRAW_DISTANCE;
 use crate::view::PrefValue;
@@ -18,8 +18,8 @@ pub const NOTE: &str = "How far lamps, flames and an art pack's lights light the
 /// The shares the menu offers, in percent, nearest first.
 pub const CHOICES: [u32; 8] = [50, 75, 100, 150, 200, 300, 400, 500];
 
-/// The share until the player changes it: the whole distance.
-pub const DEFAULT: i32 = 100;
+/// The share until the player changes it, as the Medium preset has it.
+pub const DEFAULT: i32 = 150;
 
 /// The least share.
 pub const LEAST: u32 = 50;
@@ -114,12 +114,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_menu_offers_half_to_five_times_the_distance_with_the_whole_its_default() {
+    fn the_menu_offers_half_to_five_times_the_distance_with_one_and_a_half_its_default() {
         let rows = choice_rows(LIGHT_DRAW_DISTANCE).expect("the menu");
         let shares: Vec<i32> = rows.iter().map(|c| c.value).collect();
         assert_eq!(shares, [50, 75, 100, 150, 200, 300, 400, 500]);
-        assert_eq!(rows[2].label, "1x (Default)");
-        assert_eq!(rows[3].label, "1.5x");
+        assert_eq!(rows[2].label, "1x");
+        assert_eq!(rows[3].label, "1.5x (Default)");
         assert!(choice_rows("Fidelity.GodRays").is_none());
     }
 
@@ -128,15 +128,15 @@ mod tests {
         let read = |raw| parse_value(LIGHT_DRAW_DISTANCE, raw);
         assert_eq!(read(" 300 % "), Some(300));
         assert_eq!(read("1.5x"), Some(150));
-        assert_eq!(read("1x (Default)"), Some(100));
+        assert_eq!(read("1.5x (Default)"), Some(150));
         assert_eq!(read("6x"), None);
         assert_eq!(read("49"), None);
         assert_eq!(read("501"), None);
         assert_eq!(read("far"), None);
         assert_eq!(parse_value("Fidelity.GodRays", "100"), None);
         assert_eq!(
-            convert_to_string(LIGHT_DRAW_DISTANCE, &PrefValue::Int(150)).as_deref(),
-            Some("1.5x")
+            convert_to_string(LIGHT_DRAW_DISTANCE, &PrefValue::Int(200)).as_deref(),
+            Some("2x")
         );
     }
 }

@@ -60,6 +60,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: the flat, hard-edged sprites of light are gone, in favour of real light in their colour, and shadows from a room's lights now have soft edges.
 - Better Lighting: an art pack can give an object a light of its own, shining day and night with a soft glow in the air about it.
 - Better Lighting: Light Draw Distance chooses how far lamps, flames and art pack lights shine and glow, from 0.5x to 5x, and they now fade out in the distance instead of going out at once.
+- Enhanced Graphics: Light Draw Distance starts at 1.5x, as the Medium preset has it, and the Quality Presets set it from 1x on Low to 5x on Ultra. Flame Flicker stays on until you untick it. Both leave the page with Enhanced Graphics Mode off.
 
 ## 0.4.14 (2026-11-05)
 

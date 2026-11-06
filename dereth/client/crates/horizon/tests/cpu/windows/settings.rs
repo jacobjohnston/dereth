@@ -1010,3 +1010,19 @@ fn draw_the_effects_section_for_a_person_to_look_at() {
         eprintln!("wrote {}", out.display());
     }
 }
+
+/// Light Draw Distance starts at 1.5x, and is on the page only with Enhanced Graphics Mode on.
+#[test]
+#[cfg(feature = "hifi")]
+fn the_light_draw_distance_starts_at_one_and_a_half_and_shows_only_with_enhanced_graphics() {
+    let lights = dereth_client_contract::options::light_distance::CAPTION;
+    let (mut h, state) = client_page(READY);
+    assert_eq!(
+        store::inq_value(names::LIGHT_DRAW_DISTANCE),
+        Some(PrefValue::Int(150))
+    );
+    assert!(!on_the_page(&mut h, &state, lights));
+    tick(&mut h, &state, caption(names::LIGHTING));
+    h.frame(&state);
+    assert!(on_the_page(&mut h, &state, lights));
+}

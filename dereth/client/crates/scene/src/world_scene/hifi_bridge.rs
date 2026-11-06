@@ -21,15 +21,16 @@
 use std::collections::HashMap;
 
 use dereth_client_runtime::clouds::{CloudOption, Clouds, OPTIONS as CLOUD_OPTIONS};
+use dereth_client_runtime::moon::{calendar_days, Moons, MOONS};
 use dereth_client_runtime::render_prefs::{FidelityFeature, FidelityPreferences};
 use dereth_render_hifi::snapshot::HifiPackLight;
 use dereth_render_hifi::snapshot::{
     AskedFall, HifiArtPack, HifiBlockLevels, HifiCamera, HifiDrawnGround, HifiFog, HifiFrame,
     HifiGround, HifiGroundKnobs, HifiGroundMaterial, HifiGroundTile, HifiLamp, HifiLevelRun,
-    HifiLight, HifiMaterials, HifiPackBlock, HifiPackImage, HifiPackLod, HifiPackMaterial,
-    HifiPackModel, HifiPackPlacement, HifiPackPrimitive, HifiSky, HifiSkyCard, HifiSkyDeck,
-    HifiSkyObject, HifiSlopeMaterials, HifiStaticBatch, HifiStaticBlock, HifiTerrainBlock,
-    HifiTextureMaterial, HifiWater, HifiWorldGround, LampSource,
+    HifiLight, HifiMaterials, HifiMoon, HifiPackBlock, HifiPackImage, HifiPackLod,
+    HifiPackMaterial, HifiPackModel, HifiPackPlacement, HifiPackPrimitive, HifiRoomPlacement,
+    HifiSky, HifiSkyCard, HifiSkyDeck, HifiSkyObject, HifiSlopeMaterials, HifiStaticBatch,
+    HifiStaticBlock, HifiTerrainBlock, HifiTextureMaterial, HifiWater, HifiWorldGround, LampSource,
 };
 use dereth_render_hifi::{DebugView, HifiRenderer, HifiSettings, Level};
 use dereth_terrain::land::drawn::{Knob, Knobs};
@@ -46,7 +47,20 @@ const FEED_BYTES_PER_FRAME: usize = 4 << 20;
 /// detail levels its objects last stood at.
 #[derive(Debug, Default)]
 pub(crate) struct Shadow {
+    /// How far a storm has come in, eased frame to frame, and where that stood this frame.
+    storm: dereth_render_hifi::passes::weather::storm::Ease,
+    storm_strength: f32,
+    /// The storm's thunder on its way.
+    thunder: dereth_render_hifi::passes::weather::storm::Thunder,
+    /// How the weather stands for its sound, eased as the Weather effect eases it, with the
+    /// clock it last stepped at.
+    fall: dereth_render_hifi::passes::weather::Fall,
+    fall_clock: Option<f64>,
+    /// What that asks of the weather's sound.
+    pub(super) weather_sound: dereth_audio::WeatherSound,
     applied: Option<(FidelityPreferences, bool)>,
+    /// Dynamic Resolution's state.
+    dynamic_scale: DynamicScale,
     pub(super) now: f64,
     previous_view_projection: Option<glam::Mat4>,
     sent: HashMap<u16, u32>,
@@ -78,6 +92,17 @@ pub(crate) struct Shadow {
     far_trees: Option<(
         u64,
         std::sync::Arc<dereth_render_hifi::snapshot::HifiFarTrees>,
+    )>,
+    /// The cards baked from retail objects as the presentation draws them, made again as more
+    /// are baked (by how many there are).
+    far_cards: Option<(
+        usize,
+        std::sync::Arc<dereth_render_hifi::snapshot::HifiFarCards>,
+    )>,
+    /// The ground cover as the presentation draws it, made once per change (by its serial).
+    ground_cover: Option<(
+        u64,
+        std::sync::Arc<dereth_render_hifi::snapshot::HifiGroundCover>,
     )>,
     /// The forest cover as the presentation draws it, made once per cover (by its serial).
     cover: Option<(
@@ -276,6 +301,7 @@ fn pack_for_presentation(
             .map(|m| HifiPackModel {
                 id: m.id.0,
                 foliage: m.foliage,
+                wind: m.wind,
                 lods: m
                     .lods
                     .iter()
@@ -311,6 +337,16 @@ fn pack_for_presentation(
             })
             .collect(),
         images: pack.images.iter().map(picture).collect(),
+        moons: pack
+            .moons
+            .iter()
+            .map(|m| HifiMoon {
+                object: m.object.0,
+                surface: picture(&m.surface),
+                lights: m.lights.as_ref().map(picture),
+                clouds: m.clouds.as_ref().map(picture),
+            })
+            .collect(),
     }
 }
 
@@ -433,6 +469,7 @@ fn ground_knobs(k: &Knobs) -> HifiGroundKnobs {
             ripple_speed: k.get(Knob::RippleSpeed),
             ripple_strength: k.get(Knob::RippleStrength),
             calm: k.get(Knob::RippleCalm),
+            far_rough: k.get(Knob::WaterFarRough),
             rings: k.get(Knob::WaterRings),
             reflection: k.get(Knob::WaterReflection),
             shore_soft: k.get(Knob::ShoreSoft),
@@ -440,6 +477,10 @@ fn ground_knobs(k: &Knobs) -> HifiGroundKnobs {
             bed: ground(Knob::WaterBed),
             bank_green: k.get(Knob::BankGreen),
             bank_grass: ground(Knob::BankGrass),
+            waves: k.get(Knob::WaterWaves),
+            foam: k.get(Knob::WaterFoam),
+            caustics: k.get(Knob::WaterCaustics),
+            rain: k.get(Knob::WaterRain),
         }),
         // LINT-OK: a view number, 0 to 4.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -451,6 +492,33 @@ fn ground_knobs(k: &Knobs) -> HifiGroundKnobs {
 /// each block's list is handed over as it is.
 pub(crate) type FarTree = dereth_render_hifi::snapshot::HifiFarTree;
 
+/// The plants of one outside cell, as the presentation draws them: the ground cover's thread
+/// writes them so, and each block's list is handed over as it is.
+pub(crate) type CoverPatch = dereth_render_hifi::snapshot::HifiCoverPatch;
+/// One plant of a patch, placed as an art pack's model is.
+pub(crate) type CoverPlacement = dereth_render_hifi::snapshot::HifiPackPlacement;
+
+/// How far the player asks an art pack's ground cover to be drawn, a share of the whole distance,
+/// percent: the choice while the better lighting it is offered for is drawn, and the whole
+/// distance otherwise. The scenery past the blocks round the eye follows the landscape's draw
+/// distance ([`scenery_reach`]).
+pub(crate) fn ground_cover_distance(prefs: &FidelityPreferences) -> u32 {
+    let lit = settings(prefs, false).lighting.is_on();
+    match prefs.effective(FidelityFeature::GroundCoverDrawDistance) {
+        share @ 50.. if lit => share,
+        _ => 100,
+    }
+}
+
+/// How far the far objects are drawn, meters: as far as the landscape's `land_radius` blocks
+/// round the eye reach.
+pub(crate) fn scenery_reach(land_radius: u32) -> f32 {
+    // LINT-OK: a block count, far inside f32's exact range.
+    #[allow(clippy::cast_precision_loss)]
+    let blocks = land_radius as f32 + 0.5;
+    blocks * dereth_terrain::land::drawn::BLOCK_METERS
+}
+
 /// How the far trees and the forest cover are drawn, from the knobs.
 fn far_knobs(k: &Knobs) -> dereth_render_hifi::snapshot::HifiFarKnobs {
     dereth_render_hifi::snapshot::HifiFarKnobs {
@@ -461,6 +529,49 @@ fn far_knobs(k: &Knobs) -> dereth_render_hifi::snapshot::HifiFarKnobs {
         soften: k.get(Knob::TreeSoften),
         cover: k.get(Knob::ForestCover),
         canopy: k.get(Knob::ForestCanopy),
+    }
+}
+
+/// A card baked from a retail object as the presentation draws it: a model of its one level of
+/// pictures, naming its colour picture 0 and its normal picture 1.
+fn far_card(c: &super::far_cards::RetailCard) -> dereth_render_hifi::snapshot::HifiFarCard {
+    let lod = &c.card.lod;
+    dereth_render_hifi::snapshot::HifiFarCard {
+        model: HifiPackModel {
+            id: c.id,
+            foliage: false,
+            wind: 0.0,
+            lods: vec![HifiPackLod {
+                distance: lod.distance,
+                views: lod.views.map(|v| (v.count, v.columns)),
+                shadows_only: false,
+                primitives: lod
+                    .primitives
+                    .iter()
+                    .map(|p| HifiPackPrimitive {
+                        vertices: std::sync::Arc::clone(&p.vertices),
+                        indices: std::sync::Arc::clone(&p.indices),
+                        material: HifiPackMaterial {
+                            base_color: p.material.base_color,
+                            base_color_image: Some(0),
+                            normal_image: Some(1),
+                            normal_scale: p.material.normal_scale,
+                            metal_rough_image: None,
+                            metallic: p.material.metallic,
+                            roughness: p.material.roughness,
+                            occlusion_image: None,
+                            occlusion_strength: p.material.occlusion_strength,
+                            alpha_cutoff: p.material.alpha_cutoff,
+                            double_sided: p.material.double_sided,
+                        },
+                    })
+                    .collect(),
+            }],
+            bounds: c.bounds,
+            glow: (0.0, 0.0),
+        },
+        colour: picture(&c.card.colour),
+        normal: picture(&c.card.normal),
     }
 }
 
@@ -483,17 +594,24 @@ fn far_trees_for_presentation(
     }
 }
 
-/// The clouds at Cloud Detail's stored level `level`: Low draws the steps knob's count, Medium
-/// and High two and four times it (no more than the knob's own most), and Off retail's deck.
-fn cloud_detail(sky: &mut dereth_render_hifi::snapshot::HifiSkyKnobs, level: u32) {
-    match dereth_client_contract::options::cloud_detail::step_factor(level) {
-        Some(times) => sky.cloud_steps = (sky.cloud_steps * times).min(MOST_CLOUD_STEPS),
-        None => sky.clouds = false,
+/// The ground cover within reach as the presentation draws it.
+fn ground_cover_for_presentation(
+    cover: &super::ground_cover::PatchField,
+) -> dereth_render_hifi::snapshot::HifiGroundCover {
+    let blocks = cover
+        .within()
+        .map(|((bx, by), list)| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            // LINT-OK: block indices are 0..=0xFE. Not a float conversion.
+            let id = ((bx as u16) << 8) | (by as u16);
+            (id, std::sync::Arc::clone(list))
+        })
+        .collect();
+    dereth_render_hifi::snapshot::HifiGroundCover {
+        serial: cover.serial,
+        blocks,
     }
 }
-
-/// The most steps Cloud Detail draws the clouds with: the steps knob's own most.
-const MOST_CLOUD_STEPS: u32 = 64;
 
 /// The Remastered sky as the presentation reads it, while its knob has it on.
 fn sky_knobs(k: &Knobs) -> Option<dereth_render_hifi::snapshot::HifiSkyKnobs> {
@@ -519,6 +637,8 @@ fn sky_knobs(k: &Knobs) -> Option<dereth_render_hifi::snapshot::HifiSkyKnobs> {
             moon_size: k.get(Knob::MoonSize),
             stars: k.get(Knob::Stars),
             star_twinkle: k.get(Knob::StarTwinkle),
+            // Set from the moons' calendar, or `@moon`, once the world is known.
+            ..dereth_render_hifi::snapshot::HifiSkyKnobs::default()
         })
 }
 
@@ -547,6 +667,24 @@ fn with_asked_clouds(k: &Knobs, asked: &Clouds) -> Knobs {
     }
     k
 }
+
+/// How much of each moon's face the presentation draws lit `days` into the calendar, by its
+/// graphics object: what `@moon` forces, or the calendar's.
+fn moon_phases(asked: &Moons, days: f64) -> [(u32, f32); 2] {
+    MOONS.map(|m| (m.gfx(), asked.phase(m, days)))
+}
+
+/// The clouds at Cloud Detail's stored level `level`: Low draws the steps knob's count, Medium
+/// and High two and four times it (no more than the knob's own most), and Off retail's deck.
+fn cloud_detail(sky: &mut dereth_render_hifi::snapshot::HifiSkyKnobs, level: u32) {
+    match dereth_client_contract::options::cloud_detail::step_factor(level) {
+        Some(times) => sky.cloud_steps = (sky.cloud_steps * times).min(MOST_CLOUD_STEPS),
+        None => sky.clouds = false,
+    }
+}
+
+/// The most steps Cloud Detail draws the clouds with: the steps knob's own most.
+const MOST_CLOUD_STEPS: u32 = 64;
 
 /// The light on an art pack's art as the presentation reads it.
 fn pack_light(k: &Knobs) -> HifiPackLight {
@@ -666,6 +804,231 @@ fn drawn_for_presentation(
     })
 }
 
+/// Whether flames flicker: unless the player holds them steady.
+fn flame_flicker(prefs: &FidelityPreferences) -> bool {
+    prefs.effective(FidelityFeature::NoFlameFlicker) == 0
+}
+
+/// How far the player asks the lamps to light the world and show their glow, a share of the
+/// whole distance, percent: the choice while the better lighting is drawn, the whole otherwise.
+fn light_distance(prefs: &FidelityPreferences) -> u32 {
+    match prefs.effective(FidelityFeature::LightDrawDistance) {
+        share @ 50.. if settings(prefs, false).lighting.is_on() => share,
+        _ => 100,
+    }
+}
+
+/// How far from a lamp a room's light counts as that lamp's, meters: a little past the data's
+/// placeholder for a light, two meters out on both level axes.
+const LAMP_REACH: f32 = 3.0;
+
+/// A lamp in a room, render space.
+struct RoomLamp {
+    at: glam::Vec3,
+    /// If it is a flame, its number and reach.
+    flame: Option<(u32, f32)>,
+}
+
+/// A sprite of light in a room, render space, or the light an art pack gives in its place.
+struct RoomSprite {
+    at: glam::Vec3,
+    color: [f32; 3],
+    intensity: f32,
+    falloff: f32,
+    /// If it moves as a flame, the number and reach it flickers by.
+    flame: Option<(u32, f32)>,
+    /// Whether an art pack gave it.
+    given: bool,
+}
+
+/// An art pack's lights of one object standing near enough each other to be one light.
+struct Gathered<'p> {
+    given: &'p dereth_assets::art_pack::ManifestLight,
+    object: dereth_primitives::DataId,
+    seed: u32,
+    places: Vec<glam::Vec3>,
+}
+
+impl Gathered<'_> {
+    fn middle(&self) -> glam::Vec3 {
+        #[allow(clippy::cast_precision_loss)] // a handful of places
+        let n = self.places.len() as f32;
+        self.places.iter().copied().sum::<glam::Vec3>() / n
+    }
+
+    /// The one lamp they make: at their middle, as bright as all of them, and as large as they
+    /// stand from their middle.
+    fn lamp(&self) -> HifiLamp {
+        let middle = self.middle();
+        let mut lamp = pack_lamp(self.given, middle, self.seed);
+        #[allow(clippy::cast_precision_loss)] // a handful of places
+        let n = self.places.len() as f32;
+        lamp.intensity *= n;
+        let spread = self
+            .places
+            .iter()
+            .map(|p| (*p - middle).length())
+            .fold(0.0, f32::max);
+        if let Some(p) = lamp.pack.as_mut() {
+            p.size = p.size.max(spread);
+        }
+        lamp.falloff += spread;
+        lamp
+    }
+}
+
+/// Adds the light `given` gives `object` at `at` to the one it gathers with in `gathered`, or as one
+/// of its own.
+fn gather<'p>(
+    gathered: &mut Vec<Gathered<'p>>,
+    given: &'p dereth_assets::art_pack::ManifestLight,
+    object: dereth_primitives::DataId,
+    at: glam::Vec3,
+    seed: u32,
+) {
+    if given.gather > 0.0 {
+        if let Some(g) = gathered.iter_mut().find(|g| {
+            g.object == object && g.places.iter().any(|p| (*p - at).length() <= given.gather)
+        }) {
+            g.places.push(at);
+            return;
+        }
+    }
+    gathered.push(Gathered {
+        given,
+        object,
+        seed,
+        places: vec![at],
+    });
+}
+
+/// The light `lights` give `object` standing outdoors (`outdoors`) or in a room, if any.
+fn given_light(
+    lights: &[dereth_assets::art_pack::ManifestLight],
+    object: dereth_primitives::DataId,
+    outdoors: bool,
+) -> Option<&dereth_assets::art_pack::ManifestLight> {
+    lights
+        .iter()
+        .find(|l| l.object == object && l.place.takes(outdoors))
+}
+
+/// The lumens an art pack's light shines with that the presentation takes as a lamp's own
+/// brightness: about a torch's.
+const LUMENS_OF_A_LAMP: f32 = 800.0;
+
+/// The lamp an art pack's light `given` makes standing at `at`, render space, its own number `seed`.
+fn pack_lamp(
+    given: &dereth_assets::art_pack::ManifestLight,
+    at: glam::Vec3,
+    seed: u32,
+) -> HifiLamp {
+    use dereth_assets::art_pack::LightFlicker;
+    HifiLamp {
+        position: at + glam::Vec3::from(given.offset),
+        color: kelvin_colour(given.kelvin),
+        intensity: given.brightness / LUMENS_OF_A_LAMP,
+        falloff: given.reach,
+        source: match given.flicker {
+            LightFlicker::Embers => LampSource::Ember,
+            LightFlicker::Flame | LightFlicker::Steady => LampSource::Authored,
+        },
+        flicker: given.flicker != LightFlicker::Steady,
+        seed,
+        pack: Some(dereth_render_hifi::snapshot::PackLamp {
+            size: given.size,
+            shadows: given.shadows,
+            haze: given.haze,
+            presence: given.presence,
+        }),
+    }
+}
+
+/// The colour of a light at `kelvin`, linear, brightest channel 1: a black body's, as Tanner
+/// Helland's fit gives it in sRGB.
+fn kelvin_colour(kelvin: f32) -> [f32; 3] {
+    use dereth_primitives::num::math::{logf, powf};
+    let t = kelvin.clamp(1000.0, 40000.0) / 100.0;
+    let r = if t <= 66.0 {
+        255.0
+    } else {
+        329.698_73 * powf(t - 60.0, -0.133_204_76)
+    };
+    let g = if t <= 66.0 {
+        99.470_8 * logf(t) - 161.119_57
+    } else {
+        288.122_16 * powf(t - 60.0, -0.075_514_85)
+    };
+    let b = if t >= 66.0 {
+        255.0
+    } else if t <= 19.0 {
+        0.0
+    } else {
+        138.517_73 * logf(t - 10.0) - 305.044_8
+    };
+    let linear = |c: f32| {
+        let c = (c / 255.0).clamp(0.0, 1.0);
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            powf((c + 0.055) / 1.055, 2.4)
+        }
+    };
+    let rgb = [linear(r), linear(g), linear(b)];
+    let peak = rgb[0].max(rgb[1]).max(rgb[2]).max(1e-6);
+    rgb.map(|c| c / peak)
+}
+
+/// The rooms' lamps, their sprites of light and the lights `pack` gives in rooms, their beds of
+/// embers, and whether any room's lamps have been looked for.
+fn room_lamps(
+    draw: &SceneDraw,
+    pack: Option<&Vec<dereth_assets::art_pack::ManifestLight>>,
+) -> (Vec<RoomLamp>, Vec<RoomSprite>, Vec<glam::Vec3>, bool) {
+    use super::hifi_lamps::LampKind;
+    let (mut lamps, mut sprites, mut beds, mut looked) =
+        (Vec::new(), Vec::new(), Vec::new(), false);
+    for block in draw.blocks.values() {
+        for cell in &block.env_cells {
+            looked |= cell.lamps.looked();
+            for l in cell.lamps.placed() {
+                let p = l.position;
+                let at = glam::Vec3::new(block.origin.0 + p.x, block.origin.1 + p.y, p.z);
+                if let Some(given) = pack.and_then(|k| given_light(k, l.object, false)) {
+                    let lamp = pack_lamp(given, at, dereth_render_hifi::flicker::seed_at(p));
+                    sprites.push(RoomSprite {
+                        at: lamp.position,
+                        color: lamp.color,
+                        intensity: lamp.intensity,
+                        falloff: lamp.falloff * 0.75,
+                        flame: lamp.flicker.then_some((lamp.seed, lamp.falloff)),
+                        given: true,
+                    });
+                    continue;
+                }
+                if l.source.kind == LampKind::Sprite {
+                    sprites.push(RoomSprite {
+                        at,
+                        color: l.source.color,
+                        intensity: 1.0,
+                        falloff: l.source.falloff,
+                        flame: None,
+                        given: false,
+                    });
+                }
+                let ember = l.source.kind == LampKind::Ember;
+                if ember {
+                    beds.push(at);
+                }
+                let flame = (l.source.flicker && !ember)
+                    .then(|| (dereth_render_hifi::flicker::seed_at(p), l.source.falloff));
+                lamps.push(RoomLamp { at, flame });
+            }
+        }
+    }
+    (lamps, sprites, beds, looked)
+}
+
 /// The level a box asks of its effect: a ticked box is `on`; a number past 1 (from `--set-at`)
 /// keeps the level it names.
 fn level_of(raw: u32, on: Level) -> Level {
@@ -711,10 +1074,20 @@ pub(crate) fn settings(prefs: &FidelityPreferences, rays: bool) -> HifiSettings 
         // An art pack's models are drawn for the light per pixel, unless the retail look is
         // asked for; so is the anti-aliasing, unless it is turned off.
         art_pack: lit && raw(FidelityFeature::RetailLook) == 0,
-        anti_aliasing: lit && raw(FidelityFeature::NoAntiAliasing) == 0,
+        // Below the whole frame it is what rebuilds the picture, so it is not left out there.
+        anti_aliasing: lit
+            && (raw(FidelityFeature::NoAntiAliasing) == 0
+                || (1..100).contains(&raw(FidelityFeature::RenderScale))),
         // And the scree and rock an art pack's ground lays on steep slopes, until they are
         // turned off.
         slope_materials: lit && raw(FidelityFeature::NoSlopeMaterials) == 0,
+        // And the plants an art pack lays over the land, unless the Ground Cover menu leaves
+        // them out.
+        ground_cover: lit
+            && i64::from(raw(FidelityFeature::GroundCoverDrawDistance))
+                != i64::from(dereth_client_contract::options::draw_distance::OFF),
+        // And the wind in its trees and plants, until it is stopped.
+        wind: lit && raw(FidelityFeature::NoWind) == 0,
         // And the damp and slime on a room's surfaces, until they are turned off.
         damp: lit && raw(FidelityFeature::NoDamp) == 0,
         // And a pack's relief on the world's own pictures, at the level asked for.
@@ -724,6 +1097,123 @@ pub(crate) fn settings(prefs: &FidelityPreferences, rays: bool) -> HifiSettings 
             0
         },
         debug: DebugView::from_raw(raw(FidelityFeature::Debug)),
+    }
+}
+
+/// Whether the Reflective Water box is in effect. Its water is drawn inside the better lighting,
+/// and the retail look draws the game's own.
+pub(crate) fn reflective_water(prefs: &FidelityPreferences) -> bool {
+    settings(prefs, false).art_pack && prefs.effective(FidelityFeature::Water) != 0
+}
+
+/// The share of the frame's pixels the world is drawn at, each way, percent: the player's choice
+/// while the better lighting it is offered for is drawn, and all of them otherwise. A Dynamic
+/// render scale starts from all of them ([`follow_the_frame_rate`]).
+pub(crate) fn render_scale(prefs: &FidelityPreferences) -> u32 {
+    match prefs.effective(FidelityFeature::RenderScale) {
+        _ if dynamic_render_scale(prefs) => 100,
+        scale @ 1.. if settings(prefs, false).lighting.is_on() => scale,
+        _ => 100,
+    }
+}
+
+/// Whether the render scale chosen is Dynamic: it moves to hold the frame rate chosen.
+fn dynamic_render_scale(prefs: &FidelityPreferences) -> bool {
+    prefs.effective(FidelityFeature::RenderScale)
+        == dereth_client_contract::options::render_scale::DYNAMIC
+}
+
+/// Dynamic Resolution: the render scale moves down the page's choices while the frame rate is under
+/// its target, and back up, never past the player's Render Scale, while there is room. A rise that
+/// the frame rate could not hold is tried again only after twice as long.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct DynamicScale {
+    /// The share drawn now, while it moves; nought while it follows the player's Render Scale.
+    share: u32,
+    /// Seconds the frame rate has been under, or over, its target.
+    under: f32,
+    over: f32,
+    /// Seconds to wait above the target before the next rise.
+    wait: f32,
+    /// Seconds since the last change, and whether it was a rise.
+    since: f32,
+    rose: bool,
+}
+
+impl DynamicScale {
+    /// How long under the target before a fall, and over it before the first rise, seconds.
+    const FALL_AFTER: f32 = 1.0;
+    const RISE_AFTER: f32 = 5.0;
+    /// How long after a rise a fall counts against it, seconds.
+    const RISE_TESTED: f32 = 3.0;
+
+    /// One frame of `dt` seconds at `fps`, for a `target` frame rate, with the player's `base`
+    /// Render Scale: the share to draw at when it changes.
+    pub(crate) fn step(&mut self, dt: f32, fps: f32, target: f32, base: u32) -> Option<u32> {
+        use dereth_client_contract::options::render_scale::{CHOICES, LEAST};
+        if self.share == 0 || self.share > base {
+            self.share = base;
+            self.wait = Self::RISE_AFTER;
+        }
+        self.since += dt;
+        if fps < target * 0.95 {
+            self.under += dt;
+            self.over = 0.0;
+        } else if fps >= target {
+            self.over += dt;
+            self.under = 0.0;
+        }
+        if self.under >= Self::FALL_AFTER && self.share > LEAST {
+            let lower = CHOICES.iter().copied().find(|c| *c < self.share)?;
+            if self.rose && self.since < Self::RISE_TESTED {
+                self.wait = (self.wait * 2.0).min(120.0);
+            }
+            self.share = lower;
+            self.under = 0.0;
+            self.since = 0.0;
+            self.rose = false;
+            return Some(lower);
+        }
+        if self.over >= self.wait && self.share < base {
+            let higher = CHOICES
+                .iter()
+                .rev()
+                .copied()
+                .find(|c| *c > self.share && *c <= base)?;
+            self.share = higher;
+            self.over = 0.0;
+            self.since = 0.0;
+            self.rose = true;
+            return Some(higher);
+        }
+        None
+    }
+}
+
+/// Keep the render scale to Dynamic Resolution's target, or back on the player's when it is off.
+fn follow_the_frame_rate(draw: &SceneDraw, sh: &mut Shadow, gpu: &mut Gpu) {
+    let prefs = &draw.cfg.render.fidelity;
+    // Only a Dynamic render scale moves, under 100%, to hold its frame rate.
+    let target = if dynamic_render_scale(prefs) {
+        prefs.effective(FidelityFeature::DynamicResolution)
+    } else {
+        0
+    };
+    let base = render_scale(prefs);
+    if target == 0 || !settings(prefs, false).lighting.is_on() {
+        if sh.dynamic_scale.share != 0 {
+            sh.dynamic_scale = DynamicScale::default();
+            gpu.hifi_set_render_scale(base);
+        }
+        return;
+    }
+    let fps = draw.degrade.frame_rate.fps();
+    #[allow(clippy::cast_precision_loss)] // a frame rate of 120 at most
+    let target = target as f32;
+    if fps > 0.0 {
+        if let Some(share) = sh.dynamic_scale.step(1.0 / fps, fps, target, base) {
+            gpu.hifi_set_render_scale(share);
+        }
     }
 }
 
@@ -763,9 +1253,17 @@ pub(super) fn apply_preferences(
     // Before the first poll the presentation is off, as the default preferences have it.
     let last = sh.applied.unwrap_or((FidelityPreferences::default(), rays));
     sh.applied = Some((*prefs, rays));
-    // How frames reach the display is the device's and the next start's, not the presentation's.
-    let drawn = |p: &FidelityPreferences| p.without_presentation_choices();
-    if (drawn(&last.0), last.1) == (drawn(prefs), rays) {
+    // A new render scale needs no new start: it is the frame's size, and the next frame draws at it.
+    if render_scale(prefs) != render_scale(&last.0) {
+        gpu.hifi_set_render_scale(render_scale(prefs));
+    }
+    // How frames reach the display is the device's and the next start's, not the presentation's,
+    // the share drawn is the frame's size and each frame reads the draw distances and the light
+    // draw distance; the settings, the anti-aliasing a render scale keeps on and the ground cover
+    // Off leaves out among them, are the presentation's.
+    let drawn =
+        |p: &FidelityPreferences, rays| (p.without_presentation_choices(), settings(p, rays));
+    if (drawn(&last.0, last.1), last.1) == (drawn(prefs, rays), rays) {
         return Applied::default();
     }
     // A new start: the presentation's retained copies go with its old settings.
@@ -831,12 +1329,54 @@ pub(super) fn lamps_possible(gpu: &Gpu) -> bool {
     gpu.hifi_requested() && device_rays(gpu)
 }
 
+impl Shadow {
+    /// Step the storm to the scene's `now`, toward one when `storms` (the day storms and the
+    /// presentation draws its weather), and return the thunder heard now.
+    pub(super) fn step_storm(
+        &mut self,
+        storms: bool,
+        now: f64,
+    ) -> Vec<dereth_render_hifi::passes::weather::storm::Peal> {
+        self.storm_strength = self.storm.step(storms, now);
+        self.thunder.step(now, self.storm_strength)
+    }
+
+    /// Step the weather's sound to `frame`: the rain the Weather effect draws (none of its snow),
+    /// the storm, its gusts, and whether the viewer is indoors.
+    fn hear_weather(&mut self, frame: &HifiFrame) {
+        use dereth_render_hifi::passes::weather::{falls, snow_share, storm};
+        #[allow(clippy::cast_possible_truncation)] // a frame's step
+        let dt = self
+            .fall_clock
+            .map_or(0.0, |t| (self.now - t).max(0.0) as f32);
+        self.fall_clock = Some(self.now);
+        let drawn = self.draws_weather() && falls(frame);
+        self.fall
+            .step(drawn, snow_share(frame), frame.sky.asked_fall, dt);
+        self.weather_sound = dereth_audio::WeatherSound {
+            rain: self.fall.amount() * (1.0 - self.fall.snow()),
+            storm: self.storm_strength,
+            gust: storm::gust(self.now) * 0.5 + 0.5,
+            indoors: if frame.sky.outdoor { 0.0 } else { 1.0 },
+            gain: 0.0,
+        };
+    }
+
+    /// Whether the presentation draws the weather: it is in use, with the Weather effect on.
+    pub(super) fn draws_weather(&self) -> bool {
+        self.applied
+            .as_ref()
+            .is_some_and(|(prefs, rays)| settings(prefs, *rays).weather.is_on())
+    }
+}
+
 /// Hand the presentation the snapshot of the frame whose world was just drawn, `sh` being what
 /// the bridge remembers between frames. Nothing is built when no presentation is installed.
 pub(super) fn publish(draw: &SceneDraw, sh: &mut Shadow, ws: &WorldState, gpu: &mut Gpu) {
     if renderer(gpu).is_none() {
         return;
     }
+    follow_the_frame_rate(draw, sh, gpu);
     let stamp = gpu.frame_stamp();
     let (width, height) = gpu.size();
     // A presentation that let the blocks' retained geometry go is sent every block's again.
@@ -848,6 +1388,7 @@ pub(super) fn publish(draw: &SceneDraw, sh: &mut Shadow, ws: &WorldState, gpu: &
     }
     let reuse = renderer(gpu).and_then(HifiRenderer::recycle_frame);
     let mut frame = snapshot(draw, ws, stamp, (width, height), sh, reuse);
+    sh.hear_weather(&frame);
     frame.brightness = gpu.gamma();
     frame.hdr_headroom = dereth_render::wgpu::hdr_headroom();
     frame.god_rays = u8::try_from(
@@ -858,6 +1399,8 @@ pub(super) fn publish(draw: &SceneDraw, sh: &mut Shadow, ws: &WorldState, gpu: &
             .min(3),
     )
     .unwrap_or(0);
+    frame.flame_flicker = flame_flicker(&draw.cfg.render.fidelity);
+    frame.light_distance = light_distance(&draw.cfg.render.fidelity);
     // The slots holding the retail pictures the pack's materials stand for, as they are now.
     frame.material_slots.clear();
     if frame.materials.is_some() {
@@ -949,6 +1492,7 @@ fn snapshot(
         // The presentation sets its own jitter.
         jitter: glam::Vec2::ZERO,
         dither: 0.0,
+        mip_bias: 0.0,
     };
 
     // --- the sun, the fog and the sky -----------------------------------------------------
@@ -1030,8 +1574,10 @@ fn snapshot(
             dereth_client_runtime::weather::Weather::Rain => AskedFall::Rain,
             dereth_client_runtime::weather::Weather::Snow => AskedFall::Snow,
             dereth_client_runtime::weather::Weather::Auto
+            | dereth_client_runtime::weather::Weather::Storm
             | dereth_client_runtime::weather::Weather::Clear => AskedFall::Land,
         },
+        storm: sh.storm_strength,
         time_of_day: ws.clock.present_time_of_day,
         year: ws.clock.current_year,
         day: ws.clock.current_day,
@@ -1062,6 +1608,8 @@ fn snapshot(
             falloff: l.info.falloff,
             interior: true,
             burned: false,
+            steady: false,
+            flame: None,
         });
     }
     // Every cell light belongs to a building's or dungeon's own cell.
@@ -1075,6 +1623,8 @@ fn snapshot(
                 falloff: light.info.falloff,
                 interior: true,
                 burned: false,
+                steady: false,
+                flame: None,
             });
         }
     }
@@ -1092,34 +1642,138 @@ fn snapshot(
             falloff: l.info.falloff,
             interior: true,
             burned: true,
+            steady: false,
+            flame: None,
         });
     }
 
     // --- the outdoor lamps -----------------------------------------------------------------
+    // An art pack's light stands in place of what was found at its object.
+    let pack = draw
+        .land
+        .art_pack
+        .as_ref()
+        .map(|p| &p.lights)
+        .filter(|l| !l.is_empty());
     frame.lamps.clear();
+    let mut gathered: Vec<Gathered> = Vec::new();
     for block in draw.blocks.values() {
         for l in block.hifi_lamps.placed() {
             use super::hifi_lamps::LampKind;
             let p = l.position;
+            let at = glam::Vec3::new(block.origin.0 + p.x, block.origin.1 + p.y, p.z);
+            let seed = dereth_render_hifi::flicker::seed_at(p);
+            if let Some(given) = pack.and_then(|k| given_light(k, l.object, true)) {
+                gather(&mut gathered, given, l.object, at, seed);
+                continue;
+            }
             frame.lamps.push(HifiLamp {
-                position: glam::Vec3::new(block.origin.0 + p.x, block.origin.1 + p.y, p.z),
+                position: at,
                 color: l.source.color,
                 intensity: l.source.intensity,
                 falloff: l.source.falloff,
                 source: match l.source.kind {
-                    LampKind::Authored => LampSource::Authored,
+                    LampKind::Authored | LampKind::Unseen => LampSource::Authored,
                     LampKind::Flame => LampSource::Flame,
                     LampKind::Glow => LampSource::Glow,
+                    LampKind::Ember => LampSource::Ember,
+                    LampKind::Sprite => LampSource::Sprite,
                 },
                 flicker: l.source.flicker,
-                // LINT-OK: hashing the bits of a position. Not a float conversion.
-                seed: p.x.to_bits() ^ p.y.to_bits().rotate_left(11) ^ p.z.to_bits().rotate_left(22),
+                seed,
+                pack: None,
             });
+        }
+    }
+    frame.lamps.extend(gathered.iter().map(Gathered::lamp));
+    // A room's light goes with the lamp nearest it: a flame's flickers with that flame. Once the
+    // rooms' lamps are found, any other holds steady, for embers and a warm crystal have no flame.
+    let (lamps, sprites, beds, looked) = room_lamps(draw, pack);
+    for light in frame.lights.iter_mut().filter(|l| l.burned) {
+        let far = |lamp: &RoomLamp| (lamp.at - light.position).length();
+        light.flame = lamps
+            .iter()
+            .filter(|l| far(l) < LAMP_REACH)
+            .min_by(|a, b| far(a).total_cmp(&far(b)))
+            .and_then(|l| l.flame);
+        light.steady = looked && light.flame.is_none();
+    }
+    // Where a sprite of light stood there is a light now, for the sprite isn't drawn: unless it is
+    // fire's colour and a light of the room's own stands there.
+    let unlit: Vec<_> = sprites
+        .into_iter()
+        .filter(|s| {
+            let [r, g, b] = s.color;
+            s.given
+                || !(r >= g && g >= b && g > 0.25 * r)
+                || !frame
+                    .lights
+                    .iter()
+                    .any(|l| l.burned && (l.position - s.at).length() < LAMP_REACH)
+        })
+        .collect();
+    frame.lights.extend(unlit.into_iter().map(|s| HifiLight {
+        position: s.at,
+        color: s.color,
+        intensity: s.intensity,
+        falloff: s.falloff,
+        interior: true,
+        burned: true,
+        steady: s.flame.is_none(),
+        flame: s.flame,
+    }));
+    // And each bed adds a low red glow of its own, close by.
+    frame.lights.extend(beds.iter().map(|at| HifiLight {
+        position: *at + glam::Vec3::Z * 0.4,
+        color: [0.4, 0.07, 0.015],
+        intensity: 1.0,
+        falloff: 2.5,
+        interior: true,
+        burned: true,
+        steady: false,
+        flame: None,
+    }));
+    // The lamps of the rooms this frame reached, for their flames' halos.
+    frame.room_lamps.clear();
+    {
+        let drawn = draw.frame_drawn_cells.borrow();
+        for block in draw.blocks.values() {
+            for cell in &block.env_cells {
+                if !drawn.as_ref().is_some_and(|d| d.contains(&cell.id.0)) {
+                    continue;
+                }
+                for l in cell.lamps.placed() {
+                    use super::hifi_lamps::LampKind;
+                    let p = l.position;
+                    let at = glam::Vec3::new(block.origin.0 + p.x, block.origin.1 + p.y, p.z);
+                    if let Some(given) = pack.and_then(|k| given_light(k, l.object, false)) {
+                        let seed = dereth_render_hifi::flicker::seed_at(p);
+                        frame.room_lamps.push(pack_lamp(given, at, seed));
+                        continue;
+                    }
+                    frame.room_lamps.push(HifiLamp {
+                        position: at,
+                        color: l.source.color,
+                        intensity: l.source.intensity,
+                        falloff: l.source.falloff,
+                        source: match l.source.kind {
+                            LampKind::Authored => LampSource::Authored,
+                            LampKind::Flame => LampSource::Flame,
+                            LampKind::Glow => LampSource::Glow,
+                            LampKind::Ember => LampSource::Ember,
+                            LampKind::Sprite | LampKind::Unseen => continue,
+                        },
+                        flicker: l.source.flicker,
+                        seed: dereth_render_hifi::flicker::seed_at(p),
+                        pack: None,
+                    });
+                }
+            }
         }
     }
 
     // --- the art pack ----------------------------------------------------------------------
-    frame.art_pack = match draw.land.art_pack.as_deref() {
+    frame.art_pack = match draw.land.drawn_pack().map(Arc::as_ref) {
         Some(pack) => {
             if sh
                 .pack
@@ -1142,6 +1796,8 @@ fn snapshot(
         .as_ref()
         .and_then(|_| sky_knobs(&with_asked_clouds(&draw.drawn.knobs, &ws.clouds)));
     if let Some(sky) = frame.sky_knobs.as_mut() {
+        let (year, day, time_of_day) = ws.game_time();
+        sky.moon_phases = moon_phases(&ws.moons, calendar_days(year, day, time_of_day));
         cloud_detail(
             sky,
             draw.cfg
@@ -1151,6 +1807,10 @@ fn snapshot(
         );
     }
     frame.far = far_knobs(&draw.drawn.knobs);
+    // The far objects reach as far as the scenery is drawn.
+    if draw.far.active {
+        frame.far.reach = frame.far.reach.min(draw.far.reach);
+    }
     frame.far_trees = if draw.far.active && frame.art_pack.is_some() {
         if sh
             .far_trees
@@ -1165,6 +1825,53 @@ fn snapshot(
         sh.far_trees.as_ref().map(|(_, t)| std::sync::Arc::clone(t))
     } else {
         sh.far_trees = None;
+        None
+    };
+    frame.far_cards = if frame.far_trees.is_some() {
+        let made = &draw.far.cards.made;
+        match sh.far_cards.as_ref() {
+            Some((n, cards)) if *n == made.len() => Some(std::sync::Arc::clone(cards)),
+            _ => {
+                let mut cards = sh
+                    .far_cards
+                    .take()
+                    .map(|(_, c)| (*c).clone())
+                    .unwrap_or_default();
+                if cards.cards.len() > made.len() {
+                    cards.cards.clear();
+                }
+                let from = cards.cards.len();
+                cards.cards.extend(
+                    made[from..]
+                        .iter()
+                        .map(|c| std::sync::Arc::new(far_card(c))),
+                );
+                let cards = std::sync::Arc::new(cards);
+                sh.far_cards = Some((made.len(), std::sync::Arc::clone(&cards)));
+                Some(cards)
+            }
+        }
+    } else {
+        sh.far_cards = None;
+        None
+    };
+    frame.ground_cover_distance = draw.ground_cover.share;
+    frame.ground_cover = if draw.ground_cover.field.active && frame.art_pack.is_some() {
+        if sh
+            .ground_cover
+            .as_ref()
+            .is_none_or(|(serial, _)| *serial != draw.ground_cover.field.serial)
+        {
+            sh.ground_cover = Some((
+                draw.ground_cover.field.serial,
+                std::sync::Arc::new(ground_cover_for_presentation(&draw.ground_cover.field)),
+            ));
+        }
+        sh.ground_cover
+            .as_ref()
+            .map(|(_, c)| std::sync::Arc::clone(c))
+    } else {
+        sh.ground_cover = None;
         None
     };
     // --- the art pack's materials for retail pictures ---------------------------------------
@@ -1196,7 +1903,7 @@ fn snapshot(
     frame.drawn = drawn_for_presentation(draw, ws, &mut sh.drawn_world, &mut sh.cover);
     // --- the art pack's ground ------------------------------------------------------------
     frame.ground = match (
-        draw.land.art_pack.as_deref(),
+        draw.land.ground_pack().map(Arc::as_ref),
         draw.land.retail_ground.as_deref(),
     ) {
         (Some(pack), Some(retail)) => {
@@ -1243,6 +1950,29 @@ fn snapshot(
     }
 
     // --- the landscape ---------------------------------------------------------------------
+    // The models of the statics in the rooms and dungeons this frame reached.
+    frame.pack_rooms.clear();
+    if frame.art_pack.is_some() {
+        let drawn = draw.frame_drawn_cells.borrow();
+        for block in draw.blocks.values() {
+            for cell in &block.env_cells {
+                if cell.art_pack.is_empty()
+                    || !drawn.as_ref().is_some_and(|d| d.contains(&cell.id.0))
+                {
+                    continue;
+                }
+                let origin = glam::Vec3::new(block.origin.0, block.origin.1, 0.0);
+                frame
+                    .pack_rooms
+                    .extend(cell.art_pack.iter().map(|p| HifiRoomPlacement {
+                        origin,
+                        cell: cell.id.0,
+                        placement: pack_placement(p),
+                    }));
+            }
+        }
+    }
+
     frame.terrain.clear();
     frame.static_feed.clear();
     frame.static_levels.clear();
@@ -1452,6 +2182,76 @@ mod tests {
         }
     }
 
+    /// Behaviour: none (experimental hi-fi lighting)
+    #[test]
+    fn a_packs_lights_standing_close_together_are_one_beacon_at_their_middle() {
+        let given = dereth_assets::art_pack::ManifestLight {
+            object: dereth_primitives::DataId(0x0200_069D),
+            place: dereth_assets::art_pack::LightPlace::Outdoors,
+            offset: [0.0; 3],
+            kelvin: 1500.0,
+            brightness: 800.0,
+            size: 0.4,
+            reach: 12.0,
+            shadows: true,
+            flicker: dereth_assets::art_pack::LightFlicker::Steady,
+            haze: 0.6,
+            presence: 1.0,
+            gather: 6.0,
+            credit: dereth_assets::art_pack::Credit {
+                author: String::new(),
+                tool: String::new(),
+                license: String::new(),
+            },
+        };
+        let mut g = Vec::new();
+        let id = given.object;
+        for (x, y) in [
+            (34.0, 82.0),
+            (38.0, 82.0),
+            (34.0, 86.0),
+            (38.0, 86.0),
+            (90.0, 90.0),
+        ] {
+            gather(&mut g, &given, id, glam::Vec3::new(x, y, 140.0), 1);
+        }
+        assert_eq!(g.len(), 2, "the four tips, and one far off");
+        let beacon = g[0].lamp();
+        assert!((beacon.position - glam::Vec3::new(36.0, 84.0, 140.0)).length() < 1e-4);
+        assert!((beacon.intensity - 4.0).abs() < 1e-4);
+        assert!(beacon.pack.expect("a pack's").size > 2.5);
+        assert!((g[1].lamp().intensity - 1.0).abs() < 1e-4);
+    }
+
+    /// Behaviour: none (experimental hi-fi lighting)
+    #[test]
+    fn a_light_s_colour_follows_its_temperature() {
+        let flame = kelvin_colour(1600.0);
+        let day = kelvin_colour(6500.0);
+        assert_eq!(flame[0], 1.0);
+        assert!(flame[2] < 0.05 && flame[1] < 0.35, "{flame:?}");
+        assert!(day.iter().all(|c| *c > 0.9), "{day:?}");
+        assert!(kelvin_colour(12000.0)[2] == 1.0);
+    }
+
+    /// Behaviour: rendering.sky.moon-phases-asked-for-replace-the-calendars-until-reset
+    #[test]
+    fn the_moons_are_drawn_at_the_phase_asked_for_or_the_calendars() {
+        use dereth_client_runtime::moon::{Moon, MoonCommand as C};
+        let days = calendar_days(12, 200, 0.25);
+        let mut asked = Moons::default();
+        let calendar = moon_phases(&asked, days);
+        for (m, (gfx, lit)) in MOONS.iter().zip(calendar) {
+            assert_eq!((gfx, lit), (m.gfx(), m.calendar_phase(days)));
+        }
+        asked.obey(C::Set(Some(Moon::Albarel), 0.0));
+        let forced = moon_phases(&asked, days);
+        assert_eq!(forced[0], calendar[0], "Rez'arel keeps the calendar's");
+        assert_eq!(forced[1], (Moon::Albarel.gfx(), 0.0));
+        asked.obey(C::Reset);
+        assert_eq!(moon_phases(&asked, days), calendar);
+    }
+
     /// The preferences with the boxes `ticked` (one bit each, in the page's order) under the
     /// Horizon interface.
     fn boxes(ticked: u32) -> FidelityPreferences {
@@ -1471,7 +2271,7 @@ mod tests {
 
     /// Whether the settings draw what the box `name` asks for: its effect, or for the retail
     /// look's box the original models in place of an art pack's.
-    fn drawn(s: &HifiSettings, name: &str) -> bool {
+    fn drawn(s: &HifiSettings, prefs: &FidelityPreferences, name: &str) -> bool {
         use dereth_client_contract::options::names::fidelity as n;
         match name {
             n::LIGHTING => s.lighting.is_on(),
@@ -1481,12 +2281,83 @@ mod tests {
             n::LAMPS => s.lamps.is_on(),
             n::SKY => s.sky.is_on(),
             n::WEATHER => s.weather.is_on(),
+            n::WATER => reflective_water(prefs),
             n::RETAIL_LOOK => s.lighting.is_on() && !s.art_pack,
             n::NO_ANTI_ALIASING => s.lighting.is_on() && !s.anti_aliasing,
             n::NO_SLOPE_MATERIALS => s.art_pack && !s.slope_materials,
             n::NO_DAMP => s.depth_mapping > 0 && !s.damp,
+            n::NO_WIND => s.art_pack && !s.wind,
+            n::NO_FLAME_FLICKER => s.lighting.is_on() && !flame_flicker(prefs),
             _ => unreachable!("{name}"),
         }
+    }
+
+    /// Behaviour: none (the experimental render scale)
+    #[test]
+    fn the_render_scale_is_drawn_only_inside_the_better_lighting() {
+        let lit = FidelityPreferences::parse_switch("Lighting=1,RenderScale=67").unwrap();
+        assert_eq!(render_scale(&lit), 67);
+        let unlit = FidelityPreferences::parse_switch("Sky=1,RenderScale=67").unwrap();
+        assert_eq!(render_scale(&unlit), 100);
+        let native = FidelityPreferences::parse_switch("Lighting=1").unwrap();
+        assert_eq!(render_scale(&native), 100);
+        let dynamic = FidelityPreferences::parse_switch("Lighting=1,RenderScale=1").unwrap();
+        assert_eq!(
+            render_scale(&dynamic),
+            100,
+            "Dynamic starts from the whole frame"
+        );
+        // Below the whole frame the anti-aliasing rebuilds the picture, so it stays on.
+        let off = FidelityPreferences::parse_switch("Lighting=1,NoAntiAliasing=1").unwrap();
+        assert!(!settings(&off, false).anti_aliasing);
+        let scaled =
+            FidelityPreferences::parse_switch("Lighting=1,NoAntiAliasing=1,RenderScale=67")
+                .unwrap();
+        assert!(settings(&scaled, false).anti_aliasing);
+    }
+
+    /// Behaviour: none (the experimental render scale)
+    #[test]
+    fn dynamic_resolution_falls_under_its_target_and_rises_back_no_higher_than_the_player_chose() {
+        let mut d = DynamicScale::default();
+        // Holding the target at the player's 75%: nothing moves.
+        for _ in 0..600 {
+            assert_eq!(d.step(1.0 / 60.0, 60.0, 60.0, 75), None);
+        }
+        // Under it for a second: one step down.
+        let mut changes = Vec::new();
+        for _ in 0..40 {
+            changes.extend(d.step(1.0 / 30.0, 30.0, 60.0, 75));
+        }
+        assert_eq!(changes, [67]);
+        // Well under it: on down to the least, and no lower.
+        for _ in 0..200 {
+            changes.extend(d.step(1.0 / 30.0, 30.0, 60.0, 75));
+        }
+        assert_eq!(changes, [67, 50]);
+        // Room again: back up, past nothing the player chose.
+        changes.clear();
+        for _ in 0..3000 {
+            changes.extend(d.step(1.0 / 60.0, 60.0, 60.0, 75));
+        }
+        assert_eq!(changes, [67, 75]);
+    }
+
+    /// Behaviour: none (the experimental render scale)
+    #[test]
+    fn a_rise_dynamic_resolution_could_not_hold_is_tried_again_later() {
+        let mut d = DynamicScale::default();
+        for _ in 0..31 {
+            d.step(1.0 / 30.0, 30.0, 60.0, 100);
+        }
+        assert_eq!(d.share, 85);
+        let before = d.wait;
+        // It rises, and falls straight back.
+        while d.step(1.0 / 60.0, 60.0, 60.0, 100).is_none() {}
+        assert_eq!(d.share, 100);
+        while d.step(1.0 / 30.0, 30.0, 60.0, 100).is_none() {}
+        assert_eq!(d.share, 85);
+        assert!(d.wait > before, "{} after {before}", d.wait);
     }
 
     /// Behaviour: none (experimental hi-fi art packs)
@@ -1578,6 +2449,27 @@ mod tests {
         assert!(!settings(&boxes(0), true).anti_aliasing);
         assert!(lit.slope_materials);
         assert!(!settings(&boxes(0), true).slope_materials);
+        // So are the ground cover, until its menu leaves it out, and the wind, until it is stopped.
+        assert!(lit.ground_cover);
+        assert!(!settings(&boxes(0), true).ground_cover);
+        let bare =
+            FidelityPreferences::parse_switch("Lighting=1,GroundCoverDrawDistance=1").unwrap();
+        assert!(!settings(&bare, true).ground_cover);
+        assert!(lit.wind);
+        assert!(!settings(&boxes(0), true).wind);
+        // The ground cover is the whole distance until chosen, and outside the better lighting.
+        assert_eq!(ground_cover_distance(&boxes(0b1)), 100);
+        assert_eq!(ground_cover_distance(&bare), 100);
+        // The trees' old draw distance in a capture's line is read as nothing.
+        let far = FidelityPreferences::parse_switch(
+            "Lighting=1,TreeDrawDistance=300,GroundCoverDrawDistance=50",
+        )
+        .unwrap();
+        assert_eq!(ground_cover_distance(&far), 50);
+        // The scenery past the blocks round the eye reaches as far as the landscape.
+        assert_eq!(scenery_reach(25), 25.5 * 192.0);
+        let unlit = FidelityPreferences::parse_switch("Sky=1,GroundCoverDrawDistance=300").unwrap();
+        assert_eq!(ground_cover_distance(&unlit), 100);
         // A capture's level past a tick is kept.
         let mut rig = FidelityPreferences::parse_switch("Lighting=3,Shadows=4,Debug=6").unwrap();
         assert_eq!(settings(&rig, true).lighting, Level::High);
@@ -1611,9 +2503,11 @@ mod tests {
                         .is_some_and(|i| ticked & (1 << i) != 0)
                 };
                 for o in OPTIONS.iter().filter(|o| !OWN_RULES.contains(&o.name)) {
-                    let drawn = drawn(&s, o.name);
-                    // With an art pack open, which draws what every box asks for.
-                    let greyed = blocked_with(o.name, is, Some(rays), true).is_some();
+                    let drawn = drawn(&s, &prefs, o.name);
+                    // With an art pack open, which draws what every box asks for. The water's box
+                    // is the pack-less one's: a pack's ground always has it.
+                    let pack = o.name != dereth_client_contract::options::names::fidelity::WATER;
+                    let greyed = blocked_with(o.name, is, Some(rays), pack).is_some();
                     assert_eq!(
                         drawn,
                         is(o.name) && !greyed,

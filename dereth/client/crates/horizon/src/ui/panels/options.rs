@@ -1604,12 +1604,15 @@ fn effect_left_out(_row: &Row, _state: &GameState) -> bool {
     false
 }
 
-/// The preference of `row` when it is one of the experimental effects' boxes or menus.
+/// The preference of `row` when it is one of the experimental effects' boxes or menus, or their
+/// draw distances.
 #[cfg(feature = "hifi")]
 fn effect_box(row: &Row) -> Option<&'static str> {
+    use dereth_client_contract::options::draw_distance;
     match row.value {
         Value::Check(name) if fidelity::find(name).is_some() => Some(name),
         Value::Menu(name) if fidelity::is_a_menu(name) => Some(name),
+        Value::Menu(name) if draw_distance::is_a_distance(name) => Some(name),
         _ => None,
     }
 }

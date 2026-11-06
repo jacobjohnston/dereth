@@ -43,6 +43,9 @@ mod far_trees;
 #[path = "forest_cover.rs"]
 mod forest_cover;
 #[cfg(feature = "hifi")]
+#[path = "ground_cover.rs"]
+mod ground_cover;
+#[cfg(feature = "hifi")]
 #[path = "hifi_bridge.rs"]
 mod hifi_bridge;
 #[cfg(feature = "hifi")]
@@ -1150,6 +1153,9 @@ pub struct SceneDraw {
     /// The art pack's trees far off, while the presentation draws them.
     #[cfg(feature = "hifi")]
     far: far_trees::FarTrees,
+    /// The art pack's plants over the land near the viewer, while the presentation draws them.
+    #[cfg(feature = "hifi")]
+    ground_cover: ground_cover::GroundCover,
     /// The four generated detail surfaces and their tiling values.
     detail: dereth_world_render::detail::DetailTexturing,
     /// The device texture each generated detail surface wraps, loaded from database type

@@ -10,6 +10,8 @@ pub const CAMERA_STIFFNESS: &str = "Camera.Stiffness";
 pub const PERFORMANCE_PANEL: &str = "Debug.PerformancePanel";
 /// `Display.FullScreen`.
 pub const DISPLAY_FULL_SCREEN: &str = "Display.FullScreen";
+/// `Display.LargeStatusBarNumbers`.
+pub const DISPLAY_LARGE_STATUS_BAR_NUMBERS: &str = "Display.LargeStatusBarNumbers";
 /// `Display.RefreshRate`.
 pub const DISPLAY_REFRESH_RATE: &str = "Display.RefreshRate";
 /// `Display.RenderScale`.
@@ -18,6 +20,8 @@ pub const DISPLAY_RENDER_SCALE: &str = "Display.RenderScale";
 pub const DISPLAY_RESOLUTION: &str = "Display.Resolution";
 /// `Display.SlowDownInBackground`.
 pub const DISPLAY_SLOW_DOWN_IN_BACKGROUND: &str = "Display.SlowDownInBackground";
+/// `Display.StatusBarColors`.
+pub const DISPLAY_STATUS_BAR_COLORS: &str = "Display.StatusBarColors";
 /// `Display.SyncToRefresh`.
 pub const DISPLAY_SYNC_TO_REFRESH: &str = "Display.SyncToRefresh";
 /// `Input.InvertMouseLookYAxis`.
@@ -88,6 +92,10 @@ pub const SOUND_DISABLED: &str = "Sound.SoundDisabled";
 pub const SOUND_FEATURES: &str = "Sound.SoundFeatures";
 /// `Sound.SoundVolume`.
 pub const SOUND_VOLUME: &str = "Sound.SoundVolume";
+/// `Sound.WeatherSound`: this client's own, not retail's; `True` is on.
+pub const WEATHER_SOUND: &str = "Sound.WeatherSound";
+/// `Sound.WeatherSoundVolume`: this client's own, not retail's.
+pub const WEATHER_SOUND_VOLUME: &str = "Sound.WeatherSoundVolume";
 /// `UI.ChatFontFace`.
 pub const CHAT_FONT_FACE: &str = "UI.ChatFontFace";
 /// `UI.ChatFontSize`.
@@ -130,6 +138,8 @@ pub mod fidelity {
     pub const SKY: &str = "Fidelity.Sky";
     /// `Fidelity.Weather`: rain, snow and wet ground, when the day's own weather brings them.
     pub const WEATHER: &str = "Fidelity.Weather";
+    /// `Fidelity.Water`: the water drawn with reflections, with no art pack needed.
+    pub const WATER: &str = "Fidelity.Water";
     /// `Fidelity.RetailLook`: the original models are drawn where an art pack has replacements
     /// for them.
     pub const RETAIL_LOOK: &str = "Fidelity.RetailLook";
@@ -139,6 +149,8 @@ pub mod fidelity {
     /// `Fidelity.NoSlopeMaterials`: an art pack's ground is laid without the scree and rock it
     /// lays on steep slopes.
     pub const NO_SLOPE_MATERIALS: &str = "Fidelity.NoSlopeMaterials";
+    /// `Fidelity.NoWind`: an art pack's trees and plants stand still.
+    pub const NO_WIND: &str = "Fidelity.NoWind";
     /// `Fidelity.NoDamp`: the world's walls and floors show no damp sheen or slime.
     pub const NO_DAMP: &str = "Fidelity.NoDamp";
     /// `Fidelity.VSync`: frames are presented on the display's refresh.
@@ -154,6 +166,20 @@ pub mod fidelity {
     /// `Fidelity.CloudDetail`: how finely the volumetric clouds are drawn, a level stored as
     /// 0 Low, 1 Medium, 2 High, 3 Off.
     pub const CLOUD_DETAIL: &str = "Fidelity.CloudDetail";
+    /// `Fidelity.GroundCoverDrawDistance`: how far an art pack's ground cover is drawn, a share of
+    /// the distance it is drawn to with nothing changed, percent; 1 leaves it out.
+    pub const GROUND_COVER_DRAW_DISTANCE: &str = "Fidelity.GroundCoverDrawDistance";
+    /// `Fidelity.NoFlameFlicker`: every flame's light holds steady.
+    pub const NO_FLAME_FLICKER: &str = "Fidelity.NoFlameFlicker";
+    /// `Fidelity.LightDrawDistance`: how far the lamps light the world and show their glow, a
+    /// share of the distance they reach with nothing changed, percent.
+    pub const LIGHT_DRAW_DISTANCE: &str = "Fidelity.LightDrawDistance";
+    /// `Fidelity.DynamicResolution`: the frame rate a Dynamic render scale moves to hold, frames a
+    /// second.
+    pub const DYNAMIC_RESOLUTION: &str = "Fidelity.DynamicResolution";
+    /// `Fidelity.RenderScale`: the share of the frame's pixels the better lighting draws the world
+    /// at, each way, percent, or 1 for Dynamic; the picture is rebuilt at the frame's size.
+    pub const RENDER_SCALE: &str = "Fidelity.RenderScale";
     /// `Fidelity.Debug`: a diagnostic view, set only by `--set-at`: 0 Off, 1 Passthrough,
     /// 2 Depth, 3 Normals, 4 AO, 5 Shadows, 6 Census, 7 Parity (re-shaded with no pass).
     pub const DEBUG: &str = "Fidelity.Debug";
@@ -166,7 +192,11 @@ pub mod fidelity {
     /// over it. No box sets it.
     pub const ART_PACK: &str = "Fidelity.ArtPack";
 
-    /// Every name the profile and `--set-at` may set, the thirteen boxes first and the menus after
+    /// Names an older profile or report may hold that no option takes any more, read as nothing:
+    /// the scenery follows the landscape's draw distance.
+    pub const RETIRED: &[&str] = &["Fidelity.TreeDrawDistance"];
+
+    /// Every name the profile and `--set-at` may set, the sixteen boxes first and the menus after
     /// them.
     pub const NAMES: &[&str] = &[
         LIGHTING,
@@ -176,15 +206,22 @@ pub mod fidelity {
         LAMPS,
         SKY,
         WEATHER,
+        WATER,
         RETAIL_LOOK,
         NO_ANTI_ALIASING,
         NO_SLOPE_MATERIALS,
+        NO_WIND,
         NO_DAMP,
         VSYNC,
         HDR,
         DEPTH_MAPPING,
         GOD_RAYS,
         CLOUD_DETAIL,
+        GROUND_COVER_DRAW_DISTANCE,
+        NO_FLAME_FLICKER,
+        LIGHT_DRAW_DISTANCE,
+        DYNAMIC_RESOLUTION,
+        RENDER_SCALE,
         DEBUG,
     ];
 }

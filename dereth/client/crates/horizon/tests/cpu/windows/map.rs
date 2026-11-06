@@ -279,3 +279,36 @@ fn a_player_sees_the_towns_and_houses_and_an_administrator_every_place() {
     assert_eq!(icons(&h), 1);
     assert!(marks(&h, PlaceKind::Portal) > 0, "its portals");
 }
+
+/// The arrow's quad this frame, when there is one: the only picture of its picture's size.
+fn arrow_quad(h: &Harness) -> Option<dereth_horizon::draw::Quad> {
+    h.list
+        .quads
+        .iter()
+        .rfind(|q| q.tex.is_some() && q.src.w == 64.0)
+        .copied()
+}
+
+#[test]
+fn an_administrator_s_arrow_points_straight_down_at_the_place_and_no_one_else_has_it() {
+    let art = Arc::new(Art::empty());
+    let mut state = administrator();
+    state.coords = Some((42.2, 33.8));
+    state.heading = 90.0;
+    let (mut h, area) = opened(&art, &state);
+    let q = arrow_quad(&h).expect("the arrow");
+    assert_eq!(q.turn, 0.0, "it does not turn with the heading");
+    let picture = art.image(q.tex.expect("a picture")).expect("its pixels");
+    assert!(picture.pixel(32, 60)[3] > 0, "the tip is at the foot");
+    assert_eq!(picture.pixel(32, 1)[3], 0, "and nothing is at the head");
+    let tip = (q.dst.x + q.dst.w / 2.0, q.dst.y + q.dst.h * 62.0 / 64.0);
+    let place = h.ui.windows.map_view.on_screen(area, map_pixel(42.2, 33.8));
+    assert!(
+        (tip.0 - place.0).abs() < 0.1 && (tip.1 - place.1).abs() < 0.1,
+        "{tip:?} {place:?}"
+    );
+
+    state.is_admin = false;
+    h.frame(&state);
+    assert!(arrow_quad(&h).is_none(), "a player keeps the game's mark");
+}

@@ -1066,7 +1066,8 @@ impl ArtPack {
             .collect();
         // Cards for the models with none of their own, worked out here rather than packed.
         if recording.is_none() {
-            cards::add_cards(&mut models, &mut images, &std::collections::HashSet::new());
+            let skip = manifest.ground_cover.iter().map(|c| c.id).collect();
+            cards::add_cards(&mut models, &mut images, &skip);
         }
         if models.is_empty() && !manifest.models.is_empty() {
             return Err(format!(

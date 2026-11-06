@@ -17,6 +17,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: chimney smoke and other see-through effects now cover the distant trees and hills behind them, instead of the trees showing through in the distance haze.
 - Better Lighting: a building's doors and windows no longer show through the ground in front of them, near or far, and a door no longer sticks out below a rise of ground that hides the rest of its house.
 - Better Lighting: objects behind a nearby building's walls no longer show through them when the camera stands just outside it.
+- Better Lighting: torches, portals and other glowing effects add what the ordinary look adds, so they no longer blow out to a hard-edged panel or all but vanish over a lit wall, and a flame's glow in a dungeon no longer washes the wall behind it pale.
 
 ## 0.4.14 (2026-11-05)
 

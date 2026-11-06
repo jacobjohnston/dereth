@@ -66,7 +66,8 @@ struct Weather {
 @group(0) @binding(5) var field_class: texture_2d<u32>;
 @group(0) @binding(6) var<uniform> field: TerrainFieldParams;
 @group(0) @binding(7) var shelter_depth: texture_depth_2d;
-// The frame's view-space normals, with each surface's class in alpha.
+// The frame's view-space normals, with each surface's class in alpha, at the size the world was
+// drawn at.
 @group(0) @binding(8) var normals: texture_2d<f32>;
 
 const PI: f32 = 3.14159265;
@@ -340,7 +341,7 @@ fn depth_at(px: vec2<i32>) -> f32 {
 // ground, wherever the drawn ground lifts it off retail's triangles.
 fn landscape_at(px: vec2<f32>) -> bool {
     let most = vec2<i32>(textureDimensions(normals)) - vec2<i32>(1);
-    let t = clamp(vec2<i32>(floor(px)), vec2<i32>(0), most);
+    let t = clamp(vec2<i32>(floor(px / max(W.fogp.z, 1.0))), vec2<i32>(0), most);
     let kind = textureLoad(normals, t, 0).w;
     return kind > 2.95 && kind < 3.45;
 }

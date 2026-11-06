@@ -1212,7 +1212,7 @@ mod tests {
         #[cfg(not(feature = "hifi"))]
         assert_eq!(len(), 48);
         #[cfg(feature = "hifi")]
-        assert_eq!(len(), 48 + super::super::fidelity::OPTIONS.len() + 2);
+        assert_eq!(len(), 48 + super::super::fidelity::OPTIONS.len() + 1);
         // The registration defaults are in force before any file is read.
         assert_eq!(
             inq_value("Input.MouseLookSensitivity"),

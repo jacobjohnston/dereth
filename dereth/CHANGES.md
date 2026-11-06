@@ -15,7 +15,6 @@ pre-release leaves it for the final release, and its notes show it as it is);
 ## Unreleased
 
 - Better Lighting: an art pack can plant grass and low plants over the land, and a Ground Cover menu chooses how far they are drawn, from 0.5x to 5x, or Off.
-- Better Lighting: a Tree Draw Distance menu chooses how far an art pack's trees are drawn, from 0.5x to 5x.
 - Better Lighting: the wind moves an art pack's trees and plants, and No Wind holds them still.
 - Better Lighting: a building's doors and windows no longer show through the ground in front of them, near or far, and a door no longer sticks out below a rise of ground that hides the rest of its house.
 - Better Lighting: objects behind a nearby building's walls no longer show through them when the camera stands just outside it.

@@ -29,7 +29,6 @@ pub use dereth_scene::gpu::SceneRenderer;
 pub use imp::*;
 
 #[cfg(gpu)]
-#[path = "."]
 mod imp {
     use std::path::Path;
 
@@ -1500,6 +1499,5 @@ mod imp {
     }
 
     #[cfg(test)]
-    #[path = "gpu_texture_minification_tests.rs"]
     mod tests;
 }

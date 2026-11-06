@@ -19,6 +19,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: the doors and windows of buildings behind an art pack's trees and plants no longer show through them.
 - Better Lighting: an art pack's trees and plants past a nearby building no longer show through its walls.
 - Better Lighting: a wielded weapon stays in its holder's hand where an art pack's ground stands above the original.
+
 ## 0.4.14 (2026-11-05)
 
 ## 0.4.13 (2026-11-05)

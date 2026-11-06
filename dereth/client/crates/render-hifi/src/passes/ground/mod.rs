@@ -347,7 +347,12 @@ fn params(
     p.extend(clip_from_render.inverse().to_cols_array());
     p.extend((cam.view * HEIGHT_UP).to_cols_array());
     p.extend(viewport);
-    p.extend([cam.eye.x, cam.eye.y, cam.eye.z, 0.0]);
+    p.extend([
+        cam.eye.x,
+        cam.eye.y,
+        cam.eye.z,
+        dereth_primitives::num::math::powf(2.0, cam.mip_bias),
+    ]);
     p.extend([l.x, l.y, l.z, 0.0]);
     p.extend([sun[0], sun[1], sun[2], 0.0]);
     p.extend([amb[0], amb[1], amb[2], 0.0]);

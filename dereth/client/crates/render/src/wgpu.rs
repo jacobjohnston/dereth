@@ -28,6 +28,8 @@ pub mod compiler;
 #[cfg(feature = "test-support")]
 mod digest;
 mod levels;
+#[cfg(feature = "hifi")]
+pub mod metalfx;
 mod probes;
 #[cfg(feature = "hifi")]
 pub mod sidecar;

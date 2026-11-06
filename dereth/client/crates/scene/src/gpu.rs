@@ -182,6 +182,17 @@ mod imp {
             )?)
         }
 
+        /// The share of the frame's pixels the high-fidelity presentation draws its world at now,
+        /// percent, while it draws.
+        #[cfg(feature = "hifi")]
+        #[must_use]
+        pub fn render_scale_in_use(&self) -> Option<u32> {
+            self.gpu
+                .hifi_report()
+                .is_some_and(|r| r.composited)
+                .then(|| self.gpu.hifi_render_scale())
+        }
+
         /// Where the optional high-fidelity presentation stands on this device, for the options
         /// page.
         #[cfg(feature = "hifi")]

@@ -10,6 +10,7 @@ pub mod cloud_detail;
 pub mod config;
 pub mod depth_mapping;
 pub mod draw_distance;
+pub mod dynamic_resolution;
 pub mod fidelity;
 pub mod god_rays;
 pub mod interface;

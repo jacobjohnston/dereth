@@ -282,20 +282,34 @@ fn god_rays_start_low_and_show_only_with_enhanced_graphics() {
     assert!(on_the_page(&mut h, &state, rays));
 }
 
-/// Cloud Detail starts at Medium, and is on the page only with Enhanced Graphics Mode on.
+/// Render Scale starts at Dynamic and shows with Enhanced Graphics Mode on; the Dynamic Resolution
+/// Frame Rate shows only while it is Dynamic; and Anti-Aliasing stays on the page at every scale.
 #[test]
 #[cfg(feature = "hifi")]
-fn cloud_detail_starts_medium_and_shows_only_with_enhanced_graphics() {
-    let clouds = dereth_client_contract::options::cloud_detail::CAPTION;
+fn render_scale_shows_its_frame_rate_only_while_dynamic_and_keeps_anti_aliasing() {
+    use dereth_client_contract::options::dynamic_resolution;
     let (mut h, state) = client_page(READY);
     assert_eq!(
-        store::inq_value(names::CLOUD_DETAIL),
+        store::inq_value(names::RENDER_SCALE),
         Some(PrefValue::Int(1))
     );
-    assert!(!on_the_page(&mut h, &state, clouds));
+    assert!(!on_the_page(&mut h, &state, fidelity::SCALE_CAPTION));
     tick(&mut h, &state, caption(names::LIGHTING));
     h.frame(&state);
-    assert!(on_the_page(&mut h, &state, clouds));
+    assert!(on_the_page(&mut h, &state, fidelity::SCALE_CAPTION));
+    assert!(on_the_page(&mut h, &state, dynamic_resolution::CAPTION));
+    for share in [50, 100] {
+        store::set_value(names::RENDER_SCALE, PrefValue::Int(share));
+        h.frame(&state);
+        assert!(
+            !on_the_page(&mut h, &state, dynamic_resolution::CAPTION),
+            "{share}"
+        );
+        assert!(
+            on_the_page(&mut h, &state, caption(names::NO_ANTI_ALIASING)),
+            "{share}"
+        );
+    }
 }
 
 /// Open the Quality Preset menu's list: its names, and the one the box shows. The list is closed

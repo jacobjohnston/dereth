@@ -1590,12 +1590,19 @@ fn sheet_lines(page: PageId, state: &GameState) -> Vec<Line> {
     out
 }
 
-/// Whether the page leaves `row` out: another box's choice makes the effect mean nothing.
+/// Whether the page leaves `row` out: another box's choice makes the effect mean nothing, or the
+/// render scale is not Dynamic, whose frame rate it is.
 #[cfg(feature = "hifi")]
 fn effect_left_out(row: &Row, state: &GameState) -> bool {
-    effect_box(row)
-        .and_then(|name| effect_blocked(name, state))
-        .is_some_and(fidelity::Blocked::hides_the_row)
+    let dynamic = i32::try_from(dereth_client_contract::options::render_scale::DYNAMIC)
+        .ok()
+        .map(PrefValue::Int);
+    let unasked = row.preference() == Some(names::fidelity::DYNAMIC_RESOLUTION)
+        && store::inq_value(names::fidelity::RENDER_SCALE) != dynamic;
+    unasked
+        || effect_box(row)
+            .and_then(|name| effect_blocked(name, state))
+            .is_some_and(fidelity::Blocked::hides_the_row)
 }
 
 /// Without the effects, nothing is left out for them.

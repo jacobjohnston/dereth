@@ -824,6 +824,8 @@ pub struct SidecarContext<'a> {
     surface_format: wgpu::TextureFormat,
     surface_size: (u32, u32),
     world_viewport: Option<Viewport>,
+    /// Whether the picture has been upscaled to the frame target's size.
+    upscaled: bool,
     /// The frame target's own size, and the world's viewport in it, where the world is drawn
     /// at a share of its pixels.
     output: ((u32, u32), Option<Viewport>),
@@ -912,6 +914,20 @@ impl<'a> SidecarContext<'a> {
     #[must_use]
     pub fn scaled(&self) -> bool {
         self.surface_size != self.output.0
+    }
+
+    /// The picture has been upscaled to the frame target's size: from here on the frame is drawn
+    /// at that size, in the world's viewport there.
+    pub fn upscaled_to_output(&mut self) {
+        self.surface_size = self.output.0;
+        self.world_viewport = self.output.1;
+        self.upscaled = true;
+    }
+
+    /// Whether the picture has been upscaled to the frame target's size this frame.
+    #[must_use]
+    pub fn upscaled(&self) -> bool {
+        self.upscaled
     }
 
     /// The stamp of the frame being ended: the device's presented-frame count before it.
@@ -1519,6 +1535,7 @@ impl Gpu {
                     surface_format: self.format,
                     surface_size: drawn_size,
                     world_viewport: drawn_viewport,
+                    upscaled: false,
                     output,
                     frame_stamp: self.frame_stamp,
                     compute: self.compute,
@@ -1573,6 +1590,7 @@ impl Gpu {
                     surface_format: self.format,
                     surface_size: drawn_size,
                     world_viewport: drawn_viewport,
+                    upscaled: false,
                     output,
                     frame_stamp: self.frame_stamp,
                     compute: self.compute,

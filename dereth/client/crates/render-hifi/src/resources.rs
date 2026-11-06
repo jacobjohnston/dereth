@@ -90,6 +90,16 @@ pub enum ResourceName {
     TaaHistory0,
     /// The second of them.
     TaaHistory1,
+    /// How far every pixel moved since the last frame, for MetalFX.
+    UpscaleMotion,
+    /// How little of the frames before it each pixel should keep, for MetalFX.
+    UpscaleReactive,
+    /// The re-shaded picture as MetalFX rebuilt it, at the frame's size.
+    UpscaledHdr,
+    /// The tone mapped picture of a frame MetalFX rebuilt, at the frame's size.
+    UpscaledColour,
+    /// A copy of [`Self::UpscaledHdr`], as [`Self::ScratchHdr`] is of the picture as drawn.
+    UpscaledScratchHdr,
     /// The share of the sun's light the Remastered sky's clouds let through to the world under
     /// them, over the world round the eye.
     CloudShadow,

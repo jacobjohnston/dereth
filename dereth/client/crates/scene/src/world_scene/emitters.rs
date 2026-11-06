@@ -142,7 +142,7 @@ impl SceneDraw {
             } else {
                 let textures = TextureStore::with_environment_texture_detail(
                     store,
-                    self.cfg.render.environment_texture_detail,
+                    self.render_shadow.environment_texture_detail,
                 );
                 let meshes = build_meshes(
                     store,

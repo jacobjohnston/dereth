@@ -61,7 +61,7 @@ equips, and LB and RB switch packs or tabs. On a text line an on-screen keyboard
 
 ## Settings
 
-The interface scale (the Settings window's Client page) and the camera's settings (its Controls
+The interface scale (the Settings window's Display page) and the camera's settings (its Controls
 page) are kept in `horizon.txt` beside the preferences. Its key map is `dereth-horizon.keymap`
 there, and how each character last looked is in `horizon-looks.txt`.
 

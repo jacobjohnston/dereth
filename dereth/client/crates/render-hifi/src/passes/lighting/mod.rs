@@ -2210,7 +2210,7 @@ impl HifiPass for LightingPost {
                 1.0 / texel.0,
                 1.0 / texel.1,
                 env_f32("DERETH_HIFI_TOE", 0.36),
-                0.0,
+                1.0 + 2.0 * frame.brightness,
                 env_f32("DERETH_HIFI_SATURATION", 1.08),
                 env_f32("DERETH_HIFI_CONTRAST", 1.04),
                 env_f32("DERETH_HIFI_VIGNETTE", 0.28),
@@ -2224,7 +2224,7 @@ impl HifiPass for LightingPost {
                 tint[2],
                 balance,
                 hue,
-                0.0,
+                frame.hdr_headroom.max(1.0),
                 0.0,
                 0.0,
             ];

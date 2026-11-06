@@ -712,6 +712,12 @@ mod imp {
             self.gpu.gamma()
         }
 
+        /// Whether Enhanced Graphics Mode draws, which has the device read every picture with the
+        /// best filtering, and whether it asks for frames on the refresh.
+        pub fn set_enhanced(&mut self, on: bool, vsync: bool) {
+            self.gpu.set_enhanced(on, vsync);
+        }
+
         /// Apply the presentation's logical full-screen/vsync pair to the next swap-chain flip.
         pub fn set_presentation_sync(&mut self, full_screen: bool, sync_to_refresh: bool) {
             self.gpu.set_presentation_sync(full_screen, sync_to_refresh);

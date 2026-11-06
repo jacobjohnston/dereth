@@ -28,6 +28,8 @@
 #[cfg(feature = "hifi")]
 use dereth_client_contract::options::fidelity;
 use dereth_client_contract::options::interface::Interface;
+#[cfg(feature = "hifi")]
+use dereth_client_contract::options::names;
 use dereth_client_contract::options::renderer;
 use dereth_client_contract::options::sheet::{self, PageId, Row, Value};
 use dereth_client_contract::options::store;
@@ -43,15 +45,23 @@ use crate::ui::paint::{Align, Painter, TextStyle};
 use crate::ui::Outcome;
 
 /// The window's tabs, in order.
-const TABS: [&str; 5] = ["Character", "Chat", "Client", "Controls", "Key Bindings"];
+const TABS: [&str; 6] = [
+    "Character",
+    "Chat",
+    "Display",
+    "Sound",
+    "Controls",
+    "Key Bindings",
+];
 
 /// The tab index of each page.
 pub mod tab {
     pub const CHARACTER: usize = 0;
     pub const CHAT: usize = 1;
-    pub const CLIENT: usize = 2;
-    pub const CONTROLS: usize = 3;
-    pub const KEYS: usize = 4;
+    pub const DISPLAY: usize = 2;
+    pub const SOUND: usize = 3;
+    pub const CONTROLS: usize = 4;
+    pub const KEYS: usize = 5;
 }
 
 /// How many keys a row of the key bindings page shows.
@@ -128,6 +138,9 @@ pub struct OptionsState {
     /// The interface chosen on the Interface row and not applied yet: switching interfaces
     /// waits for Apply.
     pub pending_interface: Option<i32>,
+    /// The quality preset last chosen, shown while the settings still hold it: presets that set
+    /// the same values all match them.
+    pub preset: Option<usize>,
     /// The dropdown list open over the window, if one is.
     pub menu: Option<OpenMenu>,
     /// A choice made in a dropdown's list this frame, by its row's caption, for its row to act
@@ -146,6 +159,14 @@ impl OptionsState {
             .iter()
             .find(|(l, _)| l == label)
             .map(|(_, r)| *r)
+    }
+
+    /// Choose the `i`th name of the open dropdown list, as a click on it would: what a scripted run
+    /// does.
+    pub fn choose_in_open_list(&mut self, i: usize) {
+        if let Some(menu) = self.menu.take() {
+            self.menu_choice = Some((menu.key, i));
+        }
     }
 }
 
@@ -182,7 +203,7 @@ impl Windows {
         match self.options_page.tab {
             tab::CHARACTER => self.character_options_tab(p, ctx, state, body, out),
             tab::CHAT => self.chat_options(p, ctx, state, area, out),
-            tab::CLIENT => self.client_options(p, ctx, state, area, out),
+            tab::DISPLAY | tab::SOUND => self.client_options(p, ctx, state, area, out),
             tab::CONTROLS => self.controls_options(p, ctx, area, out),
             tab::KEYS => self.key_bindings(p, ctx, state, area, out),
             _ => {}
@@ -405,7 +426,7 @@ Press Escape to leave it as it is.",
                     | Line::Renderer
                     | Line::RendererNotice => {}
                     #[cfg(feature = "hifi")]
-                    Line::Notice(_) | Line::EffectsStatus => {}
+                    Line::Notice(_) | Line::EffectsStatus | Line::GraphicsMode | Line::Preset => {}
                     Line::Row(row) => match row.value {
                         Value::Opacity(property) => {
                             p.text_in(
@@ -493,7 +514,8 @@ Press Escape to leave it as it is.",
         out: &mut Outcome,
     ) {
         let k = p.scale;
-        let mut rows = sheet_lines(PageId::Client, state);
+        let page_tab = self.options_page.tab;
+        let mut rows = client_lines(page_tab, state);
         // Under the scale's choices, what a larger window would offer, when there is something
         // to say.
         let scale_note = crate::scale::note(self.options_page.scale, self.options_page.window);
@@ -515,7 +537,7 @@ Press Escape to leave it as it is.",
             ctx,
             list,
             content,
-            &mut self.options_page.scroll[tab::CLIENT],
+            &mut self.options_page.scroll[page_tab],
         );
         p.list.push_clip(list);
         let mut y = list.y - offset;
@@ -531,7 +553,7 @@ Press Escape to leave it as it is.",
                         );
                     }
                     Line::Row(row) => {
-                        let caption = row.caption_for(Interface::Horizon);
+                        let caption = shown_caption(row.caption_for(Interface::Horizon));
                         p.text_in(
                             &label,
                             Rect::new(list.x + 16.0 * k, y, list.w * 0.5, row_h),
@@ -578,6 +600,67 @@ Press Escape to leave it as it is.",
                         }
                     }
                     Line::TabHeading(_) | Line::TabName(_) | Line::Opacity(..) => {}
+                    #[cfg(feature = "hifi")]
+                    Line::GraphicsMode => {
+                        let at = Rect::new(list.x + 16.0 * k, y, list.w * 0.5, row_h);
+                        p.text_in(&label, at, Align::Left, fidelity::MODE_CAPTION);
+                        let control =
+                            Rect::new(list.x + list.w * 0.55, y + 3.0 * k, list.w * 0.42, 28.0 * k);
+                        self.mark(fidelity::MODE_CAPTION, control);
+                        let lit = usize::from(ticked(names::fidelity::LIGHTING));
+                        if effects(state).offered() {
+                            if let Some(i) = self.dropdown(
+                                p,
+                                ctx,
+                                fidelity::MODE_CAPTION,
+                                control,
+                                &fidelity::MODES,
+                                lit,
+                            ) {
+                                set_preference(
+                                    names::fidelity::LIGHTING,
+                                    PrefValue::Bool(i == 1),
+                                    out,
+                                );
+                            }
+                        } else {
+                            p.text_in(&label, control, Align::Left, fidelity::MODES[lit]);
+                        }
+                    }
+                    #[cfg(feature = "hifi")]
+                    Line::Preset => {
+                        let at = Rect::new(list.x + 16.0 * k, y, list.w * 0.5, row_h);
+                        p.text_in(&label, at, Align::Left, fidelity::PRESET_CAPTION);
+                        let control =
+                            Rect::new(list.x + list.w * 0.55, y + 3.0 * k, list.w * 0.42, 28.0 * k);
+                        self.mark(fidelity::PRESET_CAPTION, control);
+                        let in_use = self
+                            .options_page
+                            .preset
+                            .map(fidelity::Preset)
+                            .filter(|preset| preset.in_use(store::inq_value))
+                            .or_else(|| fidelity::preset_in_use(store::inq_value));
+                        let names_shown: Vec<&str> = fidelity::PRESET_NAMES
+                            .into_iter()
+                            .chain(in_use.is_none().then_some(fidelity::CUSTOM_PRESET))
+                            .collect();
+                        let at_choice = in_use.map_or(fidelity::PRESETS.len(), |preset| preset.0);
+                        if let Some(i) = self.dropdown(
+                            p,
+                            ctx,
+                            fidelity::PRESET_CAPTION,
+                            control,
+                            &names_shown,
+                            at_choice,
+                        ) {
+                            if let Some(preset) = fidelity::PRESETS.get(i) {
+                                self.options_page.preset = Some(i);
+                                for (name, value) in preset.values() {
+                                    set_preference(name, value, out);
+                                }
+                            }
+                        }
+                    }
                     Line::Renderer => {
                         p.text_in(
                             &label,
@@ -672,7 +755,9 @@ Press Escape to leave it as it is.",
         );
         if self.button(p, ctx, defaults, "Defaults", true) {
             for (name, value) in sheet::defaults(PageId::Client, Interface::Horizon) {
-                set_preference(name, PrefValue::from(value), out);
+                if is_sound_preference(name) == (page_tab == tab::SOUND) {
+                    set_preference(name, PrefValue::from(value), out);
+                }
             }
         }
     }
@@ -690,7 +775,13 @@ Press Escape to leave it as it is.",
         let k = p.scale;
         match row.value {
             Value::Check(name) => {
-                if let Some(PrefValue::Bool(on)) = store::inq_value(name) {
+                if let Some(PrefValue::Bool(stored)) = store::inq_value(name) {
+                    // A box that names what stays on is ticked while its preference is off.
+                    #[cfg(feature = "hifi")]
+                    let inverted = fidelity::find(name).is_some_and(|o| o.inverted);
+                    #[cfg(not(feature = "hifi"))]
+                    let inverted = false;
+                    let on = stored != inverted;
                     // An effect whose prerequisite is off keeps its tick, greyed, and cannot be
                     // changed until it can draw.
                     #[cfg(feature = "hifi")]
@@ -699,7 +790,7 @@ Press Escape to leave it as it is.",
                         return;
                     }
                     if let Some(on) = kit::checkbox(p, ctx, control, on) {
-                        set_preference(name, PrefValue::Bool(on), out);
+                        set_preference(name, PrefValue::Bool(on != inverted), out);
                     }
                 }
             }
@@ -1230,6 +1321,12 @@ type CameraSlider = (
 #[derive(Debug, Clone, Copy)]
 enum Line {
     Heading(&'static str),
+    /// The menu choosing standard or enhanced graphics.
+    #[cfg(feature = "hifi")]
+    GraphicsMode,
+    /// The enhanced graphics' quality presets.
+    #[cfg(feature = "hifi")]
+    Preset,
     Row(&'static Row),
     /// A line of plain words under a heading or a row: the experimental effects' warning, or why
     /// an effect's box is greyed.
@@ -1345,10 +1442,75 @@ pub(crate) fn hidden_row(row: &Row) -> bool {
     HIDDEN_ROWS.contains(&row.caption) || matches!(row.value, Value::Opacity(_))
 }
 
+/// The heading that makes up the Sound tab; the Display tab has every other on the Client page.
+const SOUND_HEADING: &str = "Sound";
+
+/// The rows standard graphics shows and enhanced graphics decides for itself.
+#[cfg(feature = "hifi")]
+const STANDARD_ONLY: [&str; 8] = [
+    "Adaptive Degrade",
+    "Adaptive Degrade Bias",
+    "Landscape Texture Detail",
+    "Environment Texture Detail",
+    "Texture Filtering",
+    "Environment Detail Textures",
+    "Landscape Detail Textures",
+    "Multiple Pass Alpha",
+];
+
+/// A retail row's caption on this interface, in the words games use.
+fn shown_caption(caption: &'static str) -> &'static str {
+    match caption {
+        "Adaptive Degrade" => "Adaptive Model Detail",
+        "Adaptive Degrade Bias" => "Model Detail Bias",
+        "Degrade Distance" => "Model Detail Distance",
+        "Landscape Texture Detail" => "Terrain Texture Quality",
+        "Environment Texture Detail" => "Texture Quality",
+        "Landscape Draw Distance" => "Terrain Draw Distance",
+        "Environment Detail Textures" => "Detail Textures",
+        "Landscape Detail Textures" => "Terrain Detail Textures",
+        "Multiple Pass Alpha" => "Soft Transparency",
+        other => other,
+    }
+}
+
+/// Whether the preference `name` belongs to the Sound tab.
+fn is_sound_preference(name: &str) -> bool {
+    sheet::headings_for(PageId::Client, Interface::Horizon)
+        .filter(|(heading, _)| heading.title == SOUND_HEADING)
+        .flat_map(|(_, rows)| rows)
+        .any(|row| match row.value {
+            Value::Sound { on, volume } => on == name || volume == name,
+            _ => row.preference() == Some(name),
+        })
+}
+
+/// The Display or Sound tab's lines.
+fn client_lines(tab_at: usize, state: &GameState) -> Vec<Line> {
+    let lines = sheet_lines(PageId::Client, state);
+    let mut out = Vec::with_capacity(lines.len());
+    let mut in_sound = false;
+    for line in lines {
+        if let Line::Heading(title) = line {
+            in_sound = title == SOUND_HEADING;
+        }
+        if in_sound == (tab_at == tab::SOUND) {
+            out.push(line);
+        }
+    }
+    #[cfg(feature = "hifi")]
+    if tab_at == tab::DISPLAY && effects(state).built {
+        out.insert(0, Line::GraphicsMode);
+    }
+    out
+}
+
 /// A page's headings and rows as this interface shows them, leaving out what the world's era does
 /// not have and what this interface does its own way.
 fn sheet_lines(page: PageId, state: &GameState) -> Vec<Line> {
     let mut out = Vec::new();
+    #[cfg(feature = "hifi")]
+    let enhanced = ticked(names::fidelity::LIGHTING);
     // The renderer choice comes last on the Client page, before the experimental effects.
     #[cfg_attr(not(feature = "hifi"), allow(unused_mut))]
     let mut renderer_lines = (page == PageId::Client && state.renderers.shown()).then_some([
@@ -1363,6 +1525,19 @@ fn sheet_lines(page: PageId, state: &GameState) -> Vec<Line> {
         let rows: Vec<_> = rows
             .into_iter()
             .filter(|r| r.needs.met(state.era.as_ref()) && !hidden_row(r))
+            .filter(|r| !effect_left_out(r, state))
+            .filter(|r| {
+                #[cfg(feature = "hifi")]
+                {
+                    let chosen_above = r.preference() == Some(names::fidelity::LIGHTING);
+                    !chosen_above && !(enhanced && STANDARD_ONLY.contains(&r.caption))
+                }
+                #[cfg(not(feature = "hifi"))]
+                {
+                    let _ = r;
+                    true
+                }
+            })
             .collect();
         if rows.is_empty() {
             continue;
@@ -1372,12 +1547,25 @@ fn sheet_lines(page: PageId, state: &GameState) -> Vec<Line> {
         if heading.title == fidelity::HEADING {
             out.extend(renderer_lines.take().into_iter().flatten());
         }
-        out.push(Line::Heading(heading.title));
+        #[cfg(feature = "hifi")]
+        let title = if heading.title == fidelity::HEADING && !enhanced {
+            fidelity::STANDARD_HEADING
+        } else {
+            heading.title
+        };
+        #[cfg(not(feature = "hifi"))]
+        let title = heading.title;
+        out.push(Line::Heading(title));
         #[cfg(feature = "hifi")]
         if heading.title == fidelity::HEADING {
-            out.push(Line::Notice(fidelity::WARNING));
+            if enhanced {
+                out.push(Line::Notice(fidelity::WARNING));
+            }
             if effects_status(state).is_some() {
                 out.push(Line::EffectsStatus);
+            }
+            if enhanced {
+                out.push(Line::Preset);
             }
         }
         for row in rows {
@@ -1402,19 +1590,38 @@ fn sheet_lines(page: PageId, state: &GameState) -> Vec<Line> {
     out
 }
 
-/// The preference of `row` when it is one of the experimental effects' boxes.
+/// Whether the page leaves `row` out: another box's choice makes the effect mean nothing.
+#[cfg(feature = "hifi")]
+fn effect_left_out(row: &Row, state: &GameState) -> bool {
+    effect_box(row)
+        .and_then(|name| effect_blocked(name, state))
+        .is_some_and(fidelity::Blocked::hides_the_row)
+}
+
+/// Without the effects, nothing is left out for them.
+#[cfg(not(feature = "hifi"))]
+fn effect_left_out(_row: &Row, _state: &GameState) -> bool {
+    false
+}
+
+/// The preference of `row` when it is one of the experimental effects' boxes or menus.
 #[cfg(feature = "hifi")]
 fn effect_box(row: &Row) -> Option<&'static str> {
     match row.value {
         Value::Check(name) if fidelity::find(name).is_some() => Some(name),
+        Value::Menu(name) if fidelity::is_a_menu(name) => Some(name),
         _ => None,
     }
 }
 
-/// Whether the box `name` is ticked.
+/// Whether the box `name` is ticked, or the menu `name` is off its first choice.
 #[cfg(feature = "hifi")]
 fn ticked(name: &str) -> bool {
-    matches!(store::inq_value(name), Some(PrefValue::Bool(true)))
+    match store::inq_value(name) {
+        Some(PrefValue::Bool(on)) => on,
+        Some(PrefValue::Int(choice)) => choice != 0,
+        _ => false,
+    }
 }
 
 /// Why the effect `name` draws nothing however it is ticked: what it needs is off, or the

@@ -25,6 +25,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Enhanced Graphics: below 100% Render Scale, Windows and Linux rebuild the picture at full size from the frames before it too, and sharpen it, so it is far less soft than enlarged. A frame that cannot be rebuilt, the first after a cut, is enlarged along its edges and sharpened.
 - Enhanced Graphics: Render Scale starts at Dynamic, as the Low, Medium and High presets have it (Ultra draws 100%): it lowers the render scale to hold the Dynamic Resolution Frame Rate (60 FPS unless chosen), shown only while Dynamic is chosen.
 - Performance Panel: SCALE shows the render scale drawn now, as a Dynamic render scale moves it.
+
 ## 0.4.14 (2026-11-05)
 
 ## 0.4.13 (2026-11-05)

@@ -61,6 +61,10 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: an art pack can give an object a light of its own, shining day and night with a soft glow in the air about it.
 - Better Lighting: Light Draw Distance chooses how far lamps, flames and art pack lights shine and glow, from 0.5x to 5x, and they now fade out in the distance instead of going out at once.
 - Enhanced Graphics: Light Draw Distance starts at 1.5x, as the Medium preset has it, and the Quality Presets set it from 1x on Low to 5x on Ultra. Flame Flicker stays on until you untick it. Both leave the page with Enhanced Graphics Mode off.
+- Better Lighting: a Reflective Water box draws the world's water as water, with ripples, reflections of the sky and the land and a bed seen through it, without an art pack. The land and the Remastered sky are drawn with it, from the game's own pictures.
+- Better Lighting: the water has waves as large as it is, the sea's swell and surf, a lake's chop and hardly any on a river; foam gathers along the shore and on the crests, and the sun's light ripples over a shallow bed.
+- Better Lighting: near the camera, a body moving through the water stirs it, and the waves spread, cross, meet the shore and die away. Graphics without compute shaders ring the water round a body standing in it instead, as before.
+- Better Lighting: far water is no longer a glassy mirror. Its reflections soften and stretch with distance, and the sun's glitter spreads wider, as on rippled water.
 
 ## 0.4.14 (2026-11-05)
 

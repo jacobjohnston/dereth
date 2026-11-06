@@ -651,13 +651,14 @@ impl FidelityFeature {
     }
 
     /// What the option holds where the profile names nothing, when it is not 0: a box's default,
-    /// or the Depth Mapping and God Rays menus'.
+    /// or the Depth Mapping, God Rays and Cloud Detail menus'.
     #[must_use]
     pub fn default_value(self) -> Option<u32> {
         use dereth_client_contract::options as o;
         match self {
             Self::DepthMapping => u32::try_from(o::depth_mapping::DEFAULT).ok(),
             Self::GodRays => u32::try_from(o::god_rays::DEFAULT).ok(),
+            Self::CloudDetail => u32::try_from(o::cloud_detail::DEFAULT).ok(),
             _ => o::fidelity::find(self.name())
                 .filter(|b| b.on_by_default)
                 .map(|_| 1),

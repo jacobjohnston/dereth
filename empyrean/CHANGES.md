@@ -17,6 +17,10 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - An administrator can learn Ethangar's Wrath (spell 6341, from a world's data overlay) with `@addspell 6341`: it strikes down every creature attacking them and the one they have selected.
 - A caster weapon of several elements gives its damage bonus to each of them.
 - An account's access level no longer makes its characters staff by default: permissions belong to each character. Worlds without `override_character_permissions` in `empyrean.toml` change too; set it to `true` to keep the old behaviour.
+- A Dereth client is patched to a world with a data overlay over one TCP stream, as fast as the
+  connection carries it, instead of at the overlay's rate. The stream listens on the game port's
+  number over TCP (`[dat_overlay] bulk_port` to change it, `bulk = false` to turn it off); a client
+  that cannot reach it is patched as before.
 
 ## 0.3.10 (2026-11-05)
 - New relay that lets Dereth play an ac1999 server.

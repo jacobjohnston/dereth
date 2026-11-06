@@ -47,6 +47,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - /clouds sets the clouds of the Remastered sky this client draws: how much of the sky they cover, how fast they drift, how high, thick and large they are, how they are lit and how they shade the land, until /clouds reset.
 - Better Lighting: a God Rays menu, Off to High: sunlight shows in the air in shafts where walls, roofs and trees break it, most at dawn and dusk, in fog and under trees.
 - Enhanced Graphics: God Rays starts at Low, as the Medium preset has it, and the Low preset turns it off. It leaves the page with Enhanced Graphics Mode off.
+- Better Lighting: a Cloud Detail menu, Off to High: Medium and High draw the Remastered sky's clouds with two and four times the steps, smoothing the stripes along their edges; Off draws retail's flat cloud deck.
 
 ## 0.4.14 (2026-11-05)
 

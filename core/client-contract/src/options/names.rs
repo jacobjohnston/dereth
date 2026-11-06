@@ -151,6 +151,9 @@ pub mod fidelity {
     /// `Fidelity.GodRays`: how strongly the sunlit air shows shafts of light, a level: 0 Off,
     /// 1 Low, 2 Medium, 3 High.
     pub const GOD_RAYS: &str = "Fidelity.GodRays";
+    /// `Fidelity.CloudDetail`: how finely the volumetric clouds are drawn, a level stored as
+    /// 0 Low, 1 Medium, 2 High, 3 Off.
+    pub const CLOUD_DETAIL: &str = "Fidelity.CloudDetail";
     /// `Fidelity.Debug`: a diagnostic view, set only by `--set-at`: 0 Off, 1 Passthrough,
     /// 2 Depth, 3 Normals, 4 AO, 5 Shadows, 6 Census, 7 Parity (re-shaded with no pass).
     pub const DEBUG: &str = "Fidelity.Debug";
@@ -181,6 +184,7 @@ pub mod fidelity {
         HDR,
         DEPTH_MAPPING,
         GOD_RAYS,
+        CLOUD_DETAIL,
         DEBUG,
     ];
 }

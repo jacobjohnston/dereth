@@ -6,6 +6,7 @@
 
 pub mod background;
 pub mod classic;
+pub mod cloud_detail;
 pub mod config;
 pub mod depth_mapping;
 pub mod fidelity;

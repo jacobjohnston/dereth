@@ -12,7 +12,7 @@ use crate::json;
 pub struct AccountDefaults {
     // ACE: AccountDefaults.OverrideCharacterPermissions
     /// Account-level (true) rather than character-level (retail) permissions.
-    /// DIVERGE: V508 false by default; ACE's default is true.
+    /// DIVERGE: V509 false by default; ACE's default is true.
     #[serde(rename = "OverrideCharacterPermissions")]
     pub override_character_permissions: bool,
 

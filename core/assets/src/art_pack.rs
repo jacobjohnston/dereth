@@ -97,6 +97,8 @@
 //! damp_floors = true         # wet on floors too, not only on walls
 //! slime = true               # a film lies on it in a room where it is damp, in pools and runs
 //! ice = true                 # glacier ice: deep blue, opaque, with light bent through it
+//! sheen = 0.6                # 0 to 1: how strongly it shines as silk or satin does, in soft bands
+//!                            # along the picture's height that sweep across its folds
 //! grit = "grit/stone.png"    # a small picture of fine surface many materials share: its bend
 //!                            # in red and green, its speckle in blue, its roughness in alpha
 //! grit_repeat = [4, 3]       # how often the grit repeats across one repeat of the retail
@@ -167,6 +169,8 @@ pub struct ManifestMaterial {
     pub slime: bool,
     /// Whether it is glacier ice: deep blue, opaque, with light bent through it.
     pub ice: bool,
+    /// How strongly it shines as silk or satin does, from 0 to 1.
+    pub sheen: f32,
     /// A small picture of fine surface many materials may share, laid over its own: its bend in
     /// red and green, its speckle in blue and its roughness in alpha, each about a half.
     pub grit: Option<String>,
@@ -586,6 +590,14 @@ fn material(t: &toml::Table) -> Result<ManifestMaterial, ManifestError> {
         Some(v) => return fail(format!("damp {v} is not a number from 0 to 1")),
     };
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    // A share, well inside both types' range.
+    let sheen = match t.get("sheen") {
+        None => 0.0,
+        Some(toml::Value::Float(f)) if (0.0..=1.0).contains(f) => *f as f32,
+        Some(toml::Value::Integer(i)) if (0..=1).contains(i) => *i as f32,
+        Some(v) => return fail(format!("sheen {v} is not a number from 0 to 1")),
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     // A count of repeats, well inside both types' range.
     let part = |v: &toml::Value| match v {
         toml::Value::Float(f) if f.is_finite() && *f > 0.0 => Some(*f as f32),
@@ -614,6 +626,7 @@ fn material(t: &toml::Table) -> Result<ManifestMaterial, ManifestError> {
         damp_floors: flag("damp_floors")?,
         slime: flag("slime")?,
         ice: flag("ice")?,
+        sheen,
         grit: picture("grit")?,
         grit_repeat,
         credit: Credit {
@@ -1140,6 +1153,21 @@ license = \"CC0-1.0\"
              base_color = \"b.png\"\nnormal = \"n.png\"\n{lines}\nauthor = \"a\"\ntool = \"t\"\n\
              license = \"CC0-1.0\"\n"
         )
+    }
+
+    #[test]
+    fn a_material_may_shine_as_silk_does() {
+        let sheen = |lines: &str| {
+            let pack = ArtPackManifest::parse(&wall_with(lines)).expect("reads");
+            pack.material(DataId(0x0500_0001)).expect("named").sheen
+        };
+        assert!((sheen("sheen = 0.6") - 0.6).abs() < 1e-6);
+        assert!((sheen("sheen = 1") - 1.0).abs() < 1e-6);
+        assert!(sheen("").abs() < 1e-6, "none unless named");
+        for bad in ["sheen = 1.5", "sheen = -0.1", "sheen = true"] {
+            let e = ArtPackManifest::parse(&wall_with(bad)).expect_err(bad);
+            assert!(e.0.contains("sheen"), "{bad}: {}", e.0);
+        }
     }
 
     #[test]

@@ -43,6 +43,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: an art pack's glassy ground mirrors the sky.
 - Damp and Slime keeps the wet sheen Depth Mapping lays on dungeon walls and floors, and the slime in the Olthoi's lairs; untick it to turn them off.
 - Enhanced Graphics: Depth Mapping starts at High, as the Medium preset has it, and the Low preset turns it and Damp and Slime off. Keep Retail Look takes both off the page.
+- Art packs: a material for a retail picture may have a sheen (`sheen = 0` to `1`), so that cloth worn outdoors shines as silk or satin does, in soft bands that follow the sun over its folds.
 
 ## 0.4.14 (2026-11-05)
 

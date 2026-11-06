@@ -21,19 +21,24 @@
 //! textures) where it stood; one that stood nowhere it stands now moved from where the nearest of
 //! them stood. Every other pixel follows the camera, worked out from its depth.
 //!
-//! **At a render scale, on Metal, MetalFX blends instead.** [`Resolve`] then writes what MetalFX
-//! reads, every pixel's motion and where a translucent draw changed the picture, and [`Upscale`]
-//! hands the frame over: MetalFX keeps the history, at the frame's size, and the frame goes on
-//! there. `DERETH_HIFI_UPSCALER=plain` keeps the blend and only enlarges its picture, to compare.
+//! **At a render scale the picture is rebuilt at the frame's size** ([`crate::upscaler`]). On
+//! Metal MetalFX blends instead: [`Resolve`] writes what MetalFX reads, every pixel's motion and
+//! where a translucent draw changed the picture, and MetalFX keeps the history. Elsewhere the
+//! blend itself keeps a history of the frame's size, dropped where it saw something nearer than
+//! the surface now there, and sharpens it into the picture. Either way [`Upscale`] hands the
+//! frame over, and the frame goes on at its full size. A frame neither rebuilds is enlarged in
+//! the composite.
 //!
 //! The history is dropped whenever a frame breaks the sequence: a frame of the world not
-//! re-shaded, half a second of the game's clock between two frames, a new size or viewport.
+//! re-shaded, half a second of the game's clock between two frames, a new size or viewport, or a
+//! change of what rebuilds the picture.
 //!
 //! `DERETH_HIFI_TAA_BLEND` (the share of the current frame while nothing moves, default 0.1),
 //! `DERETH_HIFI_TAA_MOVING` (its share at and past `DERETH_HIFI_TAA_MOVING_PIXELS` of motion,
 //! defaults 0.2 and 12) and `DERETH_HIFI_TAA_SHARPEN` (default 0.35) tune it;
 //! `DERETH_HIFI_TAA_OBJECTS=0` follows the camera alone, and `DERETH_HIFI_TAA_SHOW=1` shows the
-//! blend in place of the picture, to look into it.
+//! blend in place of the picture, to look into it. `DERETH_HIFI_UPSCALE_SHARPEN` (stops under the
+//! most, default 0.5) tunes the sharpening of a history of the frame's size.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -58,7 +63,8 @@ use crate::passes::lighting::env_f32;
 use crate::reshade::{translucent, ReshadePlan};
 use crate::resources::{ResourceName, TextureSpec};
 use crate::shared::camera::HEIGHT_UP;
-use crate::shared::fullscreen::COLOUR_WGSL;
+use crate::shared::fullscreen::{COLOUR_WGSL, UPSCALE_WGSL};
+use crate::upscaler::{self, Upscaler};
 use crate::{
     Caps, DebugView, DrawAction, DrawNote, HifiError, HifiFrame, HifiSettings, ReplayFilter,
     SidecarContext, SkipRule,
@@ -69,11 +75,14 @@ const TAA_WGSL: &str = include_str!("taa.wgsl");
 /// The passes' shader, for validation without a device.
 #[must_use]
 pub fn shader_source() -> String {
-    format!("{TAA_WGSL}\n{COLOUR_WGSL}")
+    format!("{TAA_WGSL}\n{COLOUR_WGSL}\n{UPSCALE_WGSL}")
 }
 
 /// The history's format: the blended light, squeezed into 0..1.
 const HISTORY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// The format of the distances a history of the frame's size keeps, metres.
+const DISTANCE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 
 /// How many offsets the jitter steps through before it repeats.
 pub const SEQUENCE: u32 = 8;
@@ -408,12 +417,17 @@ struct LastFrame {
     clock: f64,
     viewport: [u32; 4],
     size: (u32, u32),
+    /// The frame's size.
+    output: (u32, u32),
 }
 
 /// How long the history is kept between two frames drawn with the anti-aliasing, seconds of the
 /// game's clock: past it, what the history holds is too old to follow, and it starts again. By the
 /// game's clock, so a frame drawn with the clock held keeps it however long the frame took.
 const HISTORY_KEPT: f64 = 0.5;
+
+/// How many floats the passes' constants hold.
+const CONSTANT_FLOATS: usize = 44;
 
 /// The passes' device objects.
 #[derive(Debug)]
@@ -423,6 +437,8 @@ struct TaaGpu {
     sharpen: wgpu::RenderPipeline,
     translucent: wgpu::RenderPipeline,
     upscale_inputs: wgpu::RenderPipeline,
+    upscale: wgpu::RenderPipeline,
+    upscale_sharpen: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     params: wgpu::Buffer,
 }
@@ -467,6 +483,7 @@ impl TaaGpu {
                     count: None,
                 },
                 texture_entry(6, float),
+                texture_entry(7, float),
             ],
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -478,9 +495,9 @@ impl TaaGpu {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = |entry: &str, format, write_mask| {
+        let pipeline_to = |label, entry: &str, targets: &[Option<wgpu::ColorTargetState>]| {
             device.build_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("high-fidelity anti-aliasing"),
+                label: Some(label),
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &module,
@@ -495,42 +512,40 @@ impl TaaGpu {
                     module: &module,
                     entry_point: Some(entry),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: None,
-                        write_mask,
-                    })],
+                    targets,
                 }),
                 multiview_mask: None,
                 cache: None,
             })
         };
-        let upscale_inputs = device.build_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("MetalFX inputs"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_upscale_inputs"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[
-                    Some(metalfx::MOTION_FORMAT.into()),
-                    Some(metalfx::REACTIVE_FORMAT.into()),
-                ],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = |entry: &str, format, write_mask| {
+            pipeline_to(
+                "high-fidelity anti-aliasing",
+                entry,
+                &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask,
+                })],
+            )
+        };
+        let upscale_inputs = pipeline_to(
+            "MetalFX inputs",
+            "fs_upscale_inputs",
+            &[
+                Some(metalfx::MOTION_FORMAT.into()),
+                Some(metalfx::REACTIVE_FORMAT.into()),
+            ],
+        );
+        let upscale = pipeline_to(
+            "temporal upscale",
+            "fs_upscale",
+            &[Some(HISTORY_FORMAT.into()), Some(DISTANCE_FORMAT.into())],
+        );
         Self {
             upscale_inputs,
+            upscale,
+            upscale_sharpen: pipeline("fs_upscale_sharpen", HDR_FORMAT, wgpu::ColorWrites::ALL),
             resolve: pipeline("fs_resolve", HISTORY_FORMAT, wgpu::ColorWrites::ALL),
             sharpen: pipeline("fs_sharpen", HDR_FORMAT, wgpu::ColorWrites::COLOR),
             translucent: pipeline("fs_translucent", MOTION_FORMAT, wgpu::ColorWrites::BLUE),
@@ -553,6 +568,7 @@ impl TaaGpu {
     }
 
     /// The bindings of one draw: the pictures in binding order.
+    #[allow(clippy::too_many_arguments)]
     fn bind(
         &self,
         device: &wgpu::Device,
@@ -561,6 +577,7 @@ impl TaaGpu {
         motion: &wgpu::TextureView,
         history: &wgpu::TextureView,
         before_alpha: &wgpu::TextureView,
+        history_distance: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         let view = |binding, v| wgpu::BindGroupEntry {
             binding,
@@ -583,6 +600,7 @@ impl TaaGpu {
                     resource: self.params.as_entire_binding(),
                 },
                 view(6, before_alpha),
+                view(7, history_distance),
             ],
         })
     }
@@ -614,8 +632,11 @@ struct State {
     blended: bool,
     /// The scaler for the sizes last asked for, or that there is none for them.
     scaler: Option<ScalerFor>,
-    /// Whether the last frame drawn with the anti-aliasing was MetalFX's.
-    upscaled: bool,
+    /// What kept the history of the last frame drawn with the anti-aliasing at the frame's size:
+    /// MetalFX or the temporal upscaler; none for a history of the drawn size.
+    rebuilt: Option<Upscaler>,
+    /// What rebuilt this frame's picture at the frame's size, if anything did.
+    upscaled: Option<Upscaler>,
     /// This frame's scale, once its inputs are written.
     pending: Option<UpscaleRequest>,
 }
@@ -679,9 +700,26 @@ pub struct Resolve(Rc<RefCell<State>>);
 #[derive(Debug)]
 pub struct Upscale(Rc<RefCell<State>>);
 
-/// A frame's scale, for the presentation to run between its submissions.
+/// A frame's scale, for the presentation to run once the frame's measures have read the picture
+/// as drawn.
 #[derive(Debug, Clone)]
-pub struct UpscaleRequest {
+pub struct UpscaleRequest(Rebuild);
+
+/// How a frame's scale is made.
+#[derive(Debug, Clone)]
+enum Rebuild {
+    /// By MetalFX, between two submissions.
+    MetalFx(Box<MetalFxScale>),
+    /// By a draw of the history of the frame's size, sharpened, in the frame's encoder.
+    Drawn {
+        pipeline: wgpu::RenderPipeline,
+        bind: wgpu::BindGroup,
+    },
+}
+
+/// What MetalFX reads for a frame's scale.
+#[derive(Debug, Clone)]
+struct MetalFxScale {
     scaler: Rc<TemporalScaler>,
     colour: wgpu::TextureView,
     depth: wgpu::TextureView,
@@ -693,7 +731,15 @@ pub struct UpscaleRequest {
 }
 
 impl UpscaleRequest {
-    /// Scale the frame into `output`, after everything already submitted. False when it could not.
+    /// Whether MetalFX makes the scale: [`Self::encode`] then, after everything already
+    /// submitted, into a texture it may write as storage; otherwise [`Self::draw`].
+    #[must_use]
+    pub fn by_metalfx(&self) -> bool {
+        matches!(self.0, Rebuild::MetalFx(_))
+    }
+
+    /// Scale the frame into `output` with MetalFX, after everything already submitted. False when
+    /// it could not, or the scale is not MetalFX's.
     #[must_use]
     pub fn encode(
         &self,
@@ -701,20 +747,57 @@ impl UpscaleRequest {
         queue: &wgpu::Queue,
         output: &wgpu::Texture,
     ) -> bool {
-        self.scaler.encode(
+        let Rebuild::MetalFx(m) = &self.0 else {
+            return false;
+        };
+        m.scaler.encode(
             device,
             queue,
             &ScaleInputs {
-                colour: self.colour.texture(),
-                depth: self.depth.texture(),
-                motion: self.motion.texture(),
-                reactive: self.reactive.texture(),
+                colour: m.colour.texture(),
+                depth: m.depth.texture(),
+                motion: m.motion.texture(),
+                reactive: m.reactive.texture(),
                 output,
-                jitter: self.jitter,
-                motion_scale: self.motion_scale,
-                reset: self.reset,
+                jitter: m.jitter,
+                motion_scale: m.motion_scale,
+                reset: m.reset,
             },
         )
+    }
+
+    /// Draw the rebuilt picture into `output`, of the frame's size, in `encoder`. False when the
+    /// scale is MetalFX's.
+    pub fn draw(
+        &self,
+        cx: &mut SidecarContext<'_>,
+        encoder: &mut wgpu::CommandEncoder,
+        output: &wgpu::TextureView,
+    ) -> bool {
+        let Rebuild::Drawn { pipeline, bind } = &self.0 else {
+            return false;
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("temporal upscale sharpen"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: output,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        cx.count_pass();
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bind, &[]);
+        pass.draw(0..3, 0..1);
+        true
     }
 }
 
@@ -834,7 +917,14 @@ impl HifiPass for Keep {
         let s = self.0.borrow();
         notes.push(("anti-aliasing draws that moved", s.moved_draws));
         notes.push(("anti-aliasing blended a history", u64::from(s.blended)));
-        notes.push(("upscaled by MetalFX", u64::from(s.upscaled)));
+        notes.push((
+            "upscaled by MetalFX",
+            u64::from(s.upscaled == Some(Upscaler::MetalFx)),
+        ));
+        notes.push((
+            "upscaled by the temporal upscaler",
+            u64::from(s.upscaled == Some(Upscaler::Temporal)),
+        ));
     }
 
     fn prepare(&mut self, cx: &mut PrepareCx<'_, '_>) -> Result<(), HifiError> {
@@ -1050,7 +1140,7 @@ impl HifiPass for Translucent {
         ) else {
             return Ok(());
         };
-        let bind = gpu.bind(&device, &rt.hdr, cx.depth, &copy, &copy, &copy);
+        let bind = gpu.bind(&device, &rt.hdr, cx.depth, &copy, &copy, &copy, &copy);
         full_draw(
             cx,
             &motion,
@@ -1071,12 +1161,13 @@ fn texture_of(cx: &mut EncodeCx<'_, '_>, name: ResourceName) -> Option<wgpu::Tex
 }
 
 impl Resolve {
-    /// The constants of this frame's blend.
+    /// The constants of this frame's blend, rebuilt at `output` pixels by the temporal upscaler.
     fn constants(
         frame: &HifiFrame,
         last: Option<&LastFrame>,
         viewport: [f32; 4],
         size: (u32, u32),
+        output: (u32, u32),
     ) -> Vec<f32> {
         let cam = &frame.camera;
         let now = (cam.projection * cam.view).as_dmat4();
@@ -1086,7 +1177,9 @@ impl Resolve {
         });
         #[allow(clippy::cast_precision_loss)] // pixels
         let (w, h) = (size.0 as f32, size.1 as f32);
-        let mut c = Vec::with_capacity(32);
+        #[allow(clippy::cast_precision_loss)] // pixels
+        let (ow, oh) = (output.0 as f32, output.1 as f32);
+        let mut c = Vec::with_capacity(CONSTANT_FLOATS);
         c.extend(viewport);
         c.extend([
             cam.jitter.x,
@@ -1105,30 +1198,39 @@ impl Resolve {
         #[allow(clippy::cast_possible_truncation)]
         // the transform, in single precision for the shader
         c.extend(reproject.to_cols_array().map(|x| x as f32));
+        c.extend([ow, oh, 1.0 / ow.max(1.0), 1.0 / oh.max(1.0)]);
+        c.extend([
+            cam.near.max(1e-3),
+            cam.far.max(cam.near + 1.0),
+            upscaler::HIDDEN,
+            upscaler::sharpness(env_f32(
+                "DERETH_HIFI_UPSCALE_SHARPEN",
+                upscaler::TEMPORAL_STOPS,
+            )),
+        ]);
         c
     }
 }
 
 impl Resolve {
-    /// The scaler this frame is upscaled with: at a render scale, with the world filling the whole
-    /// frame, on a device MetalFX can scale, unless `DERETH_HIFI_UPSCALER=plain` asks otherwise.
-    fn scaler_for(s: &mut State, cx: &EncodeCx<'_, '_>) -> Option<Rc<TemporalScaler>> {
-        if !cx.seam.scaled()
-            || *cx.resolved
-            || std::env::var("DERETH_HIFI_UPSCALER").is_ok_and(|v| v.trim() == "plain")
-        {
-            return None;
+    /// Whether this frame's picture can be rebuilt at the frame's size: at a render scale, with the
+    /// world filling the whole frame and its depth in the format the scalers read.
+    fn rebuildable(cx: &EncodeCx<'_, '_>) -> bool {
+        if !cx.seam.scaled() || *cx.resolved {
+            return false;
         }
         let (input, output) = (cx.seam.surface_size(), cx.seam.output_size());
         let fills = |v: Option<[u32; 4]>, (w, h): (u32, u32)| v == Some([0, 0, w, h]);
         let edges = |v: dereth_primitives::Viewport| [v.x, v.y, v.width, v.height];
-        if !fills(cx.seam.world_viewport().map(edges), input)
-            || !fills(cx.seam.output_viewport().map(edges), output)
-            || cx.depth.texture().format()
-                != dereth_render::wgpu::sidecar::SidecarContext::depth_format()
-        {
-            return None;
-        }
+        fills(cx.seam.world_viewport().map(edges), input)
+            && fills(cx.seam.output_viewport().map(edges), output)
+            && cx.depth.texture().format()
+                == dereth_render::wgpu::sidecar::SidecarContext::depth_format()
+    }
+
+    /// The MetalFX scaler from the drawn size to the frame's, on a device MetalFX can scale.
+    fn scaler_for(s: &mut State, cx: &EncodeCx<'_, '_>) -> Option<Rc<TemporalScaler>> {
+        let (input, output) = (cx.seam.surface_size(), cx.seam.output_size());
         match &s.scaler {
             Some((i, o, made)) if *i == input && *o == output => made.clone(),
             _ => {
@@ -1171,7 +1273,7 @@ impl Resolve {
         let Some(gpu) = s.gpu.as_ref() else {
             return Ok(None);
         };
-        let bind = gpu.bind(&device, &rt.hdr, cx.depth, moved, moved, moved);
+        let bind = gpu.bind(&device, &rt.hdr, cx.depth, moved, moved, moved, moved);
         {
             let attachment = |view| {
                 Some(wgpu::RenderPassColorAttachment {
@@ -1202,19 +1304,21 @@ impl Resolve {
         // the surface stood. A sign to look into the jitter with: `DERETH_HIFI_METALFX_JITTER`.
         let jitter = cx.frame.camera.jitter;
         let sign = env_f32("DERETH_HIFI_METALFX_JITTER", 1.0);
-        Ok(Some(UpscaleRequest {
-            scaler,
-            colour: rt.hdr.clone(),
-            depth: cx.depth.clone(),
-            motion,
-            reactive,
-            jitter: [
-                sign * jitter.x * viewport[2] * 0.5,
-                sign * -jitter.y * viewport[3] * 0.5,
-            ],
-            motion_scale: [-viewport[2], -viewport[3]],
-            reset,
-        }))
+        Ok(Some(UpscaleRequest(Rebuild::MetalFx(Box::new(
+            MetalFxScale {
+                scaler,
+                colour: rt.hdr.clone(),
+                depth: cx.depth.clone(),
+                motion,
+                reactive,
+                jitter: [
+                    sign * jitter.x * viewport[2] * 0.5,
+                    sign * -jitter.y * viewport[3] * 0.5,
+                ],
+                motion_scale: [-viewport[2], -viewport[3]],
+                reset,
+            },
+        )))))
     }
 }
 
@@ -1254,11 +1358,9 @@ impl HifiPass for Resolve {
         let mut guard = self.0.borrow_mut();
         let s = &mut *guard;
         s.blended = false;
-        let Some(rt) = cx.reshade else {
-            s.reset();
-            return Ok(());
-        };
-        if !s.kept {
+        s.upscaled = None;
+        s.pending = None;
+        if cx.reshade.is_none() || !s.kept {
             s.reset();
             return Ok(());
         }
@@ -1271,15 +1373,32 @@ impl HifiPass for Resolve {
         };
         let cam = cx.frame.camera;
         let now = cx.frame.time;
+        // At a render scale, what rebuilds the picture at the frame's size: MetalFX or the blend
+        // into a history of that size; with neither the history is the drawn size.
+        let first = upscaler::first();
+        let rebuildable = Self::rebuildable(cx);
+        let scaler = (rebuildable && first == Upscaler::MetalFx)
+            .then(|| Self::scaler_for(s, cx))
+            .flatten();
+        let can = upscaler::Can {
+            metalfx: scaler.is_some(),
+            temporal: rebuildable,
+        };
+        let rebuilt = match upscaler::choose(first, can) {
+            u @ (Upscaler::MetalFx | Upscaler::Temporal) => Some(u),
+            Upscaler::Spatial | Upscaler::Plain => None,
+        };
+        let output = cx.seam.output_size();
         // The history holds the frames before this one only when the last frame drawn with it
-        // was drawn a moment ago by the game's clock, at this size and in this viewport. (Frames
-        // drawn without the world in between, a preview of an item say, leave it as it is.)
-        let scaler = Self::scaler_for(s, cx);
+        // was drawn a moment ago by the game's clock, at these sizes, in this viewport and rebuilt
+        // alike. (Frames drawn without the world in between, a preview of an item say, leave it
+        // as it is.)
         let last = s.last.filter(|l| {
             s.valid
-                && s.upscaled == scaler.is_some()
+                && s.rebuilt == rebuilt
                 && (now - l.clock).abs() <= HISTORY_KEPT
                 && l.size == size
+                && l.output == output
                 && l.viewport == cam.viewport
         });
         s.blended = last.is_some();
@@ -1287,25 +1406,51 @@ impl HifiPass for Resolve {
         queue.write_buffer(
             &s.device_objects(&device).params,
             0,
-            &Self::constants(cx.frame, last.as_ref(), viewport, size)
+            &Self::constants(cx.frame, last.as_ref(), viewport, size, output)
                 .iter()
                 .flat_map(|f| f.to_le_bytes())
                 .collect::<Vec<u8>>(),
         );
-        if let Some(scaler) = scaler {
-            s.pending = Self::upscale_inputs(s, cx, scaler, &motion, last.is_none(), viewport)?;
-            s.upscaled = true;
-            s.valid = true;
-            s.last = Some(LastFrame {
-                view_projection: cam.projection * cam.view,
-                shift: cam.block_shift,
-                clock: now,
-                viewport: cam.viewport,
-                size,
-            });
-            return Ok(());
-        }
-        s.upscaled = false;
+        s.rebuilt = rebuilt;
+        s.pending = match (rebuilt, scaler) {
+            (Some(Upscaler::MetalFx), Some(scaler)) => {
+                Self::upscale_inputs(s, cx, scaler, &motion, last.is_none(), viewport)?
+            }
+            (Some(Upscaler::Temporal), _) => Self::rebuild(s, cx, &motion, last.is_some())?,
+            _ => {
+                if !Self::blend(s, cx, &motion)? {
+                    return Ok(());
+                }
+                None
+            }
+        };
+        s.upscaled = s.pending.as_ref().and(rebuilt);
+        s.valid = true;
+        s.last = Some(LastFrame {
+            view_projection: cam.projection * cam.view,
+            shift: cam.block_shift,
+            clock: now,
+            viewport: cam.viewport,
+            size,
+            output,
+        });
+        Ok(())
+    }
+}
+
+impl Resolve {
+    /// The blend into the history of the drawn size, and the sharpening of it into the picture.
+    /// False when the device objects are not made.
+    fn blend(
+        s: &mut State,
+        cx: &mut EncodeCx<'_, '_>,
+        motion: &wgpu::TextureView,
+    ) -> Result<bool, HifiError> {
+        let Some(rt) = cx.reshade else {
+            return Ok(false);
+        };
+        let device = cx.seam.device().clone();
+        let size = cx.seam.surface_size();
         let history: Vec<wgpu::TextureView> =
             [ResourceName::TaaHistory0, ResourceName::TaaHistory1]
                 .into_iter()
@@ -1324,7 +1469,7 @@ impl HifiPass for Resolve {
                 })
                 .collect::<Result<_, _>>()?;
         let Some(gpu) = s.gpu.as_ref() else {
-            return Ok(());
+            return Ok(false);
         };
         let read = s.written;
         let write = 1 - read;
@@ -1332,7 +1477,8 @@ impl HifiPass for Resolve {
             &device,
             &rt.hdr,
             cx.depth,
-            &motion,
+            motion,
+            &history[read],
             &history[read],
             &history[read],
         );
@@ -1341,21 +1487,107 @@ impl HifiPass for Resolve {
             &device,
             &history[write],
             cx.depth,
-            &motion,
+            motion,
+            &history[write],
             &history[write],
             &history[write],
         );
         full_draw(cx, &rt.hdr, &gpu.sharpen, &sharpen, "anti-aliasing sharpen");
         s.written = write;
-        s.valid = true;
-        s.last = Some(LastFrame {
-            view_projection: cam.projection * cam.view,
-            shift: cam.block_shift,
-            clock: now,
-            viewport: cam.viewport,
-            size,
+        Ok(true)
+    }
+
+    /// The blend into the history of the frame's size, and what sharpens it into the frame's
+    /// picture once it holds frames before this one (`history`): a frame that starts it is
+    /// enlarged in the composite.
+    fn rebuild(
+        s: &mut State,
+        cx: &mut EncodeCx<'_, '_>,
+        motion: &wgpu::TextureView,
+        history: bool,
+    ) -> Result<Option<UpscaleRequest>, HifiError> {
+        let Some(rt) = cx.reshade else {
+            return Ok(None);
+        };
+        let device = cx.seam.device().clone();
+        let (width, height) = cx.seam.output_size();
+        let mut target = |name, format| {
+            cx.resources.texture(
+                &device,
+                name,
+                TextureSpec {
+                    width,
+                    height,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                },
+            )
+        };
+        let colour = [
+            target(ResourceName::TaaHistory0, HISTORY_FORMAT)?,
+            target(ResourceName::TaaHistory1, HISTORY_FORMAT)?,
+        ];
+        let distance = [
+            target(ResourceName::UpscaleDistance0, DISTANCE_FORMAT)?,
+            target(ResourceName::UpscaleDistance1, DISTANCE_FORMAT)?,
+        ];
+        let Some(gpu) = s.gpu.as_ref() else {
+            return Ok(None);
+        };
+        let read = s.written;
+        let write = 1 - read;
+        let bind = gpu.bind(
+            &device,
+            &rt.hdr,
+            cx.depth,
+            motion,
+            &colour[read],
+            &colour[read],
+            &distance[read],
+        );
+        {
+            let attachment = |view| {
+                Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })
+            };
+            let mut pass = cx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("temporal upscale"),
+                color_attachments: &[attachment(&colour[write]), attachment(&distance[write])],
+                depth_stencil_attachment: None,
+                timestamp_writes: cx.timer.writes("temporal upscale"),
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            cx.seam.count_pass();
+            pass.set_pipeline(&gpu.upscale);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        let sharpen = gpu.bind(
+            &device,
+            &colour[write],
+            cx.depth,
+            motion,
+            &colour[write],
+            &colour[write],
+            &distance[write],
+        );
+        let request = history.then(|| {
+            UpscaleRequest(Rebuild::Drawn {
+                pipeline: gpu.upscale_sharpen.clone(),
+                bind: sharpen,
+            })
         });
-        Ok(())
+        s.written = write;
+        Ok(request)
     }
 }
 
@@ -1411,10 +1643,45 @@ mod tests {
                 "vs",
                 "fs_resolve",
                 "fs_sharpen",
+                "fs_upscale",
+                "fs_upscale_sharpen",
                 "fs_upscale_inputs",
                 "fs_translucent"
             ]
         );
+    }
+
+    #[test]
+    fn the_constants_fill_the_anti_aliasing_s_block_exactly() {
+        let source = shader_source();
+        let module = naga::front::wgsl::parse_str(&source).expect("the shader parses");
+        let mut layouter = naga::proc::Layouter::default();
+        layouter
+            .update(module.to_ctx())
+            .expect("the shader's types lay out");
+        let block = module
+            .global_variables
+            .iter()
+            .find(|(_, g)| g.name.as_deref() == Some("taa"))
+            .map(|(_, g)| layouter[g.ty].size)
+            .expect("the shader's constants");
+        assert_eq!(block as usize, CONSTANT_FLOATS * 4);
+        assert!(block <= 256, "the constants fit their buffer");
+        let frame = HifiFrame::default();
+        let values = Resolve::constants(
+            &frame,
+            None,
+            [0.0, 0.0, 960.0, 540.0],
+            (960, 540),
+            (1920, 1080),
+        );
+        assert_eq!(values.len(), CONSTANT_FLOATS);
+        // The frame's size and its reciprocal, then the planes and the rebuilt picture's tuning.
+        assert_eq!(&values[36..38], &[1920.0, 1080.0]);
+        assert!((values[38] * 1920.0 - 1.0).abs() < 1e-6);
+        assert!(values[40] > 0.0 && values[41] > values[40]);
+        assert!((values[42] - upscaler::HIDDEN).abs() < 1e-6);
+        assert!(values[43] > 0.0 && values[43] <= 1.0);
     }
 
     #[test]

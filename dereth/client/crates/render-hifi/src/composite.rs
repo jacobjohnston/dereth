@@ -28,7 +28,9 @@ use crate::build::Build;
 use crate::build::Prebuilt;
 use crate::graph::WarmCx;
 use crate::resources::{ResourceName, Resources, TextureSpec};
+use crate::shared::fullscreen::UPSCALE_WGSL;
 use crate::timing::GpuTimer;
+use crate::upscaler::{self, Upscaler};
 use crate::{
     DebugView, DrawAction, DrawNote, HifiError, HifiSettings, ReplayFilter, SideTables,
     SidecarContext, SkipRule,
@@ -71,14 +73,16 @@ const SHARPEN: f32 = 0.35;
 
 /// The composite's shader: a full-target triangle that copies the picture texel for texel, or
 /// shows the world's depth inside the world viewport; or, where the world was drawn at fewer
-/// pixels than the frame has, enlarges the picture to the frame, sharpened, and its depth with it.
+/// pixels than the frame has, enlarges the picture to the frame, sharpened, and its depth with it:
+/// filtered, or along its edges by the spatial upscaler and then sharpened by its contrast.
 const COMPOSITE_WGSL: &str = r"
 struct Params {
     viewport: vec4<f32>,
     near_far: vec4<f32>,
     // xy: the drawn size over the frame's, zw: one over the drawn size.
     scale: vec4<f32>,
-    // x: how much the enlarged picture is sharpened.
+    // x: how much the enlarged picture is sharpened; y: how much the spatial upscaler sharpens it;
+    // z: 1 where the picture is linear light.
     sharpen: vec4<f32>,
 };
 @group(0) @binding(0) var picture: texture_2d<f32>;
@@ -114,6 +118,23 @@ fn fs_scale(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
     let hi = max(max(max(n, s), max(w, e)), c.rgb);
     let sharp = c.rgb + params.sharpen.x * (c.rgb - (n + s + w + e) * 0.25);
     return vec4<f32>(clamp(sharp, lo, hi), c.a);
+}
+
+// The picture drawn at fewer pixels, enlarged to the frame along its edges.
+@fragment
+fn fs_easu(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
+    let top = vec2<i32>(textureDimensions(picture)) - vec2<i32>(1, 1);
+    let at = p.xy * params.scale.xy;
+    let c = easu(picture, at, top, params.sharpen.z > 0.5);
+    return vec4<f32>(c, textureLoad(picture, min(vec2<i32>(at), top), 0).a);
+}
+
+// The enlarged picture sharpened by its contrast.
+@fragment
+fn fs_rcas(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
+    let px = vec2<i32>(p.xy);
+    let top = vec2<i32>(textureDimensions(picture)) - vec2<i32>(1, 1);
+    return vec4<f32>(rcas(picture, px, top, params.sharpen.y), textureLoad(picture, px, 0).a);
 }
 
 // The world's depth drawn at fewer pixels, enlarged to the frame texel for texel.
@@ -196,8 +217,14 @@ struct Pipelines {
     /// The picture enlarged to the frame, and its depth with it.
     scale: wgpu::RenderPipeline,
     scale_depth: wgpu::RenderPipeline,
+    /// The spatial upscaler's two passes.
+    easu: wgpu::RenderPipeline,
+    rcas: wgpu::RenderPipeline,
     smooth: wgpu::Sampler,
     params: wgpu::Buffer,
+    /// The constants of a depth enlarged ahead of the composite, in a submission of the frame's
+    /// that may write the composite's after it.
+    depth_params: wgpu::Buffer,
 }
 
 /// One of the seen depth's pipelines, made on first use.
@@ -221,6 +248,8 @@ pub struct Compositor {
     redrawn: u64,
     /// Whether this frame kept its depth at a [`stamp_split`].
     kept: bool,
+    /// Whether this frame's picture was enlarged by the spatial upscaler.
+    spatial: bool,
     /// The frame's jitter: for each per-frame block the world was recorded with, the block the
     /// world is drawn with; empty on a frame drawn without the anti-aliasing.
     jitter: std::collections::HashMap<u32, u32>,
@@ -321,6 +350,7 @@ impl Compositor {
     pub fn begin_frame(&mut self) {
         self.redrawn = 0;
         self.kept = false;
+        self.spatial = false;
     }
 
     /// Draw the depth with no stamp at the frame's jitter: `jitter` maps each per-frame block the
@@ -339,6 +369,12 @@ impl Compositor {
     #[must_use]
     pub fn kept(&self) -> bool {
         self.kept
+    }
+
+    /// Whether this frame's picture was enlarged by the spatial upscaler.
+    #[must_use]
+    pub fn spatial(&self) -> bool {
+        self.spatial
     }
 
     /// The colour and depth targets the world is replayed into, at the frame target's size,
@@ -731,13 +767,15 @@ impl Compositor {
         cx.replay(range, &mut pass, filter);
     }
 
-    /// The pipelines and bindings of the composite of `picture` and `depth`, its constants written.
+    /// The pipelines and bindings of the composite of `picture` and `depth`, its constants written:
+    /// those of a depth enlarged ahead of it with `ahead`.
     fn prepared(
         &mut self,
         cx: &SidecarContext<'_>,
         picture: &wgpu::TextureView,
         depth: &wgpu::TextureView,
         near_far: (f32, f32),
+        ahead: bool,
     ) -> Option<(&Pipelines, wgpu::BindGroup)> {
         let format = cx.surface_format();
         if self.pipelines.as_ref().is_none_or(|p| p.format != format) {
@@ -767,37 +805,22 @@ impl Compositor {
                 0.0,
             ])
             .chain(scale)
-            .chain([SHARPEN, 0.0, 0.0, 0.0])
+            .chain([
+                SHARPEN,
+                upscaler::sharpness(upscaler::SPATIAL_STOPS),
+                f32::from(u8::from(format.is_srgb())),
+                0.0,
+            ])
             .collect();
         let params: Vec<u8> = values.iter().flat_map(|f| f.to_le_bytes()).collect();
-        cx.queue().write_buffer(&p.params, 0, &params);
-        let bind = cx.device().create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("composite"),
-            layout: &p.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(picture),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(depth),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: p.params.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&p.smooth),
-                },
-            ],
-        });
+        let buffer = if ahead { &p.depth_params } else { &p.params };
+        cx.queue().write_buffer(buffer, 0, &params);
+        let bind = composite_bind(cx.device(), p, picture, depth, buffer);
         Some((p, bind))
     }
 
     /// The world's `depth`, enlarged to the frame for a frame about to go on at the frame's size.
-    /// Its constants are written here, so it must be submitted before the composite's are.
+    /// Its constants are its own, so it may share a submission with the composite.
     ///
     /// # Errors
     /// [`HifiError::Budget`] when it does not fit the video memory budget.
@@ -810,7 +833,7 @@ impl Compositor {
         depth: &wgpu::TextureView,
         near_far: (f32, f32),
     ) -> Result<Option<wgpu::TextureView>, HifiError> {
-        let Some((p, bind)) = self.prepared(cx, picture, depth, near_far) else {
+        let Some((p, bind)) = self.prepared(cx, picture, depth, near_far, true) else {
             return Ok(None);
         };
         enlarged_depth(p, &bind, cx, resources, encoder).map(Some)
@@ -818,9 +841,9 @@ impl Compositor {
 
     /// Copy `picture` into the frame target texel for texel; with the depth view asked for,
     /// show `depth` inside the world viewport instead. Where the world was drawn at fewer pixels
-    /// than the frame has, the picture is enlarged to the frame and sharpened, and `depth` is
-    /// enlarged into a depth of the frame's size, which is returned: what the interface drawn
-    /// over the world tests against.
+    /// than the frame has, the picture is enlarged to the frame and sharpened (by the spatial
+    /// upscaler unless `DERETH_HIFI_UPSCALER=plain`), and `depth` is enlarged into a depth of the
+    /// frame's size, which is returned: what the interface drawn over the world tests against.
     ///
     /// # Errors
     /// [`HifiError::Budget`] when the enlarged depth does not fit the video memory budget.
@@ -837,7 +860,8 @@ impl Compositor {
         near_far: (f32, f32),
         timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) -> Result<Option<wgpu::TextureView>, HifiError> {
-        let Some((p, bind)) = self.prepared(cx, picture, depth, near_far) else {
+        let format = cx.surface_format();
+        let Some((p, bind)) = self.prepared(cx, picture, depth, near_far, false) else {
             return Ok(None);
         };
         let scaled = cx.scaled();
@@ -846,32 +870,108 @@ impl Compositor {
         } else {
             None
         };
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("composite"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: wgpu::StoreOp::Store,
+        let spatial = scaled && view != DebugView::Depth && upscaler::first() != Upscaler::Plain;
+        // Along the edges into a picture of the frame's size, which is sharpened into the target.
+        let (source, bind) = if spatial {
+            let (width, height) = cx.output_size();
+            let enlarged_picture = resources.texture(
+                cx.device(),
+                ResourceName::SpatialUpscaled,
+                TextureSpec {
+                    width,
+                    height,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
                 },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: timestamps,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        cx.count_pass();
-        pass.set_pipeline(match (view, scaled) {
-            (DebugView::Depth, _) => &p.depth,
-            (_, true) => &p.scale,
-            (_, false) => &p.copy,
-        });
-        pass.set_bind_group(0, &bind, &[]);
-        pass.draw(0..3, 0..1);
+            )?;
+            draw_once(
+                encoder,
+                cx,
+                &enlarged_picture,
+                &p.easu,
+                &bind,
+                "spatial upscale",
+                None,
+            );
+            let sharpen = composite_bind(cx.device(), p, &enlarged_picture, depth, &p.params);
+            (&p.rcas, sharpen)
+        } else {
+            let pipeline = match (view, scaled) {
+                (DebugView::Depth, _) => &p.depth,
+                (_, true) => &p.scale,
+                (_, false) => &p.copy,
+            };
+            (pipeline, bind)
+        };
+        draw_once(encoder, cx, target, source, &bind, "composite", timestamps);
+        self.spatial = spatial;
         Ok(enlarged)
     }
+}
+
+/// The composite's bindings for `picture` and `depth`, with the constants in `params`.
+fn composite_bind(
+    device: &wgpu::Device,
+    p: &Pipelines,
+    picture: &wgpu::TextureView,
+    depth: &wgpu::TextureView,
+    params: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("composite"),
+        layout: &p.layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(picture),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(depth),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: params.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::Sampler(&p.smooth),
+            },
+        ],
+    })
+}
+
+/// One full-target draw of `pipeline` into `target`, cleared first.
+fn draw_once(
+    encoder: &mut wgpu::CommandEncoder,
+    cx: &mut SidecarContext<'_>,
+    target: &wgpu::TextureView,
+    pipeline: &wgpu::RenderPipeline,
+    bind: &wgpu::BindGroup,
+    name: &'static str,
+    timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(name),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: timestamps,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    cx.count_pass();
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind, &[]);
+    pass.draw(0..3, 0..1);
 }
 
 /// The world's depth drawn at fewer pixels, enlarged to the frame.
@@ -919,7 +1019,7 @@ fn enlarged_depth(
 fn make_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) -> Pipelines {
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("composite"),
-        source: wgpu::ShaderSource::Wgsl(COMPOSITE_WGSL.into()),
+        source: wgpu::ShaderSource::Wgsl(composite_wgsl().into()),
     });
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("composite"),
@@ -1021,12 +1121,14 @@ fn make_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) -> Pipelin
         multiview_mask: None,
         cache: None,
     });
-    let params = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("composite"),
-        size: PARAMS_BYTES.get(),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
+    let buffer = || {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("composite"),
+            size: PARAMS_BYTES.get(),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    };
     Pipelines {
         format,
         layout,
@@ -1034,13 +1136,16 @@ fn make_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) -> Pipelin
         depth: pipeline("fs_depth"),
         scale: pipeline("fs_scale"),
         scale_depth,
+        easu: pipeline("fs_easu"),
+        rcas: pipeline("fs_rcas"),
         smooth: device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("composite"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..wgpu::SamplerDescriptor::default()
         }),
-        params,
+        params: buffer(),
+        depth_params: buffer(),
     }
 }
 
@@ -1161,10 +1266,15 @@ fn make_seen_pipeline(device: &wgpu::Device, entry: &str, bindings: u32) -> Seen
     SeenPipeline { layout, pipeline }
 }
 
+/// The composite's shader, with the spatial upscaler's.
+fn composite_wgsl() -> String {
+    format!("{COMPOSITE_WGSL}\n{UPSCALE_WGSL}")
+}
+
 /// The composite's shader, for the device-free validation test.
 #[must_use]
-pub const fn composite_shader() -> &'static str {
-    COMPOSITE_WGSL
+pub fn composite_shader() -> String {
+    composite_wgsl()
 }
 
 /// The seen depth's shader, for the device-free validation test.

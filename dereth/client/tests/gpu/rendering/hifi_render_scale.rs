@@ -4,8 +4,9 @@
 //! At a render scale under a hundred percent the presentation draws its world at that share of
 //! the frame's pixels each way, so the work of every pass that works per pixel falls with the
 //! square of it, and enlarges the picture to fill the frame: the frame shows the same place as at
-//! full scale, nothing shifted and nothing cut off, only softer. On macOS MetalFX does the
-//! enlarging, and the frame goes on at its full size after it.
+//! full scale, nothing shifted and nothing cut off, only softer. On macOS MetalFX rebuilds the
+//! picture, elsewhere the anti-aliasing's blend into a history of the frame's size, and the frame
+//! goes on at its full size after it; a frame neither rebuilds is enlarged along its edges.
 //!
 //! Fixture: the retail dats (`DERETH_TEST_DAT_DIR`) and a hardware `wgpu` device.
 
@@ -193,6 +194,26 @@ fn at_a_render_scale_metalfx_rebuilds_the_picture_and_at_a_hundred_percent_it_do
     assert_eq!(note(&full, "upscaled by MetalFX"), 0, "{full:?}");
 }
 
+/// Asked for the temporal upscaler, on any platform, a frame at a render scale is rebuilt by it once
+/// its history holds frames, and not enlarged in the composite.
+#[test]
+fn at_a_render_scale_the_temporal_upscaler_rebuilds_the_picture() {
+    let _gpu = crate::common::gpu_lock();
+    std::env::set_var("DERETH_HIFI_UPSCALER", "temporal");
+    let (frame, scaled) = town(50);
+    std::env::remove_var("DERETH_HIFI_UPSCALER");
+    assert_eq!(
+        note(&scaled, "upscaled by the temporal upscaler"),
+        1,
+        "{scaled:?}"
+    );
+    assert_eq!(note(&scaled, "upscaled by MetalFX"), 0);
+    assert_eq!(note(&scaled, "enlarged by the spatial upscaler"), 0);
+    assert_eq!(note(&scaled, "world drawn width"), u64::from(W / 2));
+    let bright = frame.as_chunks::<4>().0.iter().filter(|p| p[1] > 8).count();
+    assert!(bright * 10 > frame.len() / 4 * 9, "the frame is dark");
+}
+
 /// The scale can change between any two frames, as the options page changes it: the presentation
 /// goes on drawing, and at each share its picture fills the frame.
 #[test]
@@ -256,9 +277,10 @@ fn detail(rgba: &[u8], width: usize) -> f64 {
     mean
 }
 
-/// MetalFX against the plain enlarging and the full picture, the camera still and moving: each
-/// frame's likeness to the full picture and the detail it holds, and the frames as files in
-/// `DERETH_HIFI_CAPTURE_DIR`. `DERETH_HIFI_SIZE` is `WxH` (default 1920x1080). It asserts nothing.
+/// MetalFX, the temporal and the spatial upscalers against the plain enlarging and the full
+/// picture, the camera still and moving: each frame's likeness to the full picture and the detail
+/// it holds, what rebuilt it, and the frames as files in `DERETH_HIFI_CAPTURE_DIR`.
+/// `DERETH_HIFI_SIZE` is `WxH` (default 1920x1080). It asserts nothing.
 #[test]
 #[ignore = "instrument: compares; look at its frames"]
 fn compare_the_upscalers() {
@@ -297,7 +319,15 @@ fn compare_the_upscalers() {
         }
         let report = gpu.hifi_report().expect("the presentation is installed");
         assert_eq!(gpu.hifi_failed(), None);
-        (capture(&mut gpu), note(&report, "upscaled by MetalFX"))
+        let by = [
+            ("upscaled by MetalFX", "metalfx"),
+            ("upscaled by the temporal upscaler", "temporal"),
+            ("enlarged by the spatial upscaler", "spatial"),
+        ]
+        .into_iter()
+        .find(|(n, _)| note(&report, n) == 1)
+        .map_or("plain", |(_, by)| by);
+        (capture(&mut gpu), by)
     };
     for (motion, metres) in [("still", 0.0), ("moving", 0.1)] {
         let (full, _) = shoot(100, "", "1", metres);
@@ -312,12 +342,16 @@ fn compare_the_upscalers() {
         eprintln!("{motion} full: detail {:.1}", detail(&full, across));
         for (name, percent, upscaler, jitter) in [
             ("metalfx-67", 67, "", "1"),
+            ("temporal-67", 67, "temporal", "1"),
+            ("spatial-67", 67, "spatial", "1"),
             ("plain-67", 67, "plain", "1"),
             ("metalfx-50", 50, "", "1"),
             ("metalfx-50-jitter-flipped", 50, "", "-1"),
+            ("temporal-50", 50, "temporal", "1"),
+            ("spatial-50", 50, "spatial", "1"),
             ("plain-50", 50, "plain", "1"),
         ] {
-            let (frame, upscaled) = shoot(percent, upscaler, jitter, metres);
+            let (frame, by) = shoot(percent, upscaler, jitter, metres);
             hifi_stations::write_png(
                 &out.join(format!("{motion}-{name}.png")),
                 width,
@@ -325,7 +359,7 @@ fn compare_the_upscalers() {
                 &frame,
             );
             eprintln!(
-                "{motion} {name}: psnr {:.2} dB, detail {:.1}, upscaled {upscaled}",
+                "{motion} {name}: psnr {:.2} dB, detail {:.1}, by {by}",
                 psnr(&frame, &full),
                 detail(&frame, across),
             );

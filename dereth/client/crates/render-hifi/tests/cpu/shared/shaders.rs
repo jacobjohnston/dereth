@@ -1,6 +1,8 @@
 //! The shader code the passes share is valid on its own.
 
-use dereth_render_hifi::shared::fullscreen::{COLOUR_WGSL, DEPTH_WGSL, FULLSCREEN_WGSL};
+use dereth_render_hifi::shared::fullscreen::{
+    COLOUR_WGSL, DEPTH_WGSL, FULLSCREEN_WGSL, UPSCALE_WGSL,
+};
 
 /// Behaviour: hifi.shaders.the-shared-shader-code-validates
 #[test]
@@ -9,6 +11,7 @@ fn every_shared_shader_parses_and_validates() {
         ("fullscreen", FULLSCREEN_WGSL),
         ("colour", COLOUR_WGSL),
         ("depth", DEPTH_WGSL),
+        ("upscale", UPSCALE_WGSL),
     ] {
         let module = naga::front::wgsl::parse_str(source)
             .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
@@ -28,11 +31,20 @@ fn every_shared_shader_parses_and_validates() {
 #[test]
 fn the_composite_shader_parses_and_validates() {
     let seen = dereth_render_hifi::composite::seen_depth_shader();
+    let composite = dereth_render_hifi::composite::composite_shader();
     let shaders: [(&str, &str, &[&str]); 2] = [
         (
             "composite",
-            dereth_render_hifi::composite::composite_shader(),
-            &["vs", "fs_copy", "fs_scale", "fs_scale_depth", "fs_depth"],
+            &composite,
+            &[
+                "vs",
+                "fs_copy",
+                "fs_scale",
+                "fs_easu",
+                "fs_rcas",
+                "fs_scale_depth",
+                "fs_depth",
+            ],
         ),
         ("seen depth", &seen, &["vs", "fs_seen", "fs_step"]),
     ];

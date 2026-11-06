@@ -21,6 +21,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: far mountains keep their shape: a narrow peak a few kilometers off is no longer drawn as a pyramid.
 - Better Lighting: walking from one landblock into the next no longer draws the ground a block out of place for a frame, which could hide your character inside a hill.
 - Better Lighting: something new coming into view, such as a block loading as you walk, no longer flashes the whole picture back to the standard look for a frame.
+- macOS: the window can be dragged to any size, and it opens at the size it last closed at.
 
 ## 0.4.14 (2026-11-05)
 

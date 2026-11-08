@@ -29,13 +29,13 @@ use degrade::*;
 #[path = "views.rs"]
 mod views;
 pub use views::*;
-#[cfg(feature = "hifi")]
-#[path = "asked_clouds.rs"]
-mod asked_clouds;
 #[path = "bake_worker.rs"]
 mod bake_worker;
 #[path = "cells.rs"]
 mod cells;
+#[cfg(feature = "hifi")]
+#[path = "asked_clouds.rs"]
+mod asked_clouds;
 #[cfg(feature = "hifi")]
 #[path = "drawn_ground.rs"]
 mod drawn_ground;
@@ -632,6 +632,12 @@ struct EnvCellDraw {
     /// the second.
     statics: Vec<StaticBatch>,
     statics_blended: Vec<StaticBatch>,
+    /// The statics the art pack has models for, block-local: baked apart from the rest.
+    #[cfg(feature = "hifi")]
+    art_pack: Vec<crate::art_pack::PackPlacement>,
+    /// The lamps of its statics, for their flames' halos.
+    #[cfg(feature = "hifi")]
+    lamps: hifi_lamps::BlockLamps,
     /// This cell's degrading static placements. Per cell rather than per block,
     /// because the batches are.
     degrade: Vec<DegradePlacement>,
@@ -1147,6 +1153,9 @@ pub struct SceneDraw {
     render_shadow: dereth_client_runtime::render_prefs::RenderPreferences,
     /// Whether Enhanced Graphics Mode drew at the last poll.
     enhanced_shadow: bool,
+    /// Whether the lamps drew at the last poll: they light a place with its light sources and
+    /// their glow, so the place's flat sprites of light are left out. Without them the sprites stay.
+    lit_by_sources: bool,
     /// What the high-fidelity bridge remembers between frames.
     #[cfg(feature = "hifi")]
     hifi: RefCell<hifi_bridge::Shadow>,

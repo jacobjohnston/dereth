@@ -44,7 +44,8 @@ struct Params {
     // room, whose surfaces then take their lights per pixel.
     indoor: vec4<f32>,
     // x the share of the light a room's vertices held that its surfaces keep however far from
-    // the lights (the light the room's walls throw about); yzw unused.
+    // the lights (the light the room's walls throw about); y how warm its tone goes; z how deep; w
+    // the light it leaves unchanged.
     room: vec4<f32>,
     // The sun's light that cloud and a low sun's long path through the air take from its beam
     // and the sky gives back, grey, linear, its gain applied: x the share seen from all round, y
@@ -369,6 +370,25 @@ const ROOM_SHINE: f32 = 2.5;
 // The brightest a damp room's surface shines.
 const ROOM_SHINE_MOST: f32 = 0.06;
 
+// What the room's tone does to a surface under the light `here`: darker far from its lights and
+// brighter close to them, so a flame stands in a pool, and warmer where those lights are warm.
+fn room_tone(here: vec3<f32>) -> vec3<f32> {
+    let lum = luminance(here);
+    let deep = clamp(pow(lum / max(params.room.w, 1e-3), params.room.z), ROOM_TONE_LOW, ROOM_TONE_HIGH);
+    let warm = smoothstep(-0.05, 0.1, (here.r - here.b) / max(lum, 1e-3)) * params.room.y;
+    // An ember's light tints what it falls on: a flame's is far paler.
+    let peak = max(max(here.r, here.g), here.b);
+    let red = smoothstep(0.25, 0.6, (here.r - here.g) / max(peak, 1e-3));
+    // So does a blue, green or pink light's, whose colour is all it has to show.
+    let cool = smoothstep(0.05, 0.35, max(here.b - here.g, here.g - here.r) / max(peak, 1e-3));
+    return mix(mix(vec3<f32>(1.0), ROOM_WARM, warm), here / max(peak, 1e-3), max(red, cool) * 0.5) * deep;
+}
+
+// The most the room's tone darkens and brightens a surface, and its warm tint.
+const ROOM_TONE_LOW: f32 = 0.88;
+const ROOM_TONE_HIGH: f32 = 1.1;
+const ROOM_WARM: vec3<f32> = vec3<f32>(1.12, 0.95, 0.72);
+
 // A room's surface lit by its own lights per pixel: the light burned into its vertices, which the
 // color was drawn with, gives way to the same lights worked out here, by the brightness of the
 // two in the display's encoding. Close to a torch the surface is brighter than its vertices held,
@@ -392,7 +412,8 @@ fn room_lit(c: vec3<f32>, kind: f32, px: vec2<i32>) -> vec3<f32> {
     if (params.indoor.z > 0.5) {
         return vec3<f32>(drawn, luminance(here.rgb) * 0.25, ratio * 0.25);
     }
-    return srgb_to_linear(linear_to_srgb(max(c, vec3<f32>(0.0))) * ratio);
+    let toned = mix(vec3<f32>(1.0), room_tone(here.rgb), trust);
+    return srgb_to_linear(linear_to_srgb(max(c, vec3<f32>(0.0))) * ratio * toned);
 }
 
 // What a room's surface reflects of the light the room bounces about: its own color, the light
@@ -439,6 +460,25 @@ fn slimed(shown: vec3<f32>, kind: f32, px: vec2<i32>) -> vec3<f32> {
     // What the burn says of the place keeps a light behind a wall from shining here.
     let shine = film.rgb * mix(0.3, 1.0, smoothstep(0.02, 0.2, burned_drawn(kind)));
     return max(under, vec3<f32>(0.0)) + shine / (1.0 + shine / SLIME_MOST);
+}
+
+// An art pack model in a room: its own colour under the lights worked out here, with a share of
+// the light the room's walls throw about. It holds no burned light of its own.
+const ROOM_MODEL_DRAWN: f32 = 0.17;
+fn room_model(kind: f32) -> bool {
+    return abs(kind - 1.52) < 0.015;
+}
+fn room_model_own(c: vec3<f32>) -> vec3<f32> {
+    return min(max(c, vec3<f32>(0.0)) / ROOM_MODEL_DRAWN, vec3<f32>(1.0));
+}
+fn room_model_lit(c: vec3<f32>, px: vec2<i32>) -> vec3<f32> {
+    let here = textureLoad(room_light, px, 0);
+    if (params.indoor.y < 0.5 || params.indoor.z > 0.5 || here.w < 0.0) {
+        return c;
+    }
+    let peak = max(max(here.r, here.g), here.b);
+    let light = here.rgb * (room_gain(peak) / max(peak, 1e-3)) + vec3<f32>(max(params.room.x * 0.45, 0.3));
+    return srgb_to_linear(linear_to_srgb(room_model_own(c)) * light * room_tone(here.rgb));
 }
 
 // The roughness of an art pack model's surface and whether it is a metal (x and y), from the
@@ -618,6 +658,9 @@ fn relit(p: vec4<f32>) -> Out {
     }
     // A room's own surface takes its lights per pixel while the viewer is in a room; seen from
     // outdoors, it keeps the light it was drawn with, as below.
+    if (room_model(kind) && params.indoor.w > 0.5) {
+        return out(vec4<f32>(room_model_lit(c.rgb, px), 1.0), vec4<f32>(room_model_own(c.rgb), 1.0));
+    }
     if (kind > 1.5 && kind < 2.5 && params.indoor.w > 0.5) {
         let shown = slimed(room_lit(c.rgb, kind, px) + room_shine(c, kind, px), kind, px);
         return out(vec4<f32>(shown, min(c.a, 1.0)), room_reflects(c.rgb, kind));

@@ -11,6 +11,11 @@
 //! take the light, the shadows, the occlusion and the bounced light as everything else does. The
 //! sun's shadow cascades take the models in place of the objects too ([`PackCasters`]).
 //!
+//! The models of the statics in the rooms the frame reached ([`HifiFrame::pack_rooms`]) are drawn
+//! at the frame's object passes: those of the rooms a frame seen from a room draws again after its
+//! indoor depth clear at its last, the rest at its first, with the outdoors, and those past the
+//! near buildings before their door stamps. They are lit by the rooms' own light per pixel.
+//!
 //! Only pixels change. What can be picked, where the camera may go and everything the game reads
 //! come from the ordinary frame, which draws the original objects whether or not the pack is
 //! drawn. A frame that is not re-shaded, or that notes no block, draws the original objects.
@@ -201,6 +206,19 @@ struct State {
     cover_drawn: bool,
     /// The plants drawn into the view in the last frame.
     cover_plants: u64,
+    /// The models of the statics in the rooms the frame reached: drawn at the frame's last object
+    /// pass, once a frame that steps indoors has cleared the depth and drawn its rooms.
+    room_view: Vec<Batch>,
+    /// The runs of rooms the frame does not draw again after its indoor depth clear: past the
+    /// near buildings, and nearer. They stand with what is outdoors.
+    room_view_far: Vec<Batch>,
+    room_view_outdoors: Vec<Batch>,
+    room_far_drawn: bool,
+    room_active: bool,
+    room_drawn: bool,
+    /// How many object passes the frame holds, and how many have begun.
+    objects_total: u32,
+    objects_seen: u32,
 }
 
 /// A model on the device.
@@ -260,6 +278,7 @@ struct PackGpu {
     view_instances: Option<(wgpu::Buffer, u64)>,
     caster_instances: Option<(wgpu::Buffer, u64)>,
     cover_instances: Option<(wgpu::Buffer, u64)>,
+    room_instances: Option<(wgpu::Buffer, u64)>,
     /// The far trees' layouts and culling.
     far: far::FarPipelines,
     /// The far trees' pictures, placed from the set the culling kept.
@@ -268,6 +287,14 @@ struct PackGpu {
     /// retail object's model among them.
     far_models: Vec<far::FarModel>,
     far_of: HashMap<u32, usize>,
+    /// What a card baked from a retail object is put on the device with: the materials' layout
+    /// and sampler and one-texel pictures, the cards' pictures, and how many of the frames'
+    /// cards are taken in.
+    material_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    card_fallbacks: Fallbacks,
+    card_textures: Vec<wgpu::Texture>,
+    cards_taken: usize,
 }
 
 fn uniform_entry(binding: u32, dynamic: bool) -> wgpu::BindGroupLayoutEntry {
@@ -633,6 +660,7 @@ fn material_constants(
 }
 
 /// The one-texel pictures a material that names none of its own is drawn with.
+#[derive(Debug)]
 struct Fallbacks {
     /// White, for a base colour.
     base: wgpu::Texture,
@@ -971,6 +999,7 @@ impl PackGpu {
                     model: k,
                     lod,
                     bounds: model.bounds,
+                    foliage: model.foliage,
                 });
                 far_models.len() - 1
             });
@@ -1089,11 +1118,79 @@ impl PackGpu {
             view_instances: None,
             caster_instances: None,
             cover_instances: None,
+            room_instances: None,
             far: far_pipelines,
             view_far,
             far_models,
             far_of,
+            card_fallbacks: Fallbacks {
+                base: one_texel(device, queue, [255; 4], true),
+                data: one_texel(device, queue, [255; 4], false),
+                normal: one_texel(device, queue, [128, 128, 255, 255], false),
+            },
+            material_layout,
+            sampler,
+            card_textures: Vec::new(),
+            cards_taken: 0,
         }
+    }
+
+    /// The cards of `set` not taken in yet, put on the device and drawn by the far objects; the
+    /// far models they add. A card of a retail object already drawn far off is passed over.
+    fn add_far_cards(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        set: &crate::snapshot::HifiFarCards,
+    ) -> Vec<far::FarModel> {
+        if set.cards.len() < self.cards_taken {
+            self.cards_taken = 0;
+        }
+        let mut added = Vec::new();
+        for card in &set.cards[self.cards_taken..] {
+            let model = &card.model;
+            let Some(part) = model.lods.first().and_then(|l| l.primitives.first()) else {
+                continue;
+            };
+            if self.far_of.contains_key(&model.id) {
+                continue;
+            }
+            let pictures = [
+                upload_image(device, queue, &card.colour),
+                upload_image(device, queue, &card.normal),
+            ];
+            let far = self.far_models.len();
+            let primitive = Materials {
+                layout: &self.material_layout,
+                sampler: &self.sampler,
+                images: &pictures,
+                fallbacks: &self.card_fallbacks,
+            }
+            .upload(device, queue, part, model, None, model.lods[0].views, far);
+            self.card_textures.extend(pictures);
+            self.models.push(GpuModel {
+                lods: vec![GpuLod {
+                    distance: f32::INFINITY,
+                    primitives: vec![primitive],
+                    pictures: true,
+                    shadows_only: false,
+                }],
+                sway: (model_height(model), 0.0),
+                bounds: model.bounds,
+                proxy: None,
+            });
+            let made = far::FarModel {
+                model: self.models.len() - 1,
+                lod: 0,
+                bounds: model.bounds,
+                foliage: model.foliage,
+            };
+            self.far_of.insert(model.id, far);
+            self.far_models.push(made);
+            added.push(made);
+        }
+        self.cards_taken = set.cards.len();
+        added
     }
 }
 
@@ -1459,6 +1556,57 @@ impl State {
         }
     }
 
+    /// The models of the statics in the rooms `frame` reached, each with its room.
+    fn rooms(&self, frame: &HifiFrame, clip_from_render: Mat4) -> Vec<(Placed, u32)> {
+        let mut out = Vec::new();
+        let Some(gpu) = self.gpu.as_ref() else {
+            return out;
+        };
+        let planes = frustum(clip_from_render);
+        let eye = frame.camera.eye;
+        let band = lod_band();
+        for room in &frame.pack_rooms {
+            let p = &room.placement;
+            let Some(&model) = gpu.by_id.get(&p.id) else {
+                continue;
+            };
+            let m = &gpu.models[model];
+            let rows = placement_rows(p, room.origin);
+            let c = m.bounds.0.extend(1.0);
+            let centre = Vec3::new(rows[0].dot(c), rows[1].dot(c), rows[2].dot(c));
+            let radius = m.bounds.1 * p.scale.abs();
+            if !sphere_seen(&planes, centre, radius) {
+                continue;
+            }
+            let shown: Vec<usize> = (0..m.lods.len())
+                .filter(|k| !m.lods[*k].shadows_only)
+                .collect();
+            let distances: Vec<f32> = shown.iter().map(|k| m.lods[*k].distance).collect();
+            let far = (room.origin + p.origin).distance(eye);
+            for (i, (k, lo, hi)) in levels_at(&distances, far, p.scale, band)
+                .into_iter()
+                .enumerate()
+            {
+                out.push((
+                    Placed {
+                        model,
+                        lod: shown[k],
+                        levels: m.lods.len(),
+                        rows,
+                        centre,
+                        radius,
+                        seen: true,
+                        keep: (lo, hi),
+                        sway: (m.sway.0, -1.0),
+                        second: i > 0,
+                    },
+                    room.cell,
+                ));
+            }
+        }
+        out
+    }
+
     /// The ground cover's plants for `frame`: only the patches within reach
     /// and in the view are looked into, and each fades out past its last level as a model does.
     /// They cast no shadows: under the crowns and the sun they would cost the most and show the
@@ -1640,6 +1788,14 @@ impl State {
         Self::draw_runs(gpu, gpu.cover_instances.as_ref(), &self.cover_view, pass)
     }
 
+    /// Draw `runs` of the rooms' models into `pass`.
+    fn draw_room_runs(&self, runs: &[Batch], pass: &mut wgpu::RenderPass<'_>) -> bool {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return false;
+        };
+        Self::draw_runs(gpu, gpu.room_instances.as_ref(), runs, pass)
+    }
+
     /// Draw `runs` of `instances` into `pass`.
     fn draw_runs(
         gpu: &PackGpu,
@@ -1811,13 +1967,24 @@ fn frame_constants(frame: &HifiFrame, clip_from_render: Mat4, wind: bool) -> Vec
     c.extend([l.x, l.y, l.z, frame.pack_light.glow]);
     c.extend([sun[0], sun[1], sun[2], 0.0]);
     c.extend([amb[0], amb[1], amb[2], 0.0]);
-    c.extend([cam.dither, 0.0, 0.0, 0.0]);
+    c.extend([cam.dither, cam.mip_bias, 0.0, 0.0]);
     c.extend([objects[0], objects[1], objects[2], 0.0]);
     let origin = render_origin(frame).unwrap_or(Vec2::ZERO);
     // LINT-OK: the clock wraps every hour and a bit, where a skip in the swaying goes unseen.
     #[allow(clippy::cast_possible_truncation)]
     let clock = frame.time.rem_euclid(4096.0) as f32;
     c.extend([clock, if wind { 1.0 } else { 0.0 }, origin.x, origin.y]);
+    // The storm's gale: its heading east and north, how far the storm has come in, and how hard
+    // it gusts now, 0 to 1.
+    let gale =
+        glam::Vec2::from(crate::passes::weather::storm::frame_wind(frame)).normalize_or(Vec2::X);
+    let gust = crate::passes::weather::storm::gust(frame.time) * 0.5 + 0.5;
+    let storm = if wind {
+        frame.sky.storm.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    c.extend([gale.x, gale.y, storm, gust]);
     c
 }
 
@@ -1913,6 +2080,7 @@ impl HifiPass for ArtPack {
         s.marked.clear();
         s.first_mark = None;
         s.far_mark = None;
+        s.objects_total = 0;
         let mut open = None;
         for (at, mark) in &cx.seam.tables().marks {
             match mark {
@@ -1928,6 +2096,7 @@ impl HifiPass for ArtPack {
                 }
                 Mark::Objects => {
                     s.far_mark.get_or_insert(*at);
+                    s.objects_total += 1;
                 }
                 _ => {}
             }
@@ -1986,7 +2155,48 @@ impl HifiPass for ArtPack {
         if let Some(gpu) = s.gpu.as_mut() {
             write_instances(&device, &queue, &mut gpu.cover_instances, &rows);
         }
+        let rooms = s.rooms(cx.frame, clip_from_render);
+        let mut rows = Vec::with_capacity(rooms.len() * 4);
+        // A frame seen from a room clears its depth once the outdoors is drawn, and draws again
+        // only the rooms it reaches from there. A model of any other room is drawn with the
+        // outdoors, where the walls before it can hide it.
+        let marks = &cx.seam.tables().marks;
+        let cleared = marks
+            .iter()
+            .position(|(_, m)| matches!(m, Mark::IndoorFlush));
+        let again: HashSet<u32> = cleared
+            .map(|from| {
+                marks[from..]
+                    .iter()
+                    .filter_map(|(_, m)| match m {
+                        Mark::EnvCell { cell } => Some(*cell),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (last, outdoors): (Vec<usize>, Vec<usize>) =
+            (0..rooms.len()).partition(|i| cleared.is_none() || again.contains(&rooms[*i].1));
+        let nearest = stamps.map(|(.., nearest)| nearest);
+        let (close, past): (Vec<usize>, Vec<usize>) = outdoors.into_iter().partition(|i| {
+            nearest.is_none_or(|n| (rooms[*i].0.centre - cam.eye).truncate().length() < n)
+        });
+        let placed: Vec<Placed> = rooms.into_iter().map(|(p, _)| p).collect();
+        s.room_view = batches(&placed, last, &mut rows);
+        s.room_view_far = batches(&placed, past, &mut rows);
+        s.room_view_outdoors = batches(&placed, close, &mut rows);
+        s.room_far_drawn = false;
+        if let Some(gpu) = s.gpu.as_mut() {
+            write_instances(&device, &queue, &mut gpu.room_instances, &rows);
+        }
         let started = std::time::Instant::now();
+        // The cards baked from retail objects since the last frame, drawn by the far objects too.
+        if let (Some(gpu), Some(cards)) = (s.gpu.as_mut(), cx.frame.far_cards.as_ref()) {
+            let added = gpu.add_far_cards(&device, &queue, cards);
+            if !added.is_empty() && s.far.as_mut().is_some_and(|f| !f.add_models(&added)) {
+                s.far = None;
+            }
+        }
         s.prepare_far(&device, &queue, cx.frame, clip_from_render);
         s.far_prepare_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         Ok(())
@@ -2008,6 +2218,13 @@ impl HifiPass for ArtPack {
             && !(s.cover_view.is_empty() && s.cover_view_far.is_empty())
             && plan.is_some_and(|p| s.far_mark.is_some_and(|m| p.replays_mark_at(m)));
         s.cover_drawn = false;
+        s.room_active = s.gpu.is_some()
+            && plan.is_some()
+            && !(s.room_view.is_empty()
+                && s.room_view_far.is_empty()
+                && s.room_view_outdoors.is_empty());
+        s.room_drawn = false;
+        s.objects_seen = 0;
     }
 
     fn encode(&mut self, _cx: &mut EncodeCx<'_, '_>) -> Result<(), HifiError> {
@@ -2048,7 +2265,7 @@ impl HifiPass for FarCull {
 impl ReplayFilter for ArtPack {
     fn draw(&mut self, cmd: u32, _note: Option<&DrawNote>) -> DrawAction<'_> {
         let s = self.0.borrow();
-        if s.active && s.covered.contains(cmd) {
+        if (s.active || s.room_active) && s.covered.contains(cmd) {
             DrawAction::Skip(SkipRule::ReplacedByPass)
         } else {
             DrawAction::Legacy
@@ -2068,6 +2285,10 @@ impl ReplayFilter for ArtPack {
                 s.view_far_drawn = true;
                 drew |= s.draw_view_far(pass);
             }
+            if s.room_active && !s.room_far_drawn {
+                s.room_far_drawn = true;
+                drew |= s.draw_room_runs(&s.room_view_far, pass);
+            }
             if s.cover_active && !s.cover_far_drawn {
                 s.cover_far_drawn = true;
                 drew |= s.draw_cover_far(pass);
@@ -2078,6 +2299,20 @@ impl ReplayFilter for ArtPack {
             return false;
         }
         let mut drew = false;
+        // The rooms' models drawn with the outdoors at the frame's first object pass, and the rest
+        // at its last, over the rooms it has drawn.
+        s.objects_seen += 1;
+        if s.room_active && s.objects_seen == 1 {
+            if !s.room_far_drawn {
+                s.room_far_drawn = true;
+                drew |= s.draw_room_runs(&s.room_view_far, pass);
+            }
+            drew |= s.draw_room_runs(&s.room_view_outdoors, pass);
+        }
+        if s.room_active && !s.room_drawn && s.objects_seen == s.objects_total {
+            s.room_drawn = true;
+            drew |= s.draw_room_runs(&s.room_view, pass);
+        }
         // The far trees once the landscape walk is done, as the first object pass begins.
         if s.far_active && !s.far_drawn {
             s.far_drawn = true;
@@ -2217,8 +2452,8 @@ mod tests {
         let c = frame_constants(&frame, Mat4::IDENTITY, true);
         assert_eq!(
             c.len(),
-            60,
-            "two transforms and seven rows, as the shader's frame"
+            64,
+            "two transforms and eight rows, as the shader's frame"
         );
         assert!(c.len() * 4 <= 256, "inside the frame's uniform");
         // The landscape's ambient, which the light per pixel divides out, and the objects': a

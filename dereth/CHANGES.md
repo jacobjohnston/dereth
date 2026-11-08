@@ -47,6 +47,9 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: an art pack can plant grass and low plants over the land, and a Ground Cover menu chooses how far they are drawn, from 0.5x to 5x, or Off.
 - Better Lighting: the wind moves an art pack's trees and plants, and No Wind holds them still.
 - Enhanced Graphics: No Wind is now Foliage Wind, ticked when it is on. The Low preset leaves out the ground cover and stops the wind, and High and Ultra draw the plants 3x and 5x as far. The wind and the ground cover's draw distance leave the page under Keep Retail Look.
+- Better Lighting: Retail Look and No Slope Materials say so when no art pack is open.
+- Better Lighting: an art pack can plant grass and low plants over the land, and a Ground Cover menu chooses how far they are drawn, from 0.5x to 5x, or Off.
+- Better Lighting: the wind moves an art pack's trees and plants, and No Wind holds them still.
 ## 0.4.15 (2026-11-07)
 - The relay that plays AC1999 now comes with Dereth.
 - Logging in now reports the world's player count to the hub, with no opt-out.

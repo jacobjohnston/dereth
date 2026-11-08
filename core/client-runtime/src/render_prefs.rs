@@ -750,8 +750,8 @@ impl FidelityPreferences {
 
     /// Whether any option is on in effect. Without one the presentation is not installed. The
     /// switches that turn something off (the retail look's, the anti-aliasing's, the slope
-    /// materials', the damp's) and the presentation choices draw nothing of their own, so they
-    /// alone are none.
+    /// materials', the damp's), the presentation choices and depth mapping, drawn inside the
+    /// better lighting, draw nothing of their own, so they alone are none.
     #[must_use]
     pub fn any_effective(&self) -> bool {
         FidelityFeature::ALL
@@ -764,6 +764,7 @@ impl FidelityPreferences {
                             | FidelityFeature::NoAntiAliasing
                             | FidelityFeature::NoSlopeMaterials
                             | FidelityFeature::NoDamp
+                            | FidelityFeature::DepthMapping
                     )
             })
             .any(|f| self.effective(f) != 0)
@@ -908,7 +909,12 @@ mod tests {
                     | FidelityFeature::Weather
                     | FidelityFeature::VSync
             );
-            assert_eq!(d.value(f), u32::from(on), "{f:?}");
+            let at = if f == FidelityFeature::DepthMapping {
+                3
+            } else {
+                u32::from(on)
+            };
+            assert_eq!(d.value(f), at, "{f:?}");
         }
         // A box the profile turned off stays off.
         let off = FidelityPreferences::from_preferences(&Preferences::parse(
@@ -1002,13 +1008,18 @@ mod tests {
         assert_eq!(read("Medium").effective(FidelityFeature::DepthMapping), 2);
         assert_eq!(read("1").effective(FidelityFeature::DepthMapping), 1);
         assert_eq!(read("True").effective(FidelityFeature::DepthMapping), 3);
-        assert_eq!(read("9").effective(FidelityFeature::DepthMapping), 0);
-        assert_eq!(read("Off").effective(FidelityFeature::NoDamp), 1);
-        assert!(
-            !read("Off").any_effective(),
-            "turning the damp off draws nothing of its own"
+        assert_eq!(
+            read("9").effective(FidelityFeature::DepthMapping),
+            3,
+            "a word it does not know leaves it at its default"
         );
-        assert!(read("Low").any_effective());
+        assert_eq!(read("Off").effective(FidelityFeature::NoDamp), 1);
+        let switched = |s: &str| FidelityPreferences::parse_switch(s).unwrap();
+        assert!(
+            !switched("DepthMapping=3,NoDamp=1").any_effective(),
+            "depth mapping draws inside the better lighting, and turning the damp off nothing"
+        );
+        assert!(switched("Lighting=1,DepthMapping=1").any_effective());
     }
 
     /// Behaviour: hifi.options.the-fidelity-section-reaches-the-render-preferences

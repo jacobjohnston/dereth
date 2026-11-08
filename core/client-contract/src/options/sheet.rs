@@ -1183,9 +1183,10 @@ const CLIENT: [Heading; 6] = {
 };
 
 /// The thirteen boxes and the Depth Mapping menu, each at its default and on the Horizon page
-/// alone: the two switches, then how frames reach the display, then the effects.
+/// alone: the two switches, then how frames reach the display, then the effects, with what an art
+/// pack draws last.
 #[cfg(feature = "hifi")]
-const FIDELITY_ROWS: [Row; 12] = [
+const FIDELITY_ROWS: [Row; 14] = [
     fidelity_box(0),
     fidelity_box(1),
     fidelity_box(8),
@@ -1197,8 +1198,6 @@ const FIDELITY_ROWS: [Row; 12] = [
     fidelity_box(5),
     fidelity_box(6),
     fidelity_box(7),
-    fidelity_box(9),
-    fidelity_box(10),
     only(
         Shown::Only(Interface::Horizon),
         noted(
@@ -1210,6 +1209,8 @@ const FIDELITY_ROWS: [Row; 12] = [
             ),
         ),
     ),
+    fidelity_box(12),
+    fidelity_box(9),
 ];
 
 /// The row of the `i`th box.

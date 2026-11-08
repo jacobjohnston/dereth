@@ -212,37 +212,33 @@ fn with_enhanced_graphics_off_only_the_occlusion_and_the_sky_stay_with_its_box()
     );
 }
 
-/// The Depth Mapping menu is on the page, Off, and the damp's box stays greyed until it is off Off.
+/// The Depth Mapping menu starts at its greatest level, and the damp's box is on the page only
+/// while it is off Off.
 #[test]
 #[cfg(feature = "hifi")]
-fn the_damp_box_is_greyed_until_depth_mapping_is_chosen() {
-    let (mut h, state) = client_page(Availability {
-        built: true,
-        wgpu: true,
-        widened: true,
-        supported: true,
-        rays: Some(true),
-        active: false,
-        failed: None,
-        wgpu_next: None,
-    });
-    assert!(show(
+fn damp_and_slime_show_only_with_depth_mapping_on() {
+    let (mut h, state) = client_page(READY);
+    assert_eq!(
+        store::inq_value(names::DEPTH_MAPPING),
+        Some(PrefValue::Int(3))
+    );
+    tick(&mut h, &state, caption(names::LIGHTING));
+    h.frame(&state);
+    assert!(on_the_page(
         &mut h,
         &state,
         dereth_client_contract::options::depth_mapping::CAPTION
     ));
+    store::set_value(names::DEPTH_MAPPING, PrefValue::Int(0));
+    assert!(!on_the_page(&mut h, &state, caption(names::NO_DAMP)));
+    store::set_value(names::DEPTH_MAPPING, PrefValue::Int(3));
+    assert!(on_the_page(&mut h, &state, caption(names::NO_DAMP)));
+    let asked = tick(&mut h, &state, caption(names::NO_DAMP));
     assert_eq!(
-        store::inq_value(names::DEPTH_MAPPING),
-        Some(PrefValue::Int(0))
+        sets(&asked, names::NO_DAMP),
+        Some(PrefValue::Bool(true)),
+        "unticked: off"
     );
-    let asked = tick(&mut h, &state, caption(names::LIGHTING));
-    assert_eq!(sets(&asked, names::LIGHTING), Some(PrefValue::Bool(true)));
-    let asked = tick(&mut h, &state, caption(names::NO_DAMP));
-    assert_eq!(sets(&asked, names::NO_DAMP), None, "greyed: {asked:?}");
-    assert!(store::set_value(names::DEPTH_MAPPING, PrefValue::Int(2)));
-    h.frame(&state);
-    let asked = tick(&mut h, &state, caption(names::NO_DAMP));
-    assert_eq!(sets(&asked, names::NO_DAMP), Some(PrefValue::Bool(true)));
 }
 
 #[test]
@@ -251,7 +247,7 @@ fn keep_retail_look_takes_what_an_art_pack_draws_off_the_page() {
     let (mut h, state) = client_page(READY);
     tick(&mut h, &state, caption(names::LIGHTING));
     h.frame(&state);
-    let pack = [names::NO_SLOPE_MATERIALS];
+    let pack = [names::NO_SLOPE_MATERIALS, names::NO_DAMP];
     for name in pack {
         assert!(on_the_page(&mut h, &state, caption(name)), "{name}");
     }
@@ -264,6 +260,11 @@ fn keep_retail_look_takes_what_an_art_pack_draws_off_the_page() {
     for name in pack {
         assert!(!on_the_page(&mut h, &state, caption(name)), "{name}");
     }
+    assert!(!on_the_page(
+        &mut h,
+        &state,
+        dereth_client_contract::options::depth_mapping::CAPTION
+    ));
     assert!(on_the_page(&mut h, &state, caption(names::SHADOWS)));
 }
 

@@ -17,6 +17,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - macOS: the client draws with Metal directly by default.
 
 - Better Lighting: Retail Look and No Slope Materials say so when no art pack is open.
+- Enhanced Graphics: Light Draw Distance starts at 1.5x, as the Medium preset has it, and the Quality Presets set it from 1x on Low to 5x on Ultra. Flame Flicker stays on until you untick it. Both leave the page with Enhanced Graphics Mode off.
 - Settings: Client is now Display and Sound. Display opens with a Graphics menu, Standard or Enhanced, each showing what applies to it, and options now use the names games usually use.
 - Better Lighting is now Enhanced Graphics Mode, and its effects start on. Under Standard, the page offers only Ambient Occlusion and Atmospheric Sky.
 - Retail Look is now Keep Retail Look: the game's own models and ground or the enhanced ones, all or nothing. What it rules out leaves the page.
@@ -50,6 +51,11 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: Retail Look and No Slope Materials say so when no art pack is open.
 - Better Lighting: an art pack can plant grass and low plants over the land, and a Ground Cover menu chooses how far they are drawn, from 0.5x to 5x, or Off.
 - Better Lighting: the wind moves an art pack's trees and plants, and No Wind holds them still.
+- Better Lighting: dungeon flames take their outdoor look and warm the rooms; fire pits and basins hold pulsing embers; lanterns light from within; an art pack's models in rooms take the room's lights.
+- Better Lighting: flames now flicker the way fire does, each at its own pace, a candle faster than a bonfire, and shadows sway with them. No Flame Flicker holds them steady. Glowing orbs, crystals and lamp glass hold steady.
+- Better Lighting: the flat, hard-edged sprites of light are gone, in favour of real light in their colour, and shadows from a room's lights now have soft edges.
+- Better Lighting: an art pack can give an object a light of its own, shining day and night with a soft glow in the air about it.
+- Better Lighting: Light Draw Distance chooses how far lamps, flames and art pack lights shine and glow, from 0.5x to 5x, and they now fade out in the distance instead of going out at once.
 ## 0.4.15 (2026-11-07)
 - The relay that plays AC1999 now comes with Dereth.
 - Logging in now reports the world's player count to the hub, with no opt-out.

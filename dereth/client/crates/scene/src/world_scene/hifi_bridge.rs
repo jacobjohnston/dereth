@@ -703,10 +703,10 @@ fn gather<'p>(
     seed: u32,
 ) {
     if given.gather > 0.0 {
-        if let Some(g) = gathered.iter_mut().find(|g| {
+        if let Some(i) = gathered.iter().position(|g| {
             g.object == object && g.places.iter().any(|p| (*p - at).length() <= given.gather)
         }) {
-            g.places.push(at);
+            gathered[i].places.push(at);
             return;
         }
     }
@@ -992,11 +992,6 @@ impl SceneDraw {
 /// Whether the installed presentation draws the lamps, so the blocks' lamps are looked for.
 pub(super) fn lamps_drawn(gpu: &mut Gpu) -> bool {
     renderer(gpu).is_some_and(|r| r.settings().lamps.is_on())
-}
-
-/// Whether the installed presentation draws its lighting.
-pub(super) fn lighting_drawn(gpu: &mut Gpu) -> bool {
-    renderer(gpu).is_some_and(|r| r.settings().lighting.is_on())
 }
 
 /// Whether this device could ever draw the lamps: it was asked for the presentation at start-up
@@ -1309,7 +1304,10 @@ fn snapshot(
     // A room's light goes with the lamp nearest it: a flame's flickers with that flame. Once the
     // rooms' lamps are found, any other holds steady, for embers and a warm crystal have no flame.
     let (lamps, sprites, beds, looked) = room_lamps(draw, pack);
-    for light in frame.lights.iter_mut().filter(|l| l.burned) {
+    for light in &mut frame.lights {
+        if !light.burned {
+            continue;
+        }
         let far = |lamp: &RoomLamp| (lamp.at - light.position).length();
         light.flame = lamps
             .iter()

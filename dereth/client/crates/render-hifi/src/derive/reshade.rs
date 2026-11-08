@@ -125,6 +125,8 @@ impl MaterialClass {
 /// The overridable constant set for a draw that adds to what is there: its
 /// [`AddedShare::constant`](super::pipeline::AddedShare::constant), 0 for any other draw.
 pub const ADDITIVE_CONSTANT: &str = "HIFI_ADDITIVE";
+/// The overridable constant set for a draw that does not blend.
+pub const SOLID_CONSTANT: &str = "HIFI_SOLID";
 
 /// The pixel stages of the ordinary source, by entry point.
 pub const PIXEL_STAGES: [&str; 5] = [
@@ -332,6 +334,7 @@ override HIFI_ADDITIVE: u32 = 0;
 const HIFI_ADD_OVER: f32 = 0.3;
 // The same indoors, where what stands behind a flame's glow is dark and the exposure is raised.
 const HIFI_ADD_OVER_INDOORS: f32 = 0.04;
+override HIFI_SOLID: bool = false;
 
 struct HifiOut {{
     // Linear light, unclamped; the alpha is the ordinary stage's, for the ordinary blend.
@@ -475,7 +478,7 @@ fn hifi_out(c: vec4<f32>, i: VsOut, material: f32) -> HifiOut {{
         // where the same sprite all but vanishes over anything lit.
         o.colour = hifi_added(shown, c.a, g_frame.screen.w, HIFI_ADDITIVE);
     }} else {{
-        o.colour = vec4<f32>(hifi_linear_rgb(shown), c.a);
+        o.colour = vec4<f32>(hifi_linear_rgb(shown), select(c.a, 1.0, HIFI_SOLID));
     }}
     let n = hifi_view_normal(i);
     if (material == {foliage}) {{

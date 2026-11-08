@@ -41,6 +41,12 @@ impl DerivedKey {
         }
     }
 
+    /// Whether this draw is solid, in a variant that draws colour: it writes an alpha of 1.
+    #[must_use]
+    pub fn solid_in_display_light(&self) -> bool {
+        matches!(self.variant, Variant::Reshade | Variant::Material) && !self.key.alpha_blend
+    }
+
     /// What share of its color this draw adds to what is there, in a variant that draws color:
     /// it is written as the ordinary frame would add it. `None` for a draw that doesn't add.
     #[must_use]
@@ -86,10 +92,12 @@ impl AddedShare {
 
 /// The re-shaded pipeline's two colour targets.
 ///
-/// The colour blends as the ordinary pipeline does and, like it, never writes alpha. The normal
-/// is written only by a draw that does not blend, or that blends but is cut out against its
-/// texture (the leaf cards of most trees, drawn with both): a translucent surface leaves the
-/// normal of what is behind it, but a cut-out one covers it wherever it is drawn at all.
+/// The colour blends as the ordinary pipeline does. A draw that does not blend writes alpha too,
+/// so what a damp material said there (past 1, how damp it is) never outlives what covers it; one
+/// that blends leaves alpha alone, like the ordinary pipeline. The normal is written only by a
+/// draw that does not blend, or that blends but is cut out against its texture (the leaf cards of
+/// most trees, drawn with both): a translucent surface leaves the normal of what is behind it, but
+/// a cut-out one covers it wherever it is drawn at all.
 #[must_use]
 pub fn reshade_targets(
     ordinary_blend: Option<wgpu::BlendState>,
@@ -99,7 +107,11 @@ pub fn reshade_targets(
         wgpu::ColorTargetState {
             format: HDR_FORMAT,
             blend: ordinary_blend,
-            write_mask: wgpu::ColorWrites::COLOR,
+            write_mask: if ordinary_blend.is_some() {
+                wgpu::ColorWrites::COLOR
+            } else {
+                wgpu::ColorWrites::ALL
+            },
         },
         wgpu::ColorTargetState {
             format: NORMAL_FORMAT,

@@ -195,7 +195,11 @@ fn build(
     let added = key
         .adds_in_display_light()
         .map(|share| (super::reshade::ADDITIVE_CONSTANT, share.constant()));
-    let constants = added.as_slice();
+    let solid = key
+        .solid_in_display_light()
+        .then_some((super::reshade::SOLID_CONSTANT, 1.0));
+    let constants = added.or(solid);
+    let constants = constants.as_slice();
     scoped(&cx.device, || {
         build_derived_pipeline_with_constants(
             &cx.device,

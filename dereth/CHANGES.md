@@ -32,6 +32,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: glows and torches add as they do in the ordinary picture.
 - Better Lighting: a building's doors and windows no longer show through the ground in front of them, near or far, and a door no longer sticks out below a rise of ground that hides the rest of its house.
 - Better Lighting: objects behind a nearby building's walls no longer show through them when the camera stands just outside it.
+- Better Lighting: far mountains keep their shape: a narrow peak a few kilometers off is no longer drawn as a pyramid.
 
 ## 0.4.14 (2026-11-05)
 

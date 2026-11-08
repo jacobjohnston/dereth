@@ -59,6 +59,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: Light Draw Distance chooses how far lamps, flames and art pack lights shine and glow, from 0.5x to 5x, and they now fade out in the distance instead of going out at once.
 - Better Lighting: with an art pack open, Reflective Water says it is always on with the pack's ground.
 - Better Lighting: Retail Look and No Slope Materials say so when no art pack is open.
+- /clouds sets the clouds of the Remastered sky this client draws: how much of the sky they cover, how fast they drift, how high, thick and large they are, how they are lit and how they shade the land, until /clouds reset.
 - Better Lighting: a Reflective Water box draws the world's water as water, with ripples, reflections of the sky and the land and a bed seen through it, without an art pack. The land and the Remastered sky are drawn with it, from the game's own pictures.
 - Better Lighting: the water has waves as large as it is, the sea's swell and surf, a lake's chop and hardly any on a river; foam gathers along the shore and on the crests, and the sun's light ripples over a shallow bed.
 - Better Lighting: near the camera, a body moving through the water stirs it, and the waves spread, cross, meet the shore and die away. Graphics without compute shaders ring the water round a body standing in it instead, as before.

@@ -10,7 +10,8 @@
 //! A few rows belong to one interface only, because they mean something only there
 //! ([`Shown`]): the classic interface's own mouse look, its stretched layout and its social
 //! window's pages; the modern interface's mouse turning, its side-by-side vitals, its chat font
-//! and its floating chat windows. A row for something the world's era does not have is left out ([`Needs`]).
+//! and its floating chat windows; Horizon's status bars' colours and numbers. A row for something
+//! the world's era does not have is left out ([`Needs`]).
 //! So is a row for something only some hosts do, where the host does not ([`Row::hosted`]): the
 //! render scale, which only the browser offers.
 
@@ -81,7 +82,8 @@ pub enum Shown {
 
 impl Shown {
     /// Whether the interface `face` shows the row. The Horizon interface shows the modern
-    /// interface's own rows: it plays with the modern key map, mouse and chat.
+    /// interface's own rows: it plays with the modern key map, mouse and chat. A row of Horizon's
+    /// alone shows on no other interface.
     #[must_use]
     pub const fn on(self, face: Interface) -> bool {
         matches!(
@@ -92,23 +94,8 @@ impl Shown {
                     Interface::Modern | Interface::Horizon
                 )
                 | (Self::Only(Interface::Classic), Interface::Classic)
-        ) || self.only_on_horizon(face)
-    }
-
-    /// A row of Horizon's alone, which only the optional high-fidelity presentation's boxes are.
-    #[cfg(feature = "hifi")]
-    const fn only_on_horizon(self, face: Interface) -> bool {
-        matches!(
-            (self, face),
-            (Self::Only(Interface::Horizon), Interface::Horizon)
+                | (Self::Only(Interface::Horizon), Interface::Horizon)
         )
-    }
-
-    /// A row of Horizon's alone: none in a build without the high-fidelity presentation.
-    #[cfg(not(feature = "hifi"))]
-    #[allow(clippy::unused_self)]
-    const fn only_on_horizon(self, _face: Interface) -> bool {
-        false
     }
 }
 
@@ -893,6 +880,21 @@ const CLIENT_SHARED: [Heading; 5] = [
                 },
                 Bool(true),
             ),
+            only(
+                Shown::Only(Interface::Horizon),
+                // Offered where registered: in a build with the high-fidelity presentation.
+                hosted(noted(
+                    super::weather_sound::NOTE,
+                    pref(
+                        super::weather_sound::CAPTION,
+                        Value::Sound {
+                            on: crate::options::names::WEATHER_SOUND,
+                            volume: crate::options::names::WEATHER_SOUND_VOLUME,
+                        },
+                        Bool(true),
+                    ),
+                )),
+            ),
             pref(
                 "Interface Sounds",
                 Value::Sound {
@@ -948,6 +950,22 @@ const CLIENT_SHARED: [Heading; 5] = [
                     "Field of View",
                     Value::Slider(crate::options::names::FIELD_OF_VIEW),
                     Float(90.0),
+                ),
+            ),
+            only(
+                Shown::Only(Interface::Horizon),
+                pref(
+                    crate::options::status_bars::COLORS_CAPTION,
+                    Value::Menu(crate::options::status_bars::STATUS_BAR_COLORS),
+                    Int(0),
+                ),
+            ),
+            only(
+                Shown::Only(Interface::Horizon),
+                pref(
+                    crate::options::status_bars::NUMBERS_CAPTION,
+                    Value::Check(crate::options::status_bars::LARGE_STATUS_BAR_NUMBERS),
+                    Bool(true),
                 ),
             ),
             pref(
@@ -1163,9 +1181,9 @@ const CLIENT_SHARED: [Heading; 5] = [
 const CLIENT: [Heading; 5] = CLIENT_SHARED;
 
 /// With the optional high-fidelity presentation built in, the Client Options page ends with its
-/// thirteen boxes, its Depth Mapping, God Rays and Cloud Detail menus under a heading of their
-/// own, on the Horizon interface's page alone: it is the only interface the presentation draws
-/// under.
+/// sixteen boxes, its Depth Mapping, God Rays, Cloud Detail, Light Draw Distance and ground cover
+/// menus under a heading of their own, on the Horizon interface's page alone: it is the
+/// only interface the presentation draws under.
 #[cfg(feature = "hifi")]
 const CLIENT: [Heading; 6] = {
     let s = CLIENT_SHARED;
@@ -1183,20 +1201,55 @@ const CLIENT: [Heading; 6] = {
     ]
 };
 
-/// The thirteen boxes and the Depth Mapping, God Rays and Cloud Detail menus, each at its default
-/// and on the Horizon page alone: the two switches, then how frames reach the display, then the
-/// effects, with what an art pack draws last.
+/// The sixteen boxes, the Render Scale, Dynamic Resolution, Depth Mapping, God Rays, Cloud Detail
+/// and Light Draw Distance menus and the ground cover's draw distance, each at its default and on the
+/// Horizon page alone: the two switches, then the render scale, then how frames reach the
+/// display, then the effects, with what an art pack draws last.
 #[cfg(feature = "hifi")]
-const FIDELITY_ROWS: [Row; 16] = [
+const FIDELITY_ROWS: [Row; 23] = [
     fidelity_box(0),
     fidelity_box(1),
-    fidelity_box(8),
-    fidelity_box(10),
+    only(
+        Shown::Only(Interface::Horizon),
+        noted(
+            super::fidelity::SCALE_NOTE,
+            pref(
+                super::fidelity::SCALE_CAPTION,
+                Value::Menu(crate::options::names::fidelity::RENDER_SCALE),
+                Int(super::fidelity::SCALE_DEFAULT as i32),
+            ),
+        ),
+    ),
+    only(
+        Shown::Only(Interface::Horizon),
+        noted(
+            super::dynamic_resolution::NOTE,
+            pref(
+                super::dynamic_resolution::CAPTION,
+                Value::Menu(crate::options::names::fidelity::DYNAMIC_RESOLUTION),
+                Int(super::dynamic_resolution::DEFAULT),
+            ),
+        ),
+    ),
+    fidelity_box(9),
     fidelity_box(11),
+    fidelity_box(12),
     fidelity_box(2),
     fidelity_box(3),
     fidelity_box(4),
     fidelity_box(5),
+    only(
+        Shown::Only(Interface::Horizon),
+        noted(
+            super::light_distance::NOTE,
+            pref(
+                super::light_distance::CAPTION,
+                Value::Menu(crate::options::names::fidelity::LIGHT_DRAW_DISTANCE),
+                Int(super::light_distance::DEFAULT),
+            ),
+        ),
+    ),
+    fidelity_box(15),
     only(
         Shown::Only(Interface::Horizon),
         noted(
@@ -1221,6 +1274,7 @@ const FIDELITY_ROWS: [Row; 16] = [
         ),
     ),
     fidelity_box(7),
+    fidelity_box(8),
     only(
         Shown::Only(Interface::Horizon),
         noted(
@@ -1232,8 +1286,20 @@ const FIDELITY_ROWS: [Row; 16] = [
             ),
         ),
     ),
-    fidelity_box(12),
-    fidelity_box(9),
+    fidelity_box(13),
+    fidelity_box(10),
+    fidelity_box(14),
+    only(
+        Shown::Only(Interface::Horizon),
+        noted(
+            super::draw_distance::GROUND_COVER_NOTE,
+            pref(
+                super::draw_distance::GROUND_COVER_CAPTION,
+                Value::Menu(crate::options::names::fidelity::GROUND_COVER_DRAW_DISTANCE),
+                Int(super::draw_distance::GROUND_COVER_DEFAULT),
+            ),
+        ),
+    ),
 ];
 
 /// The row of the `i`th box.
@@ -1541,8 +1607,9 @@ mod tests {
     }
 
     /// The experimental rendering effects' boxes are on the Horizon interface's Client page
-    /// alone, last, under their own heading, each at its default, with the Depth Mapping, God Rays
-    /// and Cloud Detail menus among them at their defaults; the classic and the modern
+    /// alone, last, under their own heading, each at its default, with the Depth Mapping, God
+    /// Rays, Cloud Detail, Light Draw Distance and draw distance menus among them at their
+    /// defaults; the classic and the modern
     /// interfaces' pages are exactly the shared headings', row for row; and a build without the
     /// effects has no such heading anywhere.
     ///
@@ -1565,17 +1632,7 @@ mod tests {
         if cfg!(feature = "hifi") {
             let (heading, rows) = horizon.last().expect("Horizon's Client page has headings");
             assert_eq!(heading.title, fidelity::HEADING);
-            assert_eq!(rows.len(), fidelity::OPTIONS.len() + 3);
-            let menu = rows
-                .iter()
-                .find(|r| r.value == Value::Menu(crate::options::names::fidelity::CLOUD_DETAIL))
-                .expect("the Cloud Detail menu");
-            assert_eq!(menu.caption, crate::options::cloud_detail::CAPTION);
-            assert_eq!(
-                menu.default,
-                Some(Int(crate::options::cloud_detail::DEFAULT))
-            );
-            assert_eq!(menu.shown, Shown::Only(Interface::Horizon));
+            assert_eq!(rows.len(), fidelity::OPTIONS.len() + fidelity::MENUS.len());
             for o in &fidelity::OPTIONS {
                 let row = rows
                     .iter()
@@ -1588,6 +1645,15 @@ mod tests {
             // The two switches first.
             assert_eq!(rows[0].value, Value::Check(fidelity::OPTIONS[0].name));
             assert_eq!(rows[1].value, Value::Check(fidelity::OPTIONS[1].name));
+            // The render scale's menus after them, at their defaults.
+            for (row, (name, _)) in rows[2..4].iter().zip(fidelity::MENUS) {
+                assert_eq!(row.value, Value::Menu(name));
+                assert_eq!(row.shown, Shown::Only(Interface::Horizon));
+            }
+            assert_eq!(
+                rows[2].default,
+                Some(Int(crate::options::render_scale::DYNAMIC as i32))
+            );
             let menu = rows
                 .iter()
                 .find(|r| r.value == Value::Menu(crate::options::names::fidelity::GOD_RAYS))
@@ -1603,6 +1669,38 @@ mod tests {
             assert_eq!(
                 menu.default,
                 Some(Int(crate::options::depth_mapping::DEFAULT))
+            );
+            assert_eq!(menu.shown, Shown::Only(Interface::Horizon));
+            let name = crate::options::names::fidelity::GROUND_COVER_DRAW_DISTANCE;
+            let menu = rows
+                .iter()
+                .find(|r| r.value == Value::Menu(name))
+                .expect("the draw distance's menu");
+            assert_eq!(
+                menu.default,
+                Some(Int(crate::options::draw_distance::default_of(name)))
+            );
+            assert_eq!(menu.shown, Shown::Only(Interface::Horizon));
+            let menu = rows
+                .iter()
+                .find(|r| {
+                    r.value == Value::Menu(crate::options::names::fidelity::LIGHT_DRAW_DISTANCE)
+                })
+                .expect("the Light Draw Distance");
+            assert_eq!(menu.caption, crate::options::light_distance::CAPTION);
+            assert_eq!(
+                menu.default,
+                Some(Int(crate::options::light_distance::DEFAULT))
+            );
+            assert_eq!(menu.shown, Shown::Only(Interface::Horizon));
+            let menu = rows
+                .iter()
+                .find(|r| r.value == Value::Menu(crate::options::names::fidelity::CLOUD_DETAIL))
+                .expect("the Cloud Detail menu");
+            assert_eq!(menu.caption, crate::options::cloud_detail::CAPTION);
+            assert_eq!(
+                menu.default,
+                Some(Int(crate::options::cloud_detail::DEFAULT))
             );
             assert_eq!(menu.shown, Shown::Only(Interface::Horizon));
             // The rest of Horizon's page is the shared headings'.

@@ -777,6 +777,12 @@ impl super::SceneDraw {
         self.place_drawn_ground(ws);
         self.drawn.keep_fields(store);
         self.far_trees_step(store);
+        let cover_share = super::hifi_bridge::ground_cover_distance(&self.cfg.render.fidelity);
+        self.ground_cover_step(
+            cover_share,
+            settings.art_pack && settings.ground_cover && presented,
+            store,
+        );
         let want = if self.drawn.active {
             self.drawn.bake_generation
         } else {
@@ -838,6 +844,32 @@ impl super::SceneDraw {
 }
 
 impl super::SceneDraw {
+    /// The ground cover's upkeep for this frame: `wanted` with an art pack that lays any, at the
+    /// share `share`.
+    fn ground_cover_step(&mut self, share: u32, wanted: bool, store: &Arc<RetailDatStore>) {
+        let pack = self.land.art_pack.clone();
+        let region = || Arc::new((*self.land.region).clone());
+        let drawn = &mut self.drawn;
+        let build = if drawn.active {
+            drawn.bake_generation
+        } else {
+            0
+        };
+        let viewer = drawn.viewer;
+        let mut shift = |block| drawn.scenery_shift_for(store, block);
+        self.ground_cover.step(
+            share,
+            wanted,
+            pack.as_ref(),
+            build,
+            store,
+            &region,
+            &self.land.table,
+            viewer,
+            &mut shift,
+        );
+    }
+
     /// Read the drawn ground's knobs from `path` from now on (see
     /// [`super::WorldScene::set_terrain_tuning_file`]).
     pub(crate) fn set_terrain_tuning_file(&mut self, path: Option<PathBuf>) {
@@ -910,6 +942,7 @@ impl super::WorldScene {
     pub fn wait_for_far_trees(&mut self) {
         self.draw.drawn.wait_for_world();
         self.draw.far.wait();
+        self.draw.ground_cover.field.wait();
     }
 
     /// The far trees worked out so far: the blocks, the trees within reach, the milliseconds

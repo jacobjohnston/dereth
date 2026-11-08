@@ -61,6 +61,25 @@ fn the_worlds_own_leaves_are_taken_as_open_and_keep_the_sun_they_carry() {
 }
 
 #[test]
+fn the_wind_leaves_a_plants_foot_rooted_and_bends_grass_more_than_a_tree_for_its_height() {
+    let pack = Evaluator::new(shader_source());
+    let reach = |tall: f32, rise: f32| {
+        pack.call("wind_reach", &[Value::F32(tall), Value::F32(rise)])
+            .f32()
+    };
+    assert_eq!(reach(0.5, 0.0), 0.0);
+    assert_eq!(reach(30.0, 0.0), 0.0);
+    assert!(reach(0.5, 1.0) > reach(0.5, 0.5));
+    assert!(reach(0.5, 1.0) / 0.5 > 3.0 * (reach(30.0, 1.0) / 30.0));
+    // However tall it is, its top moves no more than a stride's fraction.
+    assert!(reach(60.0, 1.0) <= 0.85 + 1e-5);
+    assert!(
+        reach(30.0, 2.0) <= 0.85 + 1e-5,
+        "past its top stays its top"
+    );
+}
+
+#[test]
 fn an_art_pack_leaf_in_shade_keeps_the_sun_its_crowns_scatter_more_on_their_outside() {
     let pack = Evaluator::new(shader_source());
     let relight = relight();

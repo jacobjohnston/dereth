@@ -555,12 +555,16 @@ pub enum FidelityFeature {
     Sky,
     /// `Fidelity.Weather`.
     Weather,
+    /// `Fidelity.Water`.
+    Water,
     /// `Fidelity.RetailLook`.
     RetailLook,
     /// `Fidelity.NoAntiAliasing`.
     NoAntiAliasing,
     /// `Fidelity.NoSlopeMaterials`.
     NoSlopeMaterials,
+    /// `Fidelity.NoWind`.
+    NoWind,
     /// `Fidelity.NoDamp`.
     NoDamp,
     /// `Fidelity.VSync`.
@@ -573,6 +577,16 @@ pub enum FidelityFeature {
     GodRays,
     /// `Fidelity.CloudDetail`.
     CloudDetail,
+    /// `Fidelity.GroundCoverDrawDistance`.
+    GroundCoverDrawDistance,
+    /// `Fidelity.NoFlameFlicker`.
+    NoFlameFlicker,
+    /// `Fidelity.LightDrawDistance`.
+    LightDrawDistance,
+    /// `Fidelity.DynamicResolution`.
+    DynamicResolution,
+    /// `Fidelity.RenderScale`.
+    RenderScale,
     /// `Fidelity.Debug`.
     Debug,
 }
@@ -580,7 +594,7 @@ pub enum FidelityFeature {
 #[cfg(feature = "hifi")]
 impl FidelityFeature {
     /// Every option, in the order the names list them.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 24] = [
         Self::Lighting,
         Self::Shadows,
         Self::GlobalIllumination,
@@ -588,15 +602,22 @@ impl FidelityFeature {
         Self::Lamps,
         Self::Sky,
         Self::Weather,
+        Self::Water,
         Self::RetailLook,
         Self::NoAntiAliasing,
         Self::NoSlopeMaterials,
+        Self::NoWind,
         Self::NoDamp,
         Self::VSync,
         Self::Hdr,
         Self::DepthMapping,
         Self::GodRays,
         Self::CloudDetail,
+        Self::GroundCoverDrawDistance,
+        Self::NoFlameFlicker,
+        Self::LightDrawDistance,
+        Self::DynamicResolution,
+        Self::RenderScale,
         Self::Debug,
     ];
 
@@ -611,47 +632,71 @@ impl FidelityFeature {
             Self::Lamps => fidelity::LAMPS,
             Self::Sky => fidelity::SKY,
             Self::Weather => fidelity::WEATHER,
+            Self::Water => fidelity::WATER,
             Self::RetailLook => fidelity::RETAIL_LOOK,
             Self::NoAntiAliasing => fidelity::NO_ANTI_ALIASING,
             Self::NoSlopeMaterials => fidelity::NO_SLOPE_MATERIALS,
+            Self::NoWind => fidelity::NO_WIND,
             Self::NoDamp => fidelity::NO_DAMP,
             Self::VSync => fidelity::VSYNC,
             Self::Hdr => fidelity::HDR,
             Self::DepthMapping => fidelity::DEPTH_MAPPING,
             Self::GodRays => fidelity::GOD_RAYS,
             Self::CloudDetail => fidelity::CLOUD_DETAIL,
+            Self::GroundCoverDrawDistance => fidelity::GROUND_COVER_DRAW_DISTANCE,
+            Self::NoFlameFlicker => fidelity::NO_FLAME_FLICKER,
+            Self::LightDrawDistance => fidelity::LIGHT_DRAW_DISTANCE,
+            Self::DynamicResolution => fidelity::DYNAMIC_RESOLUTION,
+            Self::RenderScale => fidelity::RENDER_SCALE,
             Self::Debug => fidelity::DEBUG,
         }
     }
 
-    /// Whether the option chooses how frames reach the screen rather than asking for an effect, so
-    /// that alone it asks nothing of the device.
+    /// Whether the option chooses how frames reach the screen, how many of the frame's pixels the
+    /// world is drawn at, or how the presentation draws what it already draws, rather than asking
+    /// for an effect, so that alone it asks nothing of the device.
     #[must_use]
     pub const fn is_presentation_choice(self) -> bool {
-        matches!(self, Self::VSync | Self::Hdr)
+        matches!(
+            self,
+            Self::VSync
+                | Self::Hdr
+                | Self::NoFlameFlicker
+                | Self::DynamicResolution
+                | Self::RenderScale
+        )
     }
 
     /// The highest value the option takes: 4 for an effect (Ultra), 1 for the switches that
     /// turn something off (the retail look's, the anti-aliasing's, the slope materials', the
-    /// damp's) and the presentation choices, 3 for depth mapping's, God Rays' and Cloud Detail's
-    /// levels, the last view for the diagnostic views.
+    /// damp's, the wind's, the flicker's) and the presentation choices, 3 for depth mapping's,
+    /// God Rays' and Cloud Detail's levels, the greatest share for the draw distances, the last
+    /// view for the diagnostic views, the highest frame rate for Dynamic Resolution, and under a
+    /// hundred for the render scale.
     #[must_use]
     pub const fn max(self) -> u32 {
         match self {
             Self::Debug => 7,
             Self::DepthMapping | Self::GodRays | Self::CloudDetail => 3,
+            Self::GroundCoverDrawDistance => dereth_client_contract::options::draw_distance::MOST,
+            Self::RenderScale => 99,
+            Self::DynamicResolution => 120,
             Self::RetailLook
             | Self::NoAntiAliasing
             | Self::NoSlopeMaterials
+            | Self::NoWind
             | Self::NoDamp
             | Self::VSync
-            | Self::Hdr => 1,
+            | Self::Hdr
+            | Self::NoFlameFlicker => 1,
+            Self::LightDrawDistance => dereth_client_contract::options::light_distance::MOST,
             _ => 4,
         }
     }
 
     /// What the option holds where the profile names nothing, when it is not 0: a box's default,
-    /// or the Depth Mapping, God Rays and Cloud Detail menus'.
+    /// or the Depth Mapping, God Rays, Cloud Detail, Tree Draw Distance, Light Draw Distance, Render Scale and
+    /// Dynamic Resolution menus'.
     #[must_use]
     pub fn default_value(self) -> Option<u32> {
         use dereth_client_contract::options as o;
@@ -659,6 +704,9 @@ impl FidelityFeature {
             Self::DepthMapping => u32::try_from(o::depth_mapping::DEFAULT).ok(),
             Self::GodRays => u32::try_from(o::god_rays::DEFAULT).ok(),
             Self::CloudDetail => u32::try_from(o::cloud_detail::DEFAULT).ok(),
+            Self::LightDrawDistance => u32::try_from(o::light_distance::DEFAULT).ok(),
+            Self::RenderScale => Some(o::fidelity::SCALE_DEFAULT),
+            Self::DynamicResolution => u32::try_from(o::dynamic_resolution::DEFAULT).ok(),
             _ => o::fidelity::find(self.name())
                 .filter(|b| b.on_by_default)
                 .map(|_| 1),
@@ -666,10 +714,31 @@ impl FidelityFeature {
     }
 
     /// `raw` as this option stores it: an effect past Ultra is Ultra; a diagnostic view past the
-    /// last is off.
+    /// last is off; a draw distance outside its menu is the whole distance, 0, but for the ground
+    /// cover's Off; a render scale that is neither Dynamic nor a share under the whole frame is all
+    /// of its pixels, 0.
     #[must_use]
     pub const fn clamp(self, raw: u32) -> u32 {
-        if raw <= self.max() {
+        if matches!(self, Self::RenderScale) {
+            use dereth_client_contract::options::render_scale::{DYNAMIC, LEAST};
+            if raw == DYNAMIC || (raw >= LEAST && raw <= self.max()) {
+                raw
+            } else {
+                0
+            }
+        } else if matches!(
+            self,
+            Self::GroundCoverDrawDistance | Self::LightDrawDistance
+        ) {
+            use dereth_client_contract::options::draw_distance::{LEAST, OFF};
+            #[allow(clippy::cast_sign_loss)] // a small positive constant
+            let off = matches!(self, Self::GroundCoverDrawDistance) && raw == OFF as u32;
+            if raw >= LEAST && raw <= self.max() || off {
+                raw
+            } else {
+                0
+            }
+        } else if raw <= self.max() {
             raw
         } else if matches!(self, Self::Debug) {
             0
@@ -706,11 +775,31 @@ impl FidelityPreferences {
             let raw = match feature {
                 // The view a diagnostic run asks for, by number.
                 FidelityFeature::Debug => prefs.u32(feature.name()),
+                // The share the page chose, or Dynamic, in its words.
+                FidelityFeature::RenderScale => prefs
+                    .get(feature.name())
+                    .and_then(|v| {
+                        dereth_client_contract::options::render_scale::parse_value(
+                            feature.name(),
+                            v,
+                        )
+                    })
+                    .and_then(|v| u32::try_from(v).ok()),
                 // A level by its name or number, or the box it once was.
                 FidelityFeature::DepthMapping => prefs
                     .get(feature.name())
                     .and_then(|v| {
                         dereth_client_contract::options::depth_mapping::parse_value(
+                            feature.name(),
+                            v,
+                        )
+                    })
+                    .and_then(|v| u32::try_from(v).ok()),
+                // A frame rate in its words.
+                FidelityFeature::DynamicResolution => prefs
+                    .get(feature.name())
+                    .and_then(|v| {
+                        dereth_client_contract::options::dynamic_resolution::parse_value(
                             feature.name(),
                             v,
                         )
@@ -723,15 +812,36 @@ impl FidelityPreferences {
                         dereth_client_contract::options::god_rays::parse_value(feature.name(), v)
                     })
                     .and_then(|v| u32::try_from(v).ok()),
-                // A level by its name or stored number; the menu's default otherwise.
-                FidelityFeature::CloudDetail => {
-                    let cloud = dereth_client_contract::options::cloud_detail::parse_value;
-                    prefs
-                        .get(feature.name())
-                        .and_then(|v| cloud(feature.name(), v))
-                        .or(Some(dereth_client_contract::options::cloud_detail::DEFAULT))
-                        .and_then(|v| u32::try_from(v).ok())
-                }
+                // A share by its words, or the ground cover's Off.
+                FidelityFeature::GroundCoverDrawDistance => prefs
+                    .get(feature.name())
+                    .and_then(|v| {
+                        dereth_client_contract::options::draw_distance::parse_value(
+                            feature.name(),
+                            v,
+                        )
+                    })
+                    .and_then(|v| u32::try_from(v).ok()),
+                // A level by its name or stored number.
+                FidelityFeature::CloudDetail => prefs
+                    .get(feature.name())
+                    .and_then(|v| {
+                        dereth_client_contract::options::cloud_detail::parse_value(
+                            feature.name(),
+                            v,
+                        )
+                    })
+                    .and_then(|v| u32::try_from(v).ok()),
+                // A share by its words.
+                FidelityFeature::LightDrawDistance => prefs
+                    .get(feature.name())
+                    .and_then(|v| {
+                        dereth_client_contract::options::light_distance::parse_value(
+                            feature.name(),
+                            v,
+                        )
+                    })
+                    .and_then(|v| u32::try_from(v).ok()),
                 // A box the page ticked; a number the file holds otherwise (from an older
                 // build) is not read, as the page does not read it.
                 _ => prefs.bool(feature.name()).map(u32::from),
@@ -776,8 +886,9 @@ impl FidelityPreferences {
 
     /// Whether any option is on in effect. Without one the presentation is not installed. The
     /// switches that turn something off (the retail look's, the anti-aliasing's, the slope
-    /// materials', the damp's), the presentation choices, and depth mapping, God Rays and Cloud
-    /// Detail, drawn inside the better lighting, draw nothing of their own, so they alone are none.
+    /// materials', the damp's, the wind's, the flicker's), the presentation choices, depth mapping
+    /// God Rays and Cloud Detail, drawn inside the better lighting, and the draw distances draw nothing of their
+    /// own, so they alone are none.
     #[must_use]
     pub fn any_effective(&self) -> bool {
         FidelityFeature::ALL
@@ -789,21 +900,31 @@ impl FidelityPreferences {
                         FidelityFeature::RetailLook
                             | FidelityFeature::NoAntiAliasing
                             | FidelityFeature::NoSlopeMaterials
+                            | FidelityFeature::NoWind
                             | FidelityFeature::NoDamp
                             | FidelityFeature::DepthMapping
                             | FidelityFeature::GodRays
                             | FidelityFeature::CloudDetail
+                            | FidelityFeature::GroundCoverDrawDistance
+                            | FidelityFeature::NoFlameFlicker
+                            | FidelityFeature::LightDrawDistance
                     )
             })
             .any(|f| self.effective(f) != 0)
     }
 
-    /// These preferences with the presentation choices taken out: what the presentation's own
-    /// settings are made from, so a change to one alone needs no new start.
+    /// These preferences with the presentation choices taken out, the render scale among them, and
+    /// the draw distances and the light draw distance, which each frame reads: a change to one
+    /// alone needs no new start.
     #[must_use]
     pub fn without_presentation_choices(mut self) -> Self {
         for (i, f) in FidelityFeature::ALL.iter().enumerate() {
-            if f.is_presentation_choice() {
+            if f.is_presentation_choice()
+                || matches!(
+                    f,
+                    FidelityFeature::GroundCoverDrawDistance | FidelityFeature::LightDrawDistance
+                )
+            {
                 self.values[i] = 0;
             }
         }
@@ -865,6 +986,13 @@ impl FidelityPreferences {
                     .parse::<u32>()
                     .map_err(|_| format!("{value:?} is not a value for {name}"))?,
             };
+            // A name no option takes any more is read as nothing.
+            if fidelity::RETIRED
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(&full))
+            {
+                continue;
+            }
             if !f.set_named(
                 &full,
                 &dereth_client_contract::PrefValue::Int(i32::try_from(value).unwrap_or(i32::MAX)),
@@ -941,12 +1069,19 @@ mod tests {
                     | FidelityFeature::Lamps
                     | FidelityFeature::Sky
                     | FidelityFeature::Weather
+                    | FidelityFeature::Water
                     | FidelityFeature::VSync
             );
             let at = if f == FidelityFeature::DepthMapping {
                 3
             } else if f == FidelityFeature::GodRays || f == FidelityFeature::CloudDetail {
                 1
+            } else if f == FidelityFeature::LightDrawDistance {
+                150
+            } else if f == FidelityFeature::RenderScale {
+                dereth_client_contract::options::render_scale::DYNAMIC
+            } else if f == FidelityFeature::DynamicResolution {
+                60
             } else {
                 u32::from(on)
             };
@@ -993,6 +1128,7 @@ mod tests {
         ));
         assert!(old.interface);
         assert_eq!(old.effective(FidelityFeature::Lighting), 1);
+        assert_eq!(old.effective(FidelityFeature::Water), 1);
         // Every option has its name, and every name its option.
         assert_eq!(fidelity::NAMES.len(), FidelityFeature::ALL.len());
         for f in FidelityFeature::ALL {
@@ -1025,6 +1161,33 @@ mod tests {
             2
         );
         assert!(switched("Lighting=1,GodRays=2").any_effective());
+    }
+
+    #[test]
+    #[cfg(feature = "hifi")]
+    fn the_light_draw_distance_is_read_by_its_words_and_draws_nothing_alone() {
+        let read = |line: &str| {
+            FidelityPreferences::from_preferences(&Preferences::parse(&format!(
+                "[UI]\nInterface=Horizon\n[Fidelity]\n{line}\n"
+            )))
+        };
+        let lights = FidelityFeature::LightDrawDistance;
+        assert_eq!(read("LightDrawDistance=3x").effective(lights), 300);
+        assert_eq!(read("LightDrawDistance=150").effective(lights), 150);
+        assert_eq!(
+            read("LightDrawDistance=9x").effective(lights),
+            lights.default_value().unwrap_or(0),
+            "a word it does not know leaves it at its default"
+        );
+        let alone = FidelityPreferences::parse_switch("LightDrawDistance=500,NoFlameFlicker=1")
+            .expect("a switch");
+        assert!(!alone.any_effective());
+        let switched = FidelityPreferences::parse_switch("Lighting=1,LightDrawDistance=200")
+            .expect("a switch");
+        assert_eq!(switched.effective(lights), 200);
+        assert_eq!(switched.without_presentation_choices().value(lights), 0);
+        assert_eq!(lights.clamp(20), 0);
+        assert_eq!(FidelityFeature::NoFlameFlicker.clamp(3), 1);
     }
 
     #[test]
@@ -1080,7 +1243,7 @@ mod tests {
         assert!(q.set_named(fidelity::SHADOWS, &PrefValue::Int(7)));
         assert!(!q.set_named(fidelity::SHADOWS, &PrefValue::Float(2.0)));
         assert!(!q.set_named("Render.FieldOfView", &PrefValue::Int(2)));
-        assert!(!q.set_named("Fidelity.Water", &PrefValue::Int(2)));
+        assert!(!q.set_named("Fidelity.Puddles", &PrefValue::Int(2)));
         assert_eq!(
             q.effective(FidelityFeature::Shadows),
             4,
@@ -1120,6 +1283,72 @@ mod tests {
         assert!(switched("Lighting=1,DepthMapping=1").any_effective());
     }
 
+    #[test]
+    #[cfg(feature = "hifi")]
+    fn a_draw_distance_is_read_by_its_words_and_draws_nothing_alone() {
+        let read = |line: &str| {
+            FidelityPreferences::from_preferences(&Preferences::parse(&format!(
+                "[UI]\nInterface=Horizon\n[Fidelity]\n{line}\n"
+            )))
+        };
+        let cover = FidelityFeature::GroundCoverDrawDistance;
+        assert_eq!(read("GroundCoverDrawDistance=3x").effective(cover), 300);
+        assert_eq!(read("GroundCoverDrawDistance=150").effective(cover), 150);
+        assert_eq!(
+            read("GroundCoverDrawDistance=9x").effective(cover),
+            0,
+            "a word it does not know leaves it at the whole distance"
+        );
+        assert_eq!(read("GroundCoverDrawDistance=Off").effective(cover), 1);
+        // The trees' old draw distance is read as nothing, from a profile or a capture's line.
+        assert_eq!(read("TreeDrawDistance=5x"), read(""));
+        assert!(
+            !FidelityPreferences::parse_switch("TreeDrawDistance=500,NoWind=1")
+                .unwrap()
+                .any_effective()
+        );
+        let switched = FidelityPreferences::parse_switch("Lighting=1,GroundCoverDrawDistance=1")
+            .expect("a switch");
+        assert_eq!(switched.effective(cover), 1);
+        assert_eq!(switched.without_presentation_choices().value(cover), 0);
+        assert_eq!(FidelityFeature::GroundCoverDrawDistance.clamp(20), 0);
+        assert_eq!(FidelityFeature::GroundCoverDrawDistance.clamp(1), 1);
+        assert_eq!(FidelityFeature::NoWind.clamp(3), 1);
+    }
+
+    /// Behaviour: none (the experimental render scale; visual only)
+    #[test]
+    #[cfg(feature = "hifi")]
+    fn the_render_scale_holds_dynamic_or_a_share_under_the_whole_frame_and_draws_nothing_itself() {
+        use dereth_client_contract::PrefValue;
+        let mut q = FidelityPreferences {
+            interface: true,
+            ..FidelityPreferences::default()
+        };
+        assert!(q.set_named(fidelity::RENDER_SCALE, &PrefValue::Int(67)));
+        assert_eq!(q.effective(FidelityFeature::RenderScale), 67);
+        assert!(!q.any_effective(), "a scale alone draws nothing");
+        assert!(!q.any_stored());
+        assert_eq!(
+            q.without_presentation_choices(),
+            FidelityPreferences {
+                interface: true,
+                ..FidelityPreferences::default()
+            }
+        );
+        for (raw, stored) in [(100, 0), (49, 0), (2, 0), (1, 1), (50, 50), (99, 99)] {
+            assert!(q.set_named(fidelity::RENDER_SCALE, &PrefValue::Int(raw)));
+            assert_eq!(q.value(FidelityFeature::RenderScale), stored, "{raw}");
+        }
+        let q = FidelityPreferences::parse_switch("Lighting=1,RenderScale=75").unwrap();
+        assert_eq!(q.effective(FidelityFeature::RenderScale), 75);
+        let read = FidelityPreferences::from_preferences(&Preferences::parse(
+            "[UI]\nInterface=Horizon\n[Fidelity]\nRenderScale=0.5x\nDynamicResolution=90 FPS\n",
+        ));
+        assert_eq!(read.effective(FidelityFeature::RenderScale), 50);
+        assert_eq!(read.effective(FidelityFeature::DynamicResolution), 90);
+    }
+
     /// Behaviour: hifi.options.the-fidelity-section-reaches-the-render-preferences
     #[test]
     #[cfg(feature = "hifi")]
@@ -1157,7 +1386,7 @@ mod tests {
         let classic = FidelityPreferences::parse_switch("Lighting=1,Interface=0").expect("classic");
         assert!(!classic.any_effective() && classic.any_stored());
         assert!(FidelityPreferences::parse_switch("Lighting").is_err());
-        assert!(FidelityPreferences::parse_switch("Water=1").is_err());
+        assert!(FidelityPreferences::parse_switch("Puddles=1").is_err());
         assert!(FidelityPreferences::parse_switch("Sky=lots").is_err());
     }
 

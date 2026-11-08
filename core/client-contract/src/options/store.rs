@@ -288,12 +288,17 @@ pub fn init() -> usize {
     super::performance::register();
     // Whether frames slow down while the window is in the background.
     super::background::register();
+    // Horizon's status bars' colours and numbers.
+    super::status_bars::register();
     super::classic::register();
     // The renderer the next start comes up on, which only the Horizon interface's page chooses.
     super::renderer::register();
     // The optional high-fidelity presentation's options, in a build that has it.
     #[cfg(feature = "hifi")]
     super::fidelity::register();
+    // The weather's own sound, which only the high-fidelity presentation's weather makes.
+    #[cfg(feature = "hifi")]
+    super::weather_sound::register();
     // The landscape's detail texture: registered by retail's renderer with no options row, and
     // given one by both interfaces' pages here.
     register_preference(
@@ -398,7 +403,7 @@ const CUSTOM_ENUMS: &[CustomEnum] = &[
         choices: super::renderer::choice_rows,
     },
     CustomEnum {
-        recognizes: |name| name.eq_ignore_ascii_case(super::render_scale::RENDER_SCALE),
+        recognizes: super::render_scale::is_a_scale,
         parse: super::render_scale::parse_value,
         format: super::render_scale::convert_to_string,
         choices: super::render_scale::choice_rows,
@@ -420,6 +425,30 @@ const CUSTOM_ENUMS: &[CustomEnum] = &[
         parse: super::cloud_detail::parse_value,
         format: super::cloud_detail::convert_to_string,
         choices: super::cloud_detail::choice_rows,
+    },
+    CustomEnum {
+        recognizes: super::draw_distance::is_a_distance,
+        parse: super::draw_distance::parse_value,
+        format: super::draw_distance::convert_to_string,
+        choices: super::draw_distance::choice_rows,
+    },
+    CustomEnum {
+        recognizes: super::light_distance::is_light_distance,
+        parse: super::light_distance::parse_value,
+        format: super::light_distance::convert_to_string,
+        choices: super::light_distance::choice_rows,
+    },
+    CustomEnum {
+        recognizes: super::dynamic_resolution::is_dynamic_resolution,
+        parse: super::dynamic_resolution::parse_value,
+        format: super::dynamic_resolution::convert_to_string,
+        choices: super::dynamic_resolution::choice_rows,
+    },
+    CustomEnum {
+        recognizes: |name| name.eq_ignore_ascii_case(super::status_bars::STATUS_BAR_COLORS),
+        parse: super::status_bars::parse_value,
+        format: super::status_bars::convert_to_string,
+        choices: super::status_bars::choice_rows,
     },
 ];
 
@@ -1218,13 +1247,17 @@ mod tests {
     fn loading_a_preferences_file_overwrites_only_the_registered_names() {
         assert_eq!(init(), 34, "the 34 attached preferences all register");
         // ...beside this client's three presentation options from another era, its interface, its
-        // performance panel, its background slow-down, the classic interface's six, the renderer
-        // and the landscape detail texture, and in a build with the high-fidelity presentation its
-        // boxes and its two menus too.
+        // performance panel, its background slow-down, Horizon's two status-bar options, the
+        // classic interface's six, the renderer and the landscape detail texture, and in a build
+        // with the high-fidelity presentation its boxes, its two menus and the weather sound's
+        // two too.
         #[cfg(not(feature = "hifi"))]
-        assert_eq!(len(), 48);
+        assert_eq!(len(), 50);
         #[cfg(feature = "hifi")]
-        assert_eq!(len(), 48 + super::super::fidelity::OPTIONS.len() + 3);
+        assert_eq!(
+            len(),
+            50 + super::super::fidelity::OPTIONS.len() + super::super::fidelity::MENUS.len() + 2
+        );
         // The registration defaults are in force before any file is read.
         assert_eq!(
             inq_value("Input.MouseLookSensitivity"),

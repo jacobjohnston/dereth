@@ -1,7 +1,8 @@
-//! The words and rules of the optional high-fidelity presentation's options: thirteen check boxes,
-//! the Depth Mapping menu ([`super::depth_mapping`]) and the God Rays menu ([`super::god_rays`]) on
-//! the Horizon interface's Display page, under a heading of their own, below a Graphics menu that
-//! chooses standard or enhanced graphics.
+//! The words and rules of the optional high-fidelity presentation's options: fifteen check boxes,
+//! the Depth Mapping menu ([`super::depth_mapping`]), the God Rays menu ([`super::god_rays`]), the
+//! Cloud Detail menu ([`super::cloud_detail`]), the Tree Draw Distance and Ground Cover menus ([`super::draw_distance`]) and the Light Draw Distance
+//! menu ([`super::light_distance`]) on the Horizon interface's Display page, under a heading of
+//! their own, below a Graphics menu that chooses standard or enhanced graphics.
 //!
 //! The first box is Enhanced Graphics Mode, the better lighting, which the Graphics menu sets. Four
 //! of the effects are drawn inside it and draw nothing without it: the sun shadows, the bounced
@@ -11,12 +12,23 @@
 //! itself, so the ambient occlusion stands aside in the outdoor frames it is drawn into; indoors
 //! and underground, where it draws nothing, the occlusion is drawn.) An art pack's models and
 //! ground are drawn inside the better lighting too, and Keep Retail Look draws the game's own in
-//! their place, all of them or none. The better lighting smooths the world's edges with temporal
+//! their place, all of them or none. The water is drawn with reflections inside the better
+//! lighting, and Keep Retail Look draws the game's own. The better lighting smooths the world's
+//! edges with temporal
 //! anti-aliasing, which a box turns off; an art pack's ground lays scree and rock on steep slopes,
-//! which a box turns off; and two boxes choose how its frames reach the display. The Depth Mapping
-//! menu gives the world's own pictures the relief an art pack has for them, inside the better
-//! lighting, and a box keeps the damp and slime it lays on a room's surfaces. God Rays shows the
-//! sunlight in the air, inside the better lighting.
+//! which a box turns off; the wind moves an art pack's trees and plants, which a box stops; and two
+//! boxes choose how its frames reach the display. The Depth Mapping menu gives the world's own
+//! pictures the relief an art pack has for them, inside the better lighting, and a box keeps the
+//! damp and slime it lays on a room's surfaces. God Rays shows the sunlight in the air, and Cloud Detail
+//! sets how finely the clouds are drawn, inside the better lighting. The draw distances choose how far an art pack's trees and plants are drawn,
+//! and the Ground Cover menu also leaves its plants out. The flames' light flickers, which a box
+//! holds steady, and Light Draw Distance chooses how far the lamps light the world.
+//!
+//! Two menus follow the switches: the Render Scale, the share of the frame's pixels the better
+//! lighting draws the world at, or Dynamic, and the frame rate a Dynamic render scale holds
+//! ([`super::dynamic_resolution`]). A picture drawn at fewer pixels is rebuilt at the frame's size
+//! from the frames before it: by MetalFX on macOS, by the better lighting's own anti-aliasing
+//! elsewhere.
 //!
 //! The effects start on. The enhanced graphics' quality presets set several of them at once
 //! ([`PRESET_VALUES`]), and the defaults of the boxes and the menus are the Medium preset's.
@@ -65,8 +77,8 @@ pub struct FidelityOption {
     pub on_by_default: bool,
 }
 
-/// The thirteen boxes, each above the boxes it can take off the page.
-pub const OPTIONS: [FidelityOption; 13] = [
+/// The sixteen boxes, each above the boxes it can take off the page.
+pub const OPTIONS: [FidelityOption; 16] = [
     FidelityOption {
         name: fidelity::LIGHTING,
         caption: "Enhanced Graphics",
@@ -142,10 +154,20 @@ pub const OPTIONS: [FidelityOption; 13] = [
         on_by_default: true,
     },
     FidelityOption {
+        name: fidelity::WATER,
+        caption: "Water Reflections",
+        note: "Draws the world's water as water, with ripples, reflections of the sky and the \
+               land, and a bed seen through it. The land is drawn again with it, from the game's \
+               own pictures. An art pack's ground always has this water.",
+        needs: Needs::LightingWithoutRetailLook,
+        inverted: false,
+        on_by_default: true,
+    },
+    FidelityOption {
         name: fidelity::NO_ANTI_ALIASING,
         caption: "Anti-Aliasing",
         note: "Temporal anti-aliasing smooths the world's edges. Off, edges stair-step and \
-               shimmer in motion.",
+               shimmer in motion. It is always on below a Render Scale of 100%.",
         needs: Needs::Lighting,
         inverted: true,
         on_by_default: false,
@@ -185,15 +207,64 @@ pub const OPTIONS: [FidelityOption; 13] = [
         inverted: true,
         on_by_default: false,
     },
+    FidelityOption {
+        name: fidelity::NO_WIND,
+        caption: "Foliage Wind",
+        note: "Lets the wind move an art pack's trees and plants; off, they hold still. It \
+               changes at once.",
+        needs: Needs::ArtPackWithoutRetailLook,
+        inverted: true,
+        on_by_default: false,
+    },
+    FidelityOption {
+        name: fidelity::NO_FLAME_FLICKER,
+        caption: "Flame Flicker",
+        note: "The light of torches, braziers and candles flickers and sways, and the shadows \
+               it throws move with it. Off, every flame's light holds steady, for anyone \
+               bothered by flickering light. It changes at once.",
+        needs: Needs::Lighting,
+        inverted: true,
+        on_by_default: false,
+    },
 ];
 
 /// The menus among the effects' rows, each with what it needs. A menu's own module registers it
 /// and gives its choices; a row here gives it the boxes' rules.
 pub const MENUS: &[(&str, Needs)] = &[
+    (fidelity::RENDER_SCALE, Needs::Lighting),
+    (fidelity::DYNAMIC_RESOLUTION, Needs::Lighting),
     (fidelity::DEPTH_MAPPING, Needs::ArtPackWithoutRetailLook),
     (fidelity::GOD_RAYS, Needs::Lighting),
     (fidelity::CLOUD_DETAIL, Needs::ArtPackWithoutRetailLook),
+    (fidelity::LIGHT_DRAW_DISTANCE, Needs::Lighting),
+    (
+        fidelity::GROUND_COVER_DRAW_DISTANCE,
+        Needs::ArtPackWithoutRetailLook,
+    ),
 ];
+
+/// The render scale until the player changes it: Dynamic, as the Medium preset has it.
+pub const SCALE_DEFAULT: u32 = super::render_scale::DYNAMIC;
+
+/// The render scale menu's caption.
+pub const SCALE_CAPTION: &str = "Render Scale";
+
+/// What the render scale does, for the row's tooltip.
+#[cfg(target_os = "macos")]
+pub const SCALE_NOTE: &str = "Draws the world at this share of the screen's pixels and has \
+                              MetalFX rebuild the picture to fill the screen: faster, a little \
+                              softer. Dynamic lowers it to hold a frame rate. It changes at once.";
+
+/// What the render scale does, for the row's tooltip.
+#[cfg(not(target_os = "macos"))]
+pub const SCALE_NOTE: &str = "Draws the world at this share of the screen's pixels and rebuilds \
+                              the picture to fill the screen from the frames before it: faster, a \
+                              little softer. Dynamic lowers it to hold a frame rate. It changes at \
+                              once.";
+
+/// The render scale value of a Dynamic render scale.
+#[allow(clippy::cast_possible_wrap)] // a small constant
+const DYNAMIC: i32 = super::render_scale::DYNAMIC as i32;
 
 /// The heading's caption.
 pub const HEADING: &str = "Enhanced Graphics";
@@ -227,6 +298,7 @@ pub const PRESET_VALUES: &[(&str, [PrefValue; PRESET_NAMES.len()])] = &[
     (fidelity::AMBIENT_OCCLUSION, [OFF, ON, ON, ON]),
     (fidelity::SKY, [OFF, ON, ON, ON]),
     (fidelity::WEATHER, [OFF, ON, ON, ON]),
+    (fidelity::WATER, [OFF, ON, ON, ON]),
     (fidelity::NO_ANTI_ALIASING, [ON, OFF, OFF, OFF]),
     (fidelity::NO_SLOPE_MATERIALS, [OFF, OFF, OFF, OFF]),
     (fidelity::DEPTH_MAPPING, [Int(0), Int(3), Int(3), Int(3)]),
@@ -235,11 +307,28 @@ pub const PRESET_VALUES: &[(&str, [PrefValue; PRESET_NAMES.len()])] = &[
     (
         fidelity::CLOUD_DETAIL,
         [
-            PrefValue::Int(super::cloud_detail::LOW),
-            PrefValue::Int(super::cloud_detail::MEDIUM),
-            PrefValue::Int(super::cloud_detail::HIGH),
-            PrefValue::Int(super::cloud_detail::HIGH),
+            Int(super::cloud_detail::LOW),
+            Int(super::cloud_detail::MEDIUM),
+            Int(super::cloud_detail::HIGH),
+            Int(super::cloud_detail::HIGH),
         ],
+    ),
+    (fidelity::NO_WIND, [ON, OFF, OFF, OFF]),
+    (
+        fidelity::GROUND_COVER_DRAW_DISTANCE,
+        [Int(super::draw_distance::OFF), Int(100), Int(300), Int(500)],
+    ),
+    (
+        fidelity::LIGHT_DRAW_DISTANCE,
+        [Int(100), Int(150), Int(300), Int(500)],
+    ),
+    (
+        fidelity::RENDER_SCALE,
+        [Int(DYNAMIC), Int(DYNAMIC), Int(DYNAMIC), Int(100)],
+    ),
+    (
+        fidelity::DYNAMIC_RESOLUTION,
+        [Int(60), Int(60), Int(60), Int(60)],
     ),
 ];
 
@@ -296,6 +385,8 @@ pub enum Blocked {
     RetailLook,
     /// No art pack is open.
     NeedsArtPack,
+    /// The art pack's ground draws this water always.
+    BuiltInWater,
     /// Depth mapping is off.
     NeedsDepthMapping,
 }
@@ -311,6 +402,7 @@ impl Blocked {
             }
             Self::RetailLook => "Off under Keep Retail Look",
             Self::NeedsArtPack => "Needs an art pack",
+            Self::BuiltInWater => "Always on with the art pack's ground",
             Self::NeedsDepthMapping => "Needs Depth Mapping",
         }
     }
@@ -398,13 +490,27 @@ pub fn blocked_with(
             Some(Blocked::RetailLook)
         }
         Needs::Relief if !ticked(fidelity::DEPTH_MAPPING) => Some(Blocked::NeedsDepthMapping),
+        _ if pack && name.eq_ignore_ascii_case(fidelity::WATER) => Some(Blocked::BuiltInWater),
         _ => None,
     }
 }
 
-/// Register every box with the value store, each at its default, and the Depth Mapping, God Rays
-/// and Cloud Detail menus at their own. The store's load then reads the `[Fidelity]` section of
-/// the profile into them, and the page reads and writes them.
+/// What the menu `name` holds until the player changes it.
+fn menu_default(name: &str) -> Option<PrefValue> {
+    if name.eq_ignore_ascii_case(fidelity::RENDER_SCALE) {
+        i32::try_from(SCALE_DEFAULT).ok().map(Int)
+    } else if super::dynamic_resolution::is_dynamic_resolution(name) {
+        Some(Int(super::dynamic_resolution::DEFAULT))
+    } else {
+        None
+    }
+}
+
+/// Register every box with the value store, each at its default, and the Render Scale, Dynamic
+/// Resolution, Depth Mapping, God Rays, Cloud Detail, draw distance and Light Draw Distance menus
+/// at their own.
+/// The store's load then reads the `[Fidelity]` section of the profile into them, and the page
+/// reads and writes them.
 pub fn register() -> usize {
     let boxes: usize = OPTIONS
         .iter()
@@ -431,7 +537,35 @@ pub fn register() -> usize {
         PrefValue::Int(super::cloud_detail::DEFAULT),
         super::store::DataType::UInt,
     );
-    boxes + usize::from(depth) + usize::from(rays) + usize::from(clouds)
+    let distances = [fidelity::GROUND_COVER_DRAW_DISTANCE]
+        .into_iter()
+        .filter(|name| {
+            super::store::register_preference(
+                name,
+                PrefValue::Int(super::draw_distance::default_of(name)),
+                super::store::DataType::UInt,
+            )
+        })
+        .count();
+    let lights = super::store::register_preference(
+        fidelity::LIGHT_DRAW_DISTANCE,
+        PrefValue::Int(super::light_distance::DEFAULT),
+        super::store::DataType::UInt,
+    );
+    let menus = [fidelity::RENDER_SCALE, fidelity::DYNAMIC_RESOLUTION]
+        .into_iter()
+        .filter_map(|name| Some((name, menu_default(name)?)))
+        .filter(|(name, value)| {
+            super::store::register_preference(name, value.clone(), super::store::DataType::UInt)
+        })
+        .count();
+    boxes
+        + usize::from(depth)
+        + usize::from(rays)
+        + usize::from(clouds)
+        + distances
+        + usize::from(lights)
+        + menus
 }
 
 /// Whether the store's save leaves `name` out of the profile: a box or a menu still at its default
@@ -445,11 +579,18 @@ pub fn left_out_of_save(
 ) -> bool {
     let unchanged = match find(name) {
         Some(o) => *value == PrefValue::Bool(o.on_by_default),
+        None if menu_default(name).is_some() => menu_default(name).as_ref() == Some(value),
         None if super::god_rays::is_god_rays(name) => {
             *value == PrefValue::Int(super::god_rays::DEFAULT)
         }
         None if super::cloud_detail::is_cloud_detail(name) => {
             *value == PrefValue::Int(super::cloud_detail::DEFAULT)
+        }
+        None if super::light_distance::is_light_distance(name) => {
+            *value == PrefValue::Int(super::light_distance::DEFAULT)
+        }
+        None if super::draw_distance::is_a_distance(name) => {
+            *value == PrefValue::Int(super::draw_distance::default_of(name))
         }
         None => is_a_menu(name) && *value == PrefValue::Int(super::depth_mapping::DEFAULT),
     };
@@ -658,7 +799,7 @@ mod tests {
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         use fidelity::{
             AMBIENT_OCCLUSION, GLOBAL_ILLUMINATION, LAMPS, LIGHTING, NO_SLOPE_MATERIALS,
-            RETAIL_LOOK, SHADOWS, SKY, WEATHER,
+            RETAIL_LOOK, SHADOWS, SKY, WATER, WEATHER,
         };
         for name in [SHADOWS, GLOBAL_ILLUMINATION, LAMPS, WEATHER] {
             assert_eq!(
@@ -705,6 +846,26 @@ mod tests {
         );
         assert_eq!(blocked(WEATHER, with(&[LIGHTING]), Some(false)), None);
         assert_eq!(blocked(LIGHTING, with(&[]), Some(false)), None);
+        // The water needs the better lighting, gives way to the retail look, and is always on
+        // with an art pack's ground.
+        for pack in [false, true] {
+            assert_eq!(
+                blocked_with(WATER, with(&[]), Some(false), pack),
+                Some(Blocked::NeedsLighting)
+            );
+            assert_eq!(
+                blocked_with(WATER, with(&[LIGHTING, RETAIL_LOOK]), None, pack),
+                Some(Blocked::RetailLook)
+            );
+        }
+        assert_eq!(
+            blocked_with(WATER, with(&[LIGHTING]), Some(false), false),
+            None
+        );
+        assert_eq!(
+            blocked_with(WATER, with(&[LIGHTING]), Some(false), true),
+            Some(Blocked::BuiltInWater)
+        );
         // The slope materials are an art pack's ground's, which Keep Retail Look leaves out.
         assert_eq!(
             blocked(NO_SLOPE_MATERIALS, with(&[]), None),
@@ -720,9 +881,10 @@ mod tests {
     #[test]
     fn what_the_lighting_and_the_retail_look_rule_out_leaves_the_page() {
         use fidelity::{
-            AMBIENT_OCCLUSION, DEPTH_MAPPING, GLOBAL_ILLUMINATION, GOD_RAYS, HDR, LAMPS, LIGHTING,
-            NO_ANTI_ALIASING, NO_DAMP, NO_SLOPE_MATERIALS, RETAIL_LOOK, SHADOWS, SKY, VSYNC,
-            WEATHER,
+            AMBIENT_OCCLUSION, DEPTH_MAPPING, DYNAMIC_RESOLUTION, GLOBAL_ILLUMINATION, GOD_RAYS,
+            GROUND_COVER_DRAW_DISTANCE, HDR, LAMPS, LIGHTING, LIGHT_DRAW_DISTANCE,
+            NO_ANTI_ALIASING, NO_DAMP, NO_FLAME_FLICKER, NO_SLOPE_MATERIALS, NO_WIND, RENDER_SCALE,
+            RETAIL_LOOK, SHADOWS, SKY, VSYNC, WATER, WEATHER,
         };
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         let left = |name: &str, on: &'static [&'static str]| {
@@ -738,19 +900,37 @@ mod tests {
             GLOBAL_ILLUMINATION,
             LAMPS,
             WEATHER,
+            WATER,
             NO_ANTI_ALIASING,
             NO_SLOPE_MATERIALS,
+            NO_WIND,
             VSYNC,
             HDR,
             DEPTH_MAPPING,
             NO_DAMP,
             GOD_RAYS,
+            GROUND_COVER_DRAW_DISTANCE,
+            NO_FLAME_FLICKER,
+            LIGHT_DRAW_DISTANCE,
+            RENDER_SCALE,
+            DYNAMIC_RESOLUTION,
         ] {
             assert!(left(name, &[]), "{name}");
         }
         assert!(!left(GOD_RAYS, &[LIGHTING, RETAIL_LOOK]));
-        // The retail look takes off what an art pack draws, and only that.
-        let pack = [NO_SLOPE_MATERIALS, DEPTH_MAPPING, NO_DAMP];
+        assert!(!left(LIGHT_DRAW_DISTANCE, &[LIGHTING, RETAIL_LOOK]));
+        for name in [RENDER_SCALE, DYNAMIC_RESOLUTION] {
+            assert!(!left(name, &[LIGHTING, RETAIL_LOOK]), "{name}");
+        }
+        // The retail look takes off what an art pack draws and the water, and only those.
+        let pack = [
+            WATER,
+            NO_SLOPE_MATERIALS,
+            DEPTH_MAPPING,
+            NO_DAMP,
+            NO_WIND,
+            GROUND_COVER_DRAW_DISTANCE,
+        ];
         for name in pack {
             assert!(
                 left(name, &[LIGHTING, DEPTH_MAPPING, RETAIL_LOOK]),
@@ -775,8 +955,10 @@ mod tests {
                 fidelity::RETAIL_LOOK
                     | fidelity::NO_ANTI_ALIASING
                     | fidelity::NO_SLOPE_MATERIALS
+                    | fidelity::NO_WIND
                     | fidelity::HDR
                     | fidelity::NO_DAMP
+                    | fidelity::NO_FLAME_FLICKER
             );
             assert_eq!(o.on_by_default, draws, "{}", o.name);
             assert!(
@@ -803,7 +985,13 @@ mod tests {
             .collect();
         assert_eq!(
             inverted,
-            ["Anti-Aliasing", "Slope Materials", "Damp and Slime"]
+            [
+                "Anti-Aliasing",
+                "Slope Materials",
+                "Damp and Slime",
+                "Foliage Wind",
+                "Flame Flicker"
+            ]
         );
     }
 
@@ -824,19 +1012,37 @@ mod tests {
         )));
         assert!(low.contains(&(fidelity::GOD_RAYS, Int(super::super::god_rays::OFF))));
         assert!(low.contains(&(fidelity::CLOUD_DETAIL, Int(super::super::cloud_detail::LOW))));
+        assert!(low.contains(&(fidelity::NO_WIND, PrefValue::Bool(true))));
+        assert!(low.contains(&(
+            fidelity::GROUND_COVER_DRAW_DISTANCE,
+            Int(super::super::draw_distance::OFF)
+        )));
+        assert!(low.contains(&(fidelity::LIGHT_DRAW_DISTANCE, Int(100))));
+        assert!(low.contains(&(fidelity::RENDER_SCALE, Int(DYNAMIC))));
         let ultra = PRESETS[3].values();
         assert!(ultra.iter().all(|(name, v)| match find(name) {
             Some(o) => *v == PrefValue::Bool(!o.inverted),
             None if *name == fidelity::GOD_RAYS => *v == Int(super::super::god_rays::LOW),
             None if *name == fidelity::CLOUD_DETAIL => *v == Int(super::super::cloud_detail::HIGH),
+            None if *name == fidelity::RENDER_SCALE => *v == Int(100),
+            None if *name == fidelity::DYNAMIC_RESOLUTION => *v == Int(60),
+            None if *name == fidelity::LIGHT_DRAW_DISTANCE => *v == Int(500),
+            None if super::super::draw_distance::is_a_distance(name) => *v == Int(500),
             None => *v == Int(super::super::depth_mapping::MOST),
         }));
-        // The defaults of the boxes and the menu are the Medium preset's.
+        // The defaults of the boxes and the menus are the Medium preset's.
         let defaults = |name: &str| match find(name) {
             Some(o) => Some(PrefValue::Bool(o.on_by_default)),
+            None if menu_default(name).is_some() => menu_default(name),
             None if name == fidelity::GOD_RAYS => Some(Int(super::super::god_rays::DEFAULT)),
             None if name == fidelity::CLOUD_DETAIL => {
                 Some(Int(super::super::cloud_detail::DEFAULT))
+            }
+            None if name == fidelity::LIGHT_DRAW_DISTANCE => {
+                Some(Int(super::super::light_distance::DEFAULT))
+            }
+            None if super::super::draw_distance::is_a_distance(name) => {
+                Some(Int(super::super::draw_distance::default_of(name)))
             }
             None => is_a_menu(name).then_some(Int(super::super::depth_mapping::DEFAULT)),
         };
@@ -959,6 +1165,156 @@ mod tests {
         ));
         let named = UserPreferences::parse("[Fidelity]\r\nGodRays=Low\r\n").expect("reads");
         assert!(!left_out_of_save(fidelity::GOD_RAYS, &low, &named));
+    }
+
+    #[test]
+    fn the_wind_and_the_ground_cover_need_the_lighting_an_art_pack_and_no_retail_look() {
+        use fidelity::{GROUND_COVER_DRAW_DISTANCE, LIGHTING, NO_WIND, RETAIL_LOOK};
+        // With an art pack open, whose trees and plants they move and draw.
+        let blocked = |name, ticked, rays| blocked_with(name, ticked, rays, true);
+        let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
+        for name in [NO_WIND, GROUND_COVER_DRAW_DISTANCE] {
+            assert_eq!(blocked(name, with(&[]), None), Some(Blocked::NeedsLighting));
+            assert_eq!(blocked(name, with(&[LIGHTING]), Some(false)), None);
+            assert_eq!(
+                blocked(name, with(&[LIGHTING, RETAIL_LOOK]), None),
+                Some(Blocked::RetailLook)
+            );
+            // Without one there is nothing to move or draw.
+            assert_eq!(
+                blocked_with(name, with(&[LIGHTING]), None, false),
+                Some(Blocked::NeedsArtPack),
+                "{name}"
+            );
+        }
+        assert!(
+            find(GROUND_COVER_DRAW_DISTANCE).is_none(),
+            "the menu is no box"
+        );
+    }
+
+    /// The ground cover's draw distance starts as the Medium preset has it, and the save leaves it
+    /// out until it is changed.
+    #[test]
+    fn the_ground_cover_starts_at_medium_and_is_left_out_of_the_profile_until_chosen() {
+        use super::super::draw_distance::{default_of, OFF};
+        use crate::persist::preferences::UserPreferences;
+        let empty = UserPreferences::parse("").expect("an empty profile");
+        let name = fidelity::GROUND_COVER_DRAW_DISTANCE;
+        let medium = PrefValue::Int(default_of(name));
+        assert!(left_out_of_save(name, &medium, &empty), "{name}");
+        assert!(!left_out_of_save(name, &PrefValue::Int(300), &empty));
+        assert!(!left_out_of_save(name, &PrefValue::Int(OFF), &empty));
+        assert_eq!(default_of(name), 100);
+        let named =
+            UserPreferences::parse("[Fidelity]\r\nGroundCoverDrawDistance=1x\r\n").expect("reads");
+        assert!(!left_out_of_save(name, &PrefValue::Int(100), &named));
+    }
+
+    #[test]
+    fn the_flame_flicker_box_and_the_light_draw_distance_need_the_better_lighting() {
+        use fidelity::{LIGHTING, LIGHT_DRAW_DISTANCE, NO_FLAME_FLICKER};
+        let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
+        for name in [NO_FLAME_FLICKER, LIGHT_DRAW_DISTANCE] {
+            assert_eq!(blocked(name, with(&[]), None), Some(Blocked::NeedsLighting));
+            assert_eq!(blocked(name, with(&[LIGHTING]), Some(false)), None);
+        }
+        assert!(find(LIGHT_DRAW_DISTANCE).is_none(), "the menu is no box");
+    }
+
+    /// The Light Draw Distance starts at 1.5x, as the Medium preset has it, and the save leaves it
+    /// out until it is changed.
+    #[test]
+    fn the_light_draw_distance_starts_at_the_medium_presets_and_is_left_out_until_chosen() {
+        use crate::persist::preferences::UserPreferences;
+        let empty = UserPreferences::parse("").expect("an empty profile");
+        let whole = PrefValue::Int(super::super::light_distance::DEFAULT);
+        assert_eq!(whole, PrefValue::Int(150));
+        let name = fidelity::LIGHT_DRAW_DISTANCE;
+        assert!(left_out_of_save(name, &whole, &empty));
+        assert!(!left_out_of_save(name, &PrefValue::Int(300), &empty));
+        let named =
+            UserPreferences::parse("[Fidelity]\r\nLightDrawDistance=1x\r\n").expect("reads");
+        assert!(!left_out_of_save(name, &whole, &named));
+    }
+
+    #[test]
+    fn the_render_scale_needs_the_better_lighting_and_stays_out_of_a_profile_until_changed() {
+        let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
+        for name in [fidelity::RENDER_SCALE, fidelity::DYNAMIC_RESOLUTION] {
+            assert_eq!(blocked(name, with(&[]), None), Some(Blocked::NeedsLighting));
+            assert_eq!(blocked(name, with(&[fidelity::LIGHTING]), None), None);
+            assert!(find(name).is_none(), "{name} is no box");
+        }
+        let ini = crate::persist::preferences::UserPreferences::parse("").unwrap();
+        assert_eq!(SCALE_DEFAULT, super::super::render_scale::DYNAMIC);
+        assert!(left_out_of_save(
+            fidelity::RENDER_SCALE,
+            &Int(DYNAMIC),
+            &ini
+        ));
+        assert!(!left_out_of_save(fidelity::RENDER_SCALE, &Int(100), &ini));
+        assert!(left_out_of_save(
+            fidelity::DYNAMIC_RESOLUTION,
+            &Int(super::super::dynamic_resolution::DEFAULT),
+            &ini
+        ));
+        assert!(!left_out_of_save(
+            fidelity::DYNAMIC_RESOLUTION,
+            &Int(90),
+            &ini
+        ));
+        let named = crate::persist::preferences::UserPreferences::parse(
+            "[Fidelity]\r\nRenderScale=Dynamic\r\n",
+        )
+        .unwrap();
+        assert!(!left_out_of_save(
+            fidelity::RENDER_SCALE,
+            &Int(DYNAMIC),
+            &named
+        ));
+    }
+
+    #[test]
+    fn the_cloud_detail_menu_needs_the_better_lighting_and_an_art_pack_without_retail_look() {
+        use fidelity::{CLOUD_DETAIL, LIGHTING, RETAIL_LOOK};
+        let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
+        assert_eq!(
+            blocked_with(CLOUD_DETAIL, with(&[]), None, true),
+            Some(Blocked::NeedsLighting)
+        );
+        assert_eq!(
+            blocked_with(CLOUD_DETAIL, with(&[LIGHTING]), None, false),
+            Some(Blocked::NeedsArtPack)
+        );
+        assert_eq!(
+            blocked_with(CLOUD_DETAIL, with(&[LIGHTING, RETAIL_LOOK]), None, true),
+            Some(Blocked::RetailLook)
+        );
+        assert_eq!(
+            blocked_with(CLOUD_DETAIL, with(&[LIGHTING]), Some(false), true),
+            None
+        );
+        assert!(find(CLOUD_DETAIL).is_none(), "the menu is no box");
+    }
+
+    /// The Cloud Detail menu is registered at Medium, and the save leaves it out until it is
+    /// changed.
+    #[test]
+    fn the_cloud_detail_menu_is_medium_and_left_out_of_the_profile_until_chosen() {
+        use super::super::cloud_detail::{DEFAULT, HIGH, MEDIUM};
+        use crate::persist::preferences::UserPreferences;
+        let empty = UserPreferences::parse("").expect("an empty profile");
+        assert_eq!(DEFAULT, MEDIUM);
+        let medium = PrefValue::Int(MEDIUM);
+        assert!(left_out_of_save(fidelity::CLOUD_DETAIL, &medium, &empty));
+        assert!(!left_out_of_save(
+            fidelity::CLOUD_DETAIL,
+            &PrefValue::Int(HIGH),
+            &empty
+        ));
+        let named = UserPreferences::parse("[Fidelity]\r\nCloudDetail=Medium\r\n").expect("reads");
+        assert!(!left_out_of_save(fidelity::CLOUD_DETAIL, &medium, &named));
     }
 
     #[test]
@@ -1216,42 +1572,5 @@ mod tests {
         );
         assert_eq!(Availability::default().status(true), None, "not built");
         assert!(!Availability::default().offered());
-    }
-
-    #[test]
-    fn the_cloud_detail_menu_needs_the_better_lighting() {
-        use fidelity::{CLOUD_DETAIL, LIGHTING};
-        let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
-        // With an art pack open, whose sky the clouds are drawn in.
-        let blocked = |name, ticked, rays| blocked_with(name, ticked, rays, true);
-        assert_eq!(
-            blocked(CLOUD_DETAIL, with(&[]), None),
-            Some(Blocked::NeedsLighting)
-        );
-        assert_eq!(blocked(CLOUD_DETAIL, with(&[LIGHTING]), Some(false)), None);
-        // Without one there are no clouds to draw.
-        assert_eq!(
-            blocked_with(CLOUD_DETAIL, with(&[LIGHTING]), None, false),
-            Some(Blocked::NeedsArtPack)
-        );
-        assert!(find(CLOUD_DETAIL).is_none(), "the menu is no box");
-    }
-
-    /// The Cloud Detail menu is registered at its default, and the save leaves it out until it is
-    /// changed.
-    #[test]
-    fn the_cloud_detail_menu_is_left_out_of_the_profile_until_chosen() {
-        use super::super::cloud_detail::{DEFAULT, HIGH};
-        use crate::persist::preferences::UserPreferences;
-        let empty = UserPreferences::parse("").expect("an empty profile");
-        let default = PrefValue::Int(DEFAULT);
-        assert!(left_out_of_save(fidelity::CLOUD_DETAIL, &default, &empty));
-        assert!(!left_out_of_save(
-            fidelity::CLOUD_DETAIL,
-            &PrefValue::Int(HIGH),
-            &empty
-        ));
-        let named = UserPreferences::parse("[Fidelity]\r\nCloudDetail=Medium\r\n").expect("reads");
-        assert!(!left_out_of_save(fidelity::CLOUD_DETAIL, &default, &named));
     }
 }

@@ -30,6 +30,22 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Enhanced Graphics: a Render Scale menu draws the world at 85%, 75%, 67% or 50% of the screen's pixels each way, for a higher frame rate on large screens. On a Mac MetalFX rebuilds the picture at full size; elsewhere it is enlarged. Anti-Aliasing stays on below 100%, and pictures are read for the full frame.
 - Enhanced Graphics: Render Scale starts at Dynamic, as the Low, Medium and High presets have it (Ultra draws 100%): it lowers the render scale to hold the Dynamic Resolution Frame Rate (60 FPS unless chosen), shown only while Dynamic is chosen.
 - Performance Panel: SCALE shows the render scale drawn now, as a Dynamic render scale moves it.
+## 0.4.15 (2026-11-07)
+- The relay that plays AC1999 now comes with Dereth.
+- Logging in now reports the world's player count to the hub, with no opt-out.
+- Fixed a crash on exit on Linux with Wayland and NVIDIA.
+- Launch: the character page and character options show only what 1999's did.
+- Launch: spells ask for the tapers of your own account.
+- A window nobody can see no longer runs flat out.
+- macOS: Command works as Control, for shortcuts and copy and paste too.
+- macOS: the client asks for Game Mode.
+- macOS: drag the window to any size; it reopens that size, in points on Retina.
+- macOS: Horizon draws at the screen's own pixels, sharp in a window too, with a new render scale option.
+- Horizon: lighter text outlines, easier to read over a bright sky.
+- macOS: fixed the game running at 10 frames a second after starting behind another window.
+- macOS: logging out of full screen puts the window back where it was.
+- Better Lighting: smoke now covers distant trees instead of fading into the haze.
+- Better Lighting: glows and torches add as they do in the ordinary picture.
 
 ## 0.4.14 (2026-11-05)
 

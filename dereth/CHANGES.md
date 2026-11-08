@@ -73,6 +73,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Enhanced Graphics: below 100% Render Scale, Windows and Linux rebuild the picture at full size from the frames before it too, and sharpen it, so it is far less soft than enlarged. A frame that cannot be rebuilt, the first after a cut, is enlarged along its edges and sharpened.
 - Enhanced Graphics: Render Scale starts at Dynamic, as the Low, Medium and High presets have it (Ultra draws 100%): it lowers the render scale to hold the Dynamic Resolution Frame Rate (60 FPS unless chosen), shown only while Dynamic is chosen.
 - Performance Panel: SCALE shows the render scale drawn now, as a Dynamic render scale moves it.
+- Horizon: an administrator has an Admin window (Ctrl+Shift+A, or Admin on the System menu) whose buttons send the server's admin commands, and a Teleport button on the map.
 ## 0.4.15 (2026-11-07)
 - The relay that plays AC1999 now comes with Dereth.
 - Logging in now reports the world's player count to the hub, with no opt-out.

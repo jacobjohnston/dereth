@@ -210,6 +210,8 @@ pub fn window_for_action(action: u32) -> Option<WindowId> {
         0x1000_0005 => WindowId::Character,
         0x1000_0118 => WindowId::Social,
         0x1000_0128 => WindowId::Journal,
+        // This client's own key for the Admin window.
+        a if a == dereth_client_contract::actions::dereth::TOGGLE_ADMIN_WINDOW.0 => WindowId::Admin,
         _ => return None,
     })
 }
@@ -287,7 +289,9 @@ impl Hud {
                 }
             } else if let Some(id) = window_for_action(action) {
                 // A key for a system the world lacks does nothing.
-                if !key_surface(action).is_some_and(|s| windows.refuses(s)) {
+                if (id != WindowId::Admin || state.is_admin)
+                    && !key_surface(action).is_some_and(|s| windows.refuses(s))
+                {
                     windows.toggle(id, ctx.time);
                 }
             } else if crate::ui::chat::is_chat_action(action) {
@@ -2139,6 +2143,7 @@ impl Hud {
             (
                 "System",
                 &[
+                    ("Admin", MenuAction::Open(WindowId::Admin)),
                     ("Settings", MenuAction::Open(WindowId::Options)),
                     ("HUD Layout", MenuAction::Open(WindowId::Layout)),
                     ("Log Out", MenuAction::LogOut),

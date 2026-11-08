@@ -1147,6 +1147,9 @@ pub struct SceneDraw {
     render_shadow: dereth_client_runtime::render_prefs::RenderPreferences,
     /// Whether Enhanced Graphics Mode drew at the last poll.
     enhanced_shadow: bool,
+    /// Whether the lamps drew at the last poll: they light a place with its light sources and
+    /// their glow, so the place's flat sprites of light are left out. Without them the sprites stay.
+    lit_by_sources: bool,
     /// What the high-fidelity bridge remembers between frames.
     #[cfg(feature = "hifi")]
     hifi: RefCell<hifi_bridge::Shadow>,

@@ -191,7 +191,9 @@ fn depth_normal(px: vec2<i32>, p: vec3<f32>) -> vec3<f32> {
     return select(-n, n, dot(n, params.eye.xyz - p) >= 0.0) / l;
 }
 
-const TAPS: i32 = 32;
+const TAPS: i32 = 12;
+// The blocker search's taps; each pixel turns both patterns by its own noise.
+const BLOCKER_TAPS: i32 = 8;
 
 fn vogel(k: i32, n: i32, phi: f32) -> vec2<f32> {
     let golden = 2.39996323;
@@ -221,8 +223,8 @@ fn cascade_shadow(c: i32, world: vec3<f32>, n: vec3<f32>, noise: f32) -> f32 {
     let search = clamp(0.7 * params.scatter.z / texel, 2.0, 48.0) / size;
     var blockers = 0.0;
     var sum = 0.0;
-    for (var k: i32 = 0; k < 16; k = k + 1) {
-        let o = vogel(k, 16, phi) * search;
+    for (var k: i32 = 0; k < BLOCKER_TAPS; k = k + 1) {
+        let o = vogel(k, BLOCKER_TAPS, phi) * search;
         let t = vec2<i32>((uv + o) * size);
         let b = textureLoad(shadow_map, t, c, 0);
         if (b < z) {
@@ -596,7 +598,7 @@ const SKY_REACH: f32 = 0.4;
 // or as far as the shafts are gathered: the ray is marched through the sun's shadow maps, so a
 // wall, a roof or a canopy cuts the light in the air into shafts. The points are moved along the
 // ray from pixel to pixel and frame to frame, for the anti-aliasing to smooth.
-fn sun_shafts(p: vec2<f32>) -> vec3<f32> {
+fn sun_shafts(p: vec2<f32>, shade: f32) -> vec3<f32> {
     if (params.shafts.x <= 0.0 || params.sun_dir.w < 0.5 || params.indoor.x < 0.5
         || params.tune.w > 0.5) {
         return vec3<f32>(0.0);
@@ -611,15 +613,7 @@ fn sun_shafts(p: vec2<f32>) -> vec3<f32> {
     }
     let step = reach / f32(SHAFT_STEPS);
     let along = fract(ign(p) + 0.618034 * params.shafts.z);
-    // Air the eye stands in the shade of, under a canopy or among walls, holds more of what
-    // the light catches, and the few beams that reach it show.
-    var shaded = 0.0;
-    for (var k: i32 = 0; k < 8; k = k + 1) {
-        let a = f32(k) * 0.7853982;
-        let round = eye + vec3<f32>(cos(a) * 6.0, sin(a) * 6.0, 2.0 + f32(k % 2) * 4.0);
-        shaded = shaded + 1.0 - air_sunlit(round, 6.0);
-    }
-    let thick = 1.0 + params.shafts_shade.x * shaded / 8.0;
+    let thick = 1.0 + params.shafts_shade.x * shade;
     var sunlit = 0.0;
     for (var i: i32 = 0; i < SHAFT_STEPS; i = i + 1) {
         let t = (f32(i) + along) * step;
@@ -636,10 +630,43 @@ fn sun_shafts(p: vec2<f32>) -> vec3<f32> {
     return sun_lin * (sunlit * step * params.shafts.x * thick * phase);
 }
 
+// Air the eye stands in the shade of, under a canopy or among walls, holds more of what the
+// light catches, and the few beams that reach it show: the share of it in shade, the same for
+// every pixel.
+fn eye_shade() -> f32 {
+    if (params.shafts.x <= 0.0 || params.sun_dir.w < 0.5) {
+        return 0.0;
+    }
+    var shaded = 0.0;
+    for (var k: i32 = 0; k < 8; k = k + 1) {
+        let a = f32(k) * 0.7853982;
+        let round = params.eye.xyz + vec3<f32>(cos(a) * 6.0, sin(a) * 6.0, 2.0 + f32(k % 2) * 4.0);
+        shaded = shaded + 1.0 - air_sunlit(round, 6.0);
+    }
+    return shaded / 8.0;
+}
+
+struct RelightVs {
+    @builtin(position) position: vec4<f32>,
+    // The eye's shade, worked out at the corners rather than at every pixel.
+    @location(0) @interpolate(flat) shade: f32,
+};
+
+@vertex
+fn vs_relight(@builtin(vertex_index) i: u32) -> RelightVs {
+    let x = f32((i << 1u) & 2u);
+    let y = f32(i & 2u);
+    var o: RelightVs;
+    o.position = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+    o.shade = eye_shade();
+    return o;
+}
+
 @fragment
-fn fs_relight(@builtin(position) p: vec4<f32>) -> Out {
+fn fs_relight(v: RelightVs) -> Out {
+    let p = v.position;
     var o = relit(p);
-    let shafts = sun_shafts(p.xy);
+    let shafts = sun_shafts(p.xy, v.shade);
     o.colour = vec4<f32>(o.colour.rgb + shafts, o.colour.a);
     return o;
 }

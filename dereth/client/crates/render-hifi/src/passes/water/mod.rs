@@ -613,7 +613,7 @@ pub fn constants(
     c.extend(render_from_clip(cam.view, cam.projection).to_cols_array());
     let cascades = inputs
         .cascades
-        .map(|size| crate::passes::lighting::cascades(frame, size));
+        .map(|size| crate::passes::lighting::frame_cascades(frame, size).0);
     for i in 0..CASCADES {
         c.extend(
             cascades

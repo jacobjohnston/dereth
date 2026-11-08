@@ -81,6 +81,9 @@ pre-release leaves it for the final release, and its notes show it as it is);
   map's colours, with every major town marked and named on it, and the cottages, villas and
   mansions as you zoom in. The wheel zooms in on it and a drag pans around it.
 - Horizon: an administrator's map marks them with an arrow pointing straight down at where they stand.
+- Horizon: two settings under Display: Status Bar Colors gives the health, stamina and mana bars the
+  original game's red, amber and blue, and unticking Large Status Bar Numbers draws their numbers
+  smaller, clear of the bars' titles.
 ## 0.4.15 (2026-11-07)
 - The relay that plays AC1999 now comes with Dereth.
 - Logging in now reports the world's player count to the hub, with no opt-out.

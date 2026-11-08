@@ -22,6 +22,7 @@ pub mod preferences;
 pub mod render_scale;
 pub mod renderer;
 pub mod sheet;
+pub mod status_bars;
 pub mod store;
 pub mod weather_sound;
 

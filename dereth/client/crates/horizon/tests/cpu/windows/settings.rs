@@ -269,6 +269,19 @@ fn keep_retail_look_takes_what_an_art_pack_draws_off_the_page() {
     assert!(on_the_page(&mut h, &state, caption(names::SHADOWS)));
 }
 
+/// God Rays starts at Low, and is on the page only with Enhanced Graphics Mode on.
+#[test]
+#[cfg(feature = "hifi")]
+fn god_rays_start_low_and_show_only_with_enhanced_graphics() {
+    let rays = dereth_client_contract::options::god_rays::CAPTION;
+    let (mut h, state) = client_page(READY);
+    assert_eq!(store::inq_value(names::GOD_RAYS), Some(PrefValue::Int(1)));
+    assert!(!on_the_page(&mut h, &state, rays));
+    tick(&mut h, &state, caption(names::LIGHTING));
+    h.frame(&state);
+    assert!(on_the_page(&mut h, &state, rays));
+}
+
 /// Open the Quality Preset menu's list: its names, and the one the box shows. The list is closed
 /// again with that one chosen, which changes nothing.
 #[cfg(feature = "hifi")]

@@ -763,6 +763,7 @@ impl super::SceneDraw {
     ) {
         let settings = super::hifi_bridge::settings(&self.cfg.render.fidelity, false);
         let presented = gpu.hifi_requested() && gpu.hifi_supported() && gpu.hifi_failed().is_none();
+        self.whole_shapes = settings.lighting.is_on() && presented;
         let water = presented && super::hifi_bridge::reflective_water(&self.cfg.render.fidelity);
         self.land.want_water(water, store);
         let ground = self.land.ground_pack().is_some() && self.land.retail_ground.is_some();
@@ -773,7 +774,7 @@ impl super::SceneDraw {
         );
         self.place_drawn_ground(ws);
         self.drawn.keep_fields(store);
-        self.far_trees_step(store);
+        self.far_trees_step(store, ws.streamer.window.mid_radius());
         let cover_share = super::hifi_bridge::ground_cover_distance(&self.cfg.render.fidelity);
         self.ground_cover_step(
             cover_share,
@@ -818,9 +819,10 @@ impl super::SceneDraw {
         self.drawn.eye = ws.camera.position;
     }
 
-    /// The far trees' upkeep for this frame: drawn while the drawn ground is, with an art pack
-    /// that has far pictures.
-    fn far_trees_step(&mut self, store: &Arc<RetailDatStore>) {
+    /// The far objects' upkeep for this frame: drawn while the drawn ground is, with an art pack,
+    /// as far as the landscape `land_radius` blocks round the eye.
+    fn far_trees_step(&mut self, store: &Arc<RetailDatStore>, land_radius: u32) {
+        let reach = super::hifi_bridge::scenery_reach(land_radius);
         let pack = self.land.art_pack.clone();
         let region = || Arc::new((*self.land.region).clone());
         let eye = (
@@ -836,6 +838,7 @@ impl super::SceneDraw {
             &region,
             &self.land.table,
             eye,
+            reach,
         );
     }
 }

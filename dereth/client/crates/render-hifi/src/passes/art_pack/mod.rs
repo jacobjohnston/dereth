@@ -192,6 +192,9 @@ struct State {
     far_taken_us: u64,
     /// The ground cover's runs drawn into the view, in its own instances.
     cover_view: Vec<Batch>,
+    /// The runs of the plants past the near buildings, drawn before their door stamps.
+    cover_view_far: Vec<Batch>,
+    cover_far_drawn: bool,
     /// Whether the ground cover is drawn in this frame, and whether it has been. It is drawn at
     /// the far trees' command, since a block with none of the pack's objects notes nothing.
     cover_active: bool,
@@ -1608,6 +1611,19 @@ impl State {
         Self::draw_runs(gpu, gpu.view_instances.as_ref(), &self.view, pass)
     }
 
+    /// Draw the runs of the plants past the near buildings into `pass`.
+    fn draw_cover_far(&self, pass: &mut wgpu::RenderPass<'_>) -> bool {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return false;
+        };
+        Self::draw_runs(
+            gpu,
+            gpu.cover_instances.as_ref(),
+            &self.cover_view_far,
+            pass,
+        )
+    }
+
     /// Draw the runs of what stands past the near buildings into `pass`.
     fn draw_view_far(&self, pass: &mut wgpu::RenderPass<'_>) -> bool {
         let Some(gpu) = self.gpu.as_ref() else {
@@ -1959,7 +1975,14 @@ impl HifiPass for ArtPack {
         let plants = s.plant(cx.frame, clip_from_render, cx.settings.ground_cover);
         s.cover_plants = plants.len() as u64;
         let mut rows = Vec::with_capacity(plants.len() * 4);
-        s.cover_view = batches(&plants, (0..plants.len()).collect(), &mut rows);
+        let (close, past): (Vec<usize>, Vec<usize>) = (0..plants.len()).partition(|i| {
+            stamps.is_none_or(|(.., nearest)| {
+                (plants[*i].centre - cam.eye).truncate().length() < nearest
+            })
+        });
+        s.cover_view = batches(&plants, close, &mut rows);
+        s.cover_view_far = batches(&plants, past, &mut rows);
+        s.cover_far_drawn = false;
         if let Some(gpu) = s.gpu.as_mut() {
             write_instances(&device, &queue, &mut gpu.cover_instances, &rows);
         }
@@ -1982,8 +2005,8 @@ impl HifiPass for ArtPack {
             && plan.is_some_and(|p| s.far_mark.is_some_and(|m| p.replays_mark_at(m)));
         s.far_drawn = false;
         s.cover_active = s.gpu.is_some()
-            && !s.cover_view.is_empty()
-            && plan.is_some_and(|p| s.far_mark.is_some_and(|m| p.opaque.contains(&m)));
+            && !(s.cover_view.is_empty() && s.cover_view_far.is_empty())
+            && plan.is_some_and(|p| s.far_mark.is_some_and(|m| p.replays_mark_at(m)));
         s.cover_drawn = false;
     }
 
@@ -2045,6 +2068,10 @@ impl ReplayFilter for ArtPack {
                 s.view_far_drawn = true;
                 drew |= s.draw_view_far(pass);
             }
+            if s.cover_active && !s.cover_far_drawn {
+                s.cover_far_drawn = true;
+                drew |= s.draw_cover_far(pass);
+            }
             return drew;
         }
         if !matches!(mark, Mark::Objects) {
@@ -2057,6 +2084,10 @@ impl ReplayFilter for ArtPack {
             drew |= s.draw_far(pass);
         }
         // The ground cover there too: a block with none of the pack's objects notes no mark.
+        if s.cover_active && !s.cover_far_drawn {
+            s.cover_far_drawn = true;
+            drew |= s.draw_cover_far(pass);
+        }
         if s.cover_active && !s.cover_drawn {
             s.cover_drawn = true;
             drew |= s.draw_cover(pass);

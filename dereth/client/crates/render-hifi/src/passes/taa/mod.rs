@@ -155,17 +155,66 @@ pub fn jitter_over(n: u32, phases: u32, viewport: [u32; 4]) -> (Vec2, f32) {
     )
 }
 
-/// `block` drawn shifted by `jitter` (normalised device coordinates), with the frame's place
-/// `dither` in the dither of the edges of cut-outs, and `mip_bias` on its pictures. The
-/// brightness is left to the finished picture.
-pub fn jitter_block(block: &mut PerFrameConstants, jitter: Vec2, dither: f32, mip_bias: f32) {
+/// What a frame's per-frame blocks are drawn with: its jitter and its place in the dither.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shift {
+    /// The offset, in normalized device coordinates.
+    pub jitter: Vec2,
+    /// The frame's place in the dither of the edges of cut-outs.
+    pub dither: f32,
+    /// How many levels finer the pictures are read ([`mip_bias`]).
+    pub mip_bias: f32,
+    /// 1 where the frame is indoors, else 0.
+    pub indoors: f32,
+}
+
+impl Shift {
+    /// No shift: the blocks as recorded.
+    pub const NONE: Self = Self {
+        jitter: Vec2::ZERO,
+        dither: 0.0,
+        mip_bias: 0.0,
+        indoors: 0.0,
+    };
+
+    /// A shift by `jitter` at `dither`, and nothing else.
+    #[must_use]
+    pub fn new(jitter: Vec2, dither: f32) -> Self {
+        Self {
+            jitter,
+            dither,
+            mip_bias: 0.0,
+            indoors: 0.0,
+        }
+    }
+
+    /// Whether a draw lands anywhere else for it: the anti-aliasing is on.
+    #[must_use]
+    pub fn jitters(self) -> bool {
+        self.dither > 0.0
+    }
+
+    /// The shift `frame` is drawn with.
+    #[must_use]
+    pub fn of(frame: &HifiFrame) -> Self {
+        Self {
+            mip_bias: frame.camera.mip_bias,
+            indoors: if frame.sky.outdoor { 0.0 } else { 1.0 },
+            ..Self::new(frame.camera.jitter, frame.camera.dither)
+        }
+    }
+}
+
+/// `block` drawn as `shift` has it. The brightness is left to the finished picture.
+pub fn jitter_block(block: &mut PerFrameConstants, shift: Shift) {
     // The block holds the rows of the column-vector transform.
     let to_clip = Mat4::from_cols_array(&block.view_proj).transpose();
-    let shifted = Mat4::from_translation(jitter.extend(0.0)) * to_clip;
+    let shifted = Mat4::from_translation(shift.jitter.extend(0.0)) * to_clip;
     block.view_proj = shifted.transpose().to_cols_array();
     block.screen[0] = 0.0;
-    block.screen[1] = mip_bias;
-    block.screen[2] = dither;
+    block.screen[1] = shift.mip_bias;
+    block.screen[2] = shift.dither;
+    block.screen[3] = shift.indoors;
 }
 
 /// How many levels finer pictures are read for a frame of `drawn` pixels enlarged to `shown`.
@@ -177,14 +226,12 @@ pub fn mip_bias(drawn: (u32, u32), shown: (u32, u32)) -> f32 {
 }
 
 /// For each per-frame block a draw of the frame's world was recorded with, the block the replay
-/// draws it with at the frame's `jitter` and `dither`: the block `chain` (the passes' say in the
-/// replay) hands it, shifted.
+/// draws it with at the frame's `shift`: the block `chain` (the passes' say in the replay) hands
+/// it, shifted.
 pub fn jittered_frames(
     cx: &mut SidecarContext<'_>,
     chain: &mut dyn ReplayFilter,
-    jitter: Vec2,
-    dither: f32,
-    mip_bias: f32,
+    shift: Shift,
 ) -> HashMap<u32, u32> {
     let Some(span) = cx.tables().world_span() else {
         return HashMap::new();
@@ -201,9 +248,7 @@ pub fn jittered_frames(
     let mut map = HashMap::with_capacity(offsets.len());
     for recorded in offsets {
         let base = chain.frame(recorded).unwrap_or(recorded);
-        if let Some(shifted) = cx.derived_frame_block(base, "jitter", |b| {
-            jitter_block(b, jitter, dither, mip_bias)
-        }) {
+        if let Some(shifted) = cx.derived_frame_block(base, "jitter", |b| jitter_block(b, shift)) {
             map.insert(recorded, shifted);
         }
     }
@@ -831,7 +876,11 @@ impl Keep {
             let Some(mut block) = cx.seam.frame_block(d.frame) else {
                 continue;
             };
-            jitter_block(&mut block, cam.jitter, cam.dither, cam.mip_bias);
+            let shift = Shift {
+                mip_bias: cam.mip_bias,
+                ..Shift::new(cam.jitter, cam.dither)
+            };
+            jitter_block(&mut block, shift);
             // From where the draw's vertices stand now to where they stood in the last frame's
             // clip space.
             let back = last.view_projection * was * now.inverse();
@@ -1564,7 +1613,11 @@ mod tests {
             screen: [0.5, -1.4, 0.0, 0.0],
             ..PerFrameConstants::default()
         };
-        jitter_block(&mut block, Vec2::ZERO, 1.5, -1.0);
+        let shift = Shift {
+            mip_bias: -1.0,
+            ..Shift::new(Vec2::ZERO, 1.5)
+        };
+        jitter_block(&mut block, shift);
         assert_eq!(
             block.screen[0], 0.0,
             "the brightness is the finished picture's"
@@ -1687,7 +1740,7 @@ mod tests {
             ..PerFrameConstants::default()
         };
         let j = Vec2::new(0.002, -0.001);
-        jitter_block(&mut block, j, 1.5, 0.0);
+        jitter_block(&mut block, Shift::new(j, 1.5));
         let shifted = Mat4::from_cols_array(&block.view_proj).transpose();
         for p in [Vec3::new(0.3, 0.2, 0.1), Vec3::new(-4.0, 1.0, 20.0)] {
             let a = to_clip * p.extend(1.0);

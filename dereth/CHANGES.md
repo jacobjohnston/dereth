@@ -84,6 +84,9 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Horizon: two settings under Display: Status Bar Colors gives the health, stamina and mana bars the
   original game's red, amber and blue, and unticking Large Status Bar Numbers draws their numbers
   smaller, clear of the bars' titles.
+- On Empyrean worlds, the data patch at login comes over one TCP stream at full speed instead of a
+  rate-limited trickle, and falls back to the old way when the stream can't be reached.
+  `--no-bulk-patch` turns it off.
 ## 0.4.15 (2026-11-07)
 - The relay that plays AC1999 now comes with Dereth.
 - Logging in now reports the world's player count to the hub, with no opt-out.

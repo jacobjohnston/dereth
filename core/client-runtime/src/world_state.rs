@@ -222,6 +222,9 @@ pub struct WorldState {
     /// What this client was asked to draw its clouds with by `@clouds` (CD-cloud-command): the
     /// sky's own until then. Read by the Remastered sky.
     pub clouds: crate::clouds::Clouds,
+    /// The moons' phases this client was asked to draw by `@moon` (CD-moon-command): the
+    /// calendar's until then. Read by the Remastered sky.
+    pub moons: crate::moon::Moons,
     /// The chase camera's yaw **offset from the character's own heading**, and its pitch.
     pub camera_orbit: (f32, f32),
     /// How far behind the character the chase camera sits.
@@ -851,7 +854,8 @@ impl WorldState {
         self.environment_override.snapshot().transition
     }
 
-    /// The current in-game time, for the log line and the tests: `(year, day, time of day)`.
+    /// The current in-game time, for the log line, the moons' phases and the tests: `(year, day,
+    /// time of day)`.
     #[must_use]
     pub fn game_time(&self) -> (u32, u32, f32) {
         (

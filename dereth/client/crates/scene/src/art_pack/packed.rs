@@ -25,7 +25,8 @@
 //! - a material's three, or two where it keeps the retail picture: `material`, the paths of its
 //!   base color (empty for the two), normal, roughness, occlusion and height, its normal scale,
 //!   how damp it is and the path of its damp map where it names one;
-//! - a grit picture: `grit` and its path.
+//! - a grit picture: `grit` and its path;
+//! - a moon's picture: `moon` and its path.
 //!
 //! No path a manifest names holds a `:`. A pictures record holds a count, then each picture: its
 //! width and height, whether it holds color (1) or data (0), its blocks (0 for four bytes a
@@ -297,6 +298,12 @@ pub fn material_key(entry: &ManifestMaterial) -> String {
 #[must_use]
 pub fn grit_key(path: &str) -> String {
     format!("grit:{path}")
+}
+
+/// What a packed pack keeps a moon's picture under.
+#[must_use]
+pub fn moon_key(path: &str) -> String {
+    format!("moon:{path}")
 }
 
 /// The number a pictures record gives a picture's blocks.
@@ -850,6 +857,13 @@ base_color = "m/missing.png"
 author = "a"
 tool = "t"
 license = "CC0-1.0"
+[[moon]]
+object = "0x01001F6A"
+surface = "m/wall.png"
+lights = "m/wall_n.png"
+author = "a"
+tool = "t"
+license = "CC0-1.0"
 "#;
 
     fn files() -> HashMap<String, Vec<u8>> {
@@ -958,6 +972,10 @@ license = "CC0-1.0"
         assert!(gritty.albedo.is_none());
         let kept = opened.materials.iter().find(|m| m.grit.is_some());
         assert!(kept.is_some_and(|m| m.albedo.is_none() && m.surface == gritty.surface));
+        // A moon's pictures are made as colour, and read back as packed.
+        assert_eq!(folder.moons.len(), 1);
+        assert!(folder.moons[0].surface.srgb && folder.moons[0].lights.is_some());
+        assert_eq!(opened.moons, folder.moons);
         // What the folder left out, the packed pack leaves out too.
         assert_eq!(opened.problems.len(), 2, "{:?}", opened.problems);
         assert!(

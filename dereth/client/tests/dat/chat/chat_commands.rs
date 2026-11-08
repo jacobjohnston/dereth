@@ -2075,6 +2075,7 @@ fn the_handler_names_with_no_arm_are_exactly_these() {
         H::Tod,
         H::Weather,
         H::Clouds,
+        H::Moon,
         H::Report,
         H::PerfCapture,
         H::Sepaku,

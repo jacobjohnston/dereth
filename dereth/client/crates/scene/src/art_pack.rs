@@ -666,8 +666,23 @@ pub struct ArtPack {
     pub ground_cover: Vec<PackGroundCover>,
     /// The lights it gives retail objects.
     pub lights: Vec<dereth_assets::art_pack::ManifestLight>,
+    /// The retail moons it draws again as balls.
+    pub moons: Vec<PackMoon>,
     /// What would not read, a line each.
     pub problems: Vec<String>,
+}
+
+/// A retail moon a pack draws again as a ball, its pictures laid longitude by latitude.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackMoon {
+    /// The retail moon's graphics object.
+    pub object: DataId,
+    /// Its colour, and its height in alpha.
+    pub surface: Image,
+    /// What burns on its night side.
+    pub lights: Option<Image>,
+    /// A layer of cloud over the ground, its cover in alpha.
+    pub clouds: Option<Image>,
 }
 
 /// One kind of plant a pack lays over the land.
@@ -1183,6 +1198,44 @@ impl ArtPack {
             });
             m.grit = at;
         }
+        // The moons' pictures, made as a model's colour is (or read as packed).
+        let mut moons = Vec::with_capacity(manifest.moons.len());
+        for entry in &manifest.moons {
+            let mut made = |path: &str| -> Result<Image, String> {
+                let image = match pictures {
+                    Pictures::Made => reader.for_picture(path).and_then(|bytes| {
+                        PendingPicture {
+                            path: path.to_owned(),
+                            bytes: None,
+                            srgb: true,
+                            cutoff: None,
+                            views: false,
+                        }
+                        .make(&bytes)
+                    }),
+                    Pictures::Packed(file) => file.picture(&packed::moon_key(path)),
+                }?;
+                if let Some(r) = recording.as_deref_mut() {
+                    r.pictures
+                        .insert(packed::moon_key(path), vec![image.clone()]);
+                }
+                Ok(image)
+            };
+            let moon = made(&entry.surface).and_then(|surface| {
+                let lights = entry.lights.as_deref().map(&mut made).transpose()?;
+                let clouds = entry.clouds.as_deref().map(&mut made).transpose()?;
+                Ok(PackMoon {
+                    object: entry.object,
+                    surface,
+                    lights,
+                    clouds,
+                })
+            });
+            match moon {
+                Ok(m) => moons.push(m),
+                Err(e) => problems.push(format!("moon {:#010X}: {e}", entry.object.0)),
+            }
+        }
         // A packed pack is named by the hash of the folder it was packed from.
         let hash = match pictures {
             Pictures::Packed(file) => file.hash().to_owned(),
@@ -1214,6 +1267,7 @@ impl ArtPack {
             grits,
             ground_cover,
             lights: manifest.lights,
+            moons,
             problems,
         })
     }
@@ -1867,6 +1921,7 @@ license = "CC0-1.0"
             grits: Vec::new(),
             ground_cover: Vec::new(),
             lights: Vec::new(),
+            moons: Vec::new(),
             problems: Vec::new(),
         };
         let one = images::with_levels(4, 4, vec![9; 64], true, None);

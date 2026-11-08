@@ -269,6 +269,7 @@ impl SceneDraw {
             // no work: seeded from the profile that was just applied, not from the defaults.
             render_shadow: render_drawn,
             enhanced_shadow: enhanced,
+            lit_by_sources: false,
             #[cfg(feature = "hifi")]
             hifi: RefCell::new(hifi_bridge::Shadow::default()),
             #[cfg(feature = "hifi")]
@@ -961,6 +962,7 @@ impl SceneDraw {
             let applied = hifi_bridge::apply_preferences(self.hifi.get_mut(), &live.fidelity, gpu);
             work.fidelity_changed = applied.changed;
             work.fidelity_refused = applied.refused;
+            self.lit_by_sources = hifi_bridge::lamps_drawn(gpu);
             // The lamps are looked for while the presentation draws them: turning them on finds
             // the resident blocks' lamps with no reload, and a block streamed in later has its
             // own looked for at the next poll.

@@ -1090,10 +1090,12 @@ fn snapshot(
         None => None,
     };
     frame.pack_light = pack_light(&draw.drawn.knobs);
-    frame.sky_knobs = frame
-        .art_pack
-        .as_ref()
-        .and_then(|_| sky_knobs(&draw.drawn.knobs));
+    frame.sky_knobs = frame.art_pack.as_ref().and_then(|_| {
+        sky_knobs(&super::asked_clouds::with_asked_clouds(
+            &draw.drawn.knobs,
+            &ws.clouds,
+        ))
+    });
     frame.far = far_knobs(&draw.drawn.knobs);
     frame.far_trees = if draw.far.active && frame.art_pack.is_some() {
         if sh

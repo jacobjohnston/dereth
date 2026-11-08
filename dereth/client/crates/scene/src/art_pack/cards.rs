@@ -596,6 +596,7 @@ mod tests {
         PackModel {
             id: DataId(0x0200_0001),
             foliage: false,
+            wind: 0.0,
             lods: vec![PackLod {
                 distance,
                 primitives: vec![PackPrimitive {

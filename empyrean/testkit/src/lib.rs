@@ -55,6 +55,21 @@ use empyrean_world::World;
 pub use empty_shard::EmptyShard;
 pub use empyrean_net::testing::{ClientStatus, TestClient};
 
+/// ACE's default account settings, with account-level permissions: V517 changes Empyrean's.
+#[must_use]
+pub fn ace_account_defaults() -> AccountDefaults {
+    AccountDefaults {
+        override_character_permissions: true,
+        ..AccountDefaults::default()
+    }
+}
+
+/// Gives `world` a new, empty account store on [`ace_account_defaults`].
+pub fn use_ace_account_defaults(world: &mut World) {
+    let clock: Arc<dyn Clock> = Arc::new(VirtualClock::default());
+    world.auth = AuthHandle::new(Box::new(MemAuth::new(ace_account_defaults(), clock)));
+}
+
 #[cfg(feature = "captures")]
 pub mod capture_replay;
 pub mod dats;
@@ -207,10 +222,7 @@ impl TestServer {
         let shared_clock: Arc<dyn Clock> = Arc::<VirtualClock>::clone(&clock);
         world.shard =
             ShardHandle::synchronous(Box::new(MemShard::new()), Arc::clone(&shared_clock));
-        world.auth = AuthHandle::new(Box::new(MemAuth::new(
-            AccountDefaults::default(),
-            shared_clock,
-        )));
+        world.auth = AuthHandle::new(Box::new(MemAuth::new(ace_account_defaults(), shared_clock)));
         property_manager::install_shard_config(
             &mut world,
             property_manager::shard_config_handle(Box::new(MemShard::new())),

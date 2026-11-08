@@ -12,6 +12,7 @@ use crate::json;
 pub struct AccountDefaults {
     // ACE: AccountDefaults.OverrideCharacterPermissions
     /// Account-level (true) rather than character-level (retail) permissions.
+    /// DIVERGE: V517 false by default; ACE's default is true.
     #[serde(rename = "OverrideCharacterPermissions")]
     pub override_character_permissions: bool,
 
@@ -45,7 +46,7 @@ pub struct AccountDefaults {
 impl Default for AccountDefaults {
     fn default() -> Self {
         Self {
-            override_character_permissions: true,
+            override_character_permissions: false,
             default_access_level: 0,
             allow_auto_account_creation: true,
             password_hash_work_factor: 8,

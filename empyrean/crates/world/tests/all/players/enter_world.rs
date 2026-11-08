@@ -379,6 +379,18 @@ fn the_login_constructor_sorts_possessions_as_aces_container_does() {
 #[test]
 fn set_ephemeral_values_grants_the_sessions_staff_flags_when_permissions_are_overridden() {
     let mut w = world();
+    empyrean_testkit::use_ace_account_defaults(&mut w);
+    assert_staff_flags_by_access_level(&mut w, true);
+}
+
+/// DIVERGE: V517. By default an account's level gives its characters no staff flags.
+#[test]
+fn set_ephemeral_values_grants_no_staff_flags_under_the_default_permissions() {
+    let mut w = world();
+    assert_staff_flags_by_access_level(&mut w, false);
+}
+
+fn assert_staff_flags_by_access_level(w: &mut World, granted: bool) {
     let account_id = w
         .auth
         .lock()
@@ -390,11 +402,6 @@ fn set_ephemeral_values_grants_the_sessions_staff_flags_when_permissions_are_ove
         )
         .expect("created")
         .account_id;
-    let override_on = w
-        .auth
-        .lock()
-        .accounts_config()
-        .override_character_permissions;
     for (level, admin, arch, sentinel, envoy, advocate) in [
         (AccessLevel::Admin, true, false, false, false, false),
         (AccessLevel::Developer, false, true, false, false, false),
@@ -416,7 +423,7 @@ fn set_ephemeral_values_grants_the_sessions_staff_flags_when_permissions_are_ove
             ..Default::default()
         };
         let b = player_biota(WeenieType::Creature, None, None);
-        let p = CtorEnv::with_world(&w, |env| {
+        let p = CtorEnv::with_world(w, |env| {
             player_from_biota_with_character(
                 env,
                 Class::Player,
@@ -434,7 +441,7 @@ fn set_ephemeral_values_grants_the_sessions_staff_flags_when_permissions_are_ove
             p.is_envoy(),
             p.is_advocate(),
         );
-        if override_on {
+        if granted {
             assert_eq!(flags, (admin, arch, sentinel, envoy, advocate), "{level:?}");
         } else {
             assert_eq!(flags, (false, false, false, false, false), "{level:?}");
@@ -447,6 +454,7 @@ fn set_ephemeral_values_grants_the_sessions_staff_flags_when_permissions_are_ove
 #[test]
 fn set_ephemeral_values_clears_an_advocate_flag_the_account_no_longer_grants() {
     let mut w = world();
+    empyrean_testkit::use_ace_account_defaults(&mut w);
     let account_id = w
         .auth
         .lock()
@@ -463,7 +471,7 @@ fn set_ephemeral_values_clears_an_advocate_flag_the_account_no_longer_grants() {
             .lock()
             .accounts_config()
             .override_character_permissions,
-        "the default"
+        "ACE's default"
     );
     for (level, quest, advocate) in [
         (AccessLevel::Player, false, false),

@@ -1064,6 +1064,7 @@ fn chat_channels_are_gated_by_access_level_fellowship_and_allegiance() {
 #[test]
 fn add_remove_list_and_index_channels() {
     let mut w = world();
+    empyrean_testkit::use_ace_account_defaults(&mut w);
     let add = CommunicationAddToChannel {
         channel: Channel::Audit.0.cast_unsigned(),
     };

@@ -826,7 +826,8 @@ fn private_update_attribute_skill_and_vital_follow_aces_field_order() {
 
 #[test]
 fn character_list_serializes_deletion_times_and_server_options() {
-    let w = world();
+    let mut w = world();
+    empyrean_testkit::use_ace_account_defaults(&mut w);
     let ses = SessionData {
         account: Some("acct".into()),
         ..Default::default()

@@ -36,6 +36,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Art packs: a material for a retail picture may be glacier ice: opaque and deep blue, with light bent through it, with or without Depth Mapping.
 - Art packs: a material for a retail picture may have a sheen (`sheen = 0` to `1`), so that cloth worn outdoors shines as silk or satin does, in soft bands that follow the sun over its folds.
 - Better Lighting: an art pack's glassy ground mirrors the sky.
+- /clouds sets the clouds of the Remastered sky this client draws: how much of the sky they cover, how fast they drift, how high, thick and large they are, how they are lit and how they shade the land, until /clouds reset.
 ## 0.4.15 (2026-11-07)
 - The relay that plays AC1999 now comes with Dereth.
 - Logging in now reports the world's player count to the hub, with no opt-out.

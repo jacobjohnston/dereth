@@ -787,6 +787,43 @@ fn each_tab_s_defaults_put_back_its_own_rows() {
     assert!(!named.is_empty());
 }
 
+/// Weather Sounds is a row of the Sound tab, after Ambient Sounds, and its box turns
+/// `Sound.WeatherSound` off.
+#[test]
+#[cfg(feature = "hifi")]
+fn the_sound_tab_has_weather_sounds_after_ambient_sounds() {
+    use dereth_client_contract::options::weather_sound;
+    let (mut h, state) = sound_tab();
+    let page = &h.ui.windows.options_page;
+    let ambient = page
+        .control("Ambient Sounds")
+        .expect("the Ambient Sounds row");
+    let weather = page
+        .control(weather_sound::CAPTION)
+        .expect("the Weather Sounds row");
+    let interface = page
+        .control("Interface Sounds")
+        .expect("the Interface Sounds row");
+    assert!(ambient.y < weather.y && weather.y < interface.y);
+    h.move_to(weather.x + 10.0, weather.y + weather.h / 2.0);
+    h.press();
+    let mut out = h.frame(&state).requests;
+    h.release();
+    out.extend(h.frame(&state).requests);
+    assert_eq!(
+        sets(&out, weather_sound::WEATHER_SOUND),
+        Some(PrefValue::Bool(false))
+    );
+}
+
+#[test]
+#[cfg(not(feature = "hifi"))]
+fn without_the_effects_the_sound_tab_has_no_weather_sounds() {
+    let (h, _) = sound_tab();
+    let page = &h.ui.windows.options_page;
+    assert!(page.control("Ambient Sounds").is_some());
+    assert!(page.control("Weather Sounds").is_none());
+}
 /// Not a claim: draws the Client page scrolled to the renderer choice and the experimental
 /// effects, with the interface's own art, as the wgpu renderer, another renderer, another with
 /// wgpu chosen for the next start, another held to itself by `--renderer` with wgpu chosen, and

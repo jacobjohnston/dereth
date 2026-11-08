@@ -482,6 +482,18 @@ fn far_trees_for_presentation(
     }
 }
 
+/// The clouds at Cloud Detail's stored level `level`: Low draws the steps knob's count, Medium
+/// and High two and four times it (no more than the knob's own most), and Off retail's deck.
+fn cloud_detail(sky: &mut dereth_render_hifi::snapshot::HifiSkyKnobs, level: u32) {
+    match dereth_client_contract::options::cloud_detail::step_factor(level) {
+        Some(times) => sky.cloud_steps = (sky.cloud_steps * times).min(MOST_CLOUD_STEPS),
+        None => sky.clouds = false,
+    }
+}
+
+/// The most steps Cloud Detail draws the clouds with: the steps knob's own most.
+const MOST_CLOUD_STEPS: u32 = 64;
+
 /// The Remastered sky as the presentation reads it, while its knob has it on.
 pub(super) fn sky_knobs(k: &Knobs) -> Option<dereth_render_hifi::snapshot::HifiSkyKnobs> {
     // LINT-OK: a step count knob, 1 to 64.
@@ -1098,10 +1110,21 @@ fn snapshot(
         None => None,
     };
     frame.pack_light = pack_light(&draw.drawn.knobs);
-    frame.sky_knobs = frame
-        .art_pack
-        .as_ref()
-        .and_then(|_| sky_knobs(&super::asked_clouds::with_asked_clouds(&draw.drawn.knobs, &ws.clouds)));
+    frame.sky_knobs = frame.art_pack.as_ref().and_then(|_| {
+        sky_knobs(&super::asked_clouds::with_asked_clouds(
+            &draw.drawn.knobs,
+            &ws.clouds,
+        ))
+    });
+    if let Some(sky) = frame.sky_knobs.as_mut() {
+        cloud_detail(
+            sky,
+            draw.cfg
+                .render
+                .fidelity
+                .effective(FidelityFeature::CloudDetail),
+        );
+    }
     frame.far = far_knobs(&draw.drawn.knobs);
     frame.far_trees = if draw.far.active && frame.art_pack.is_some() {
         if sh

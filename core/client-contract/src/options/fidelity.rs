@@ -41,8 +41,7 @@ pub enum Needs {
     ArtPack,
     /// The better lighting, an art pack, and Keep Retail Look's box unticked.
     ArtPackWithoutRetailLook,
-    /// The better lighting, Keep Retail Look's box unticked, and depth mapping on: the relief it
-    /// is drawn with.
+    /// All of that, and depth mapping on: the relief it is drawn with.
     Relief,
 }
 
@@ -188,7 +187,7 @@ pub const OPTIONS: [FidelityOption; 13] = [
 
 /// The menus among the effects' rows, each with what it needs. A menu's own module registers it
 /// and gives its choices; a row here gives it the boxes' rules.
-pub const MENUS: &[(&str, Needs)] = &[(fidelity::DEPTH_MAPPING, Needs::LightingWithoutRetailLook)];
+pub const MENUS: &[(&str, Needs)] = &[(fidelity::DEPTH_MAPPING, Needs::ArtPackWithoutRetailLook)];
 
 /// The heading's caption.
 pub const HEADING: &str = "Enhanced Graphics";
@@ -376,7 +375,7 @@ pub fn blocked_with(
         }
         Needs::LightingAndRays if rays == Some(false) => Some(Blocked::NeedsRays),
         Needs::ArtPack if !pack && !ticked(fidelity::RETAIL_LOOK) => Some(Blocked::NeedsArtPack),
-        Needs::ArtPackWithoutRetailLook if !pack => Some(Blocked::NeedsArtPack),
+        Needs::ArtPackWithoutRetailLook | Needs::Relief if !pack => Some(Blocked::NeedsArtPack),
         Needs::LightingWithoutRetailLook | Needs::ArtPackWithoutRetailLook | Needs::Relief
             if ticked(fidelity::RETAIL_LOOK) =>
         {
@@ -819,6 +818,8 @@ mod tests {
     #[test]
     fn the_depth_mapping_menu_needs_the_better_lighting_and_the_damp_box_needs_the_menu() {
         use fidelity::{DEPTH_MAPPING, LIGHTING, NO_DAMP, RETAIL_LOOK};
+        // With an art pack open, whose relief the menu draws.
+        let blocked = |name, ticked, rays| blocked_with(name, ticked, rays, true);
         let with = |on: &'static [&'static str]| move |n: &str| on.contains(&n);
         assert_eq!(
             blocked(DEPTH_MAPPING, with(&[]), None),
@@ -842,6 +843,14 @@ mod tests {
             assert_eq!(
                 blocked(name, with(&[LIGHTING, DEPTH_MAPPING, RETAIL_LOOK]), None),
                 Some(Blocked::RetailLook),
+                "{name}"
+            );
+        }
+        // Without one there is no relief to draw.
+        for name in [DEPTH_MAPPING, NO_DAMP] {
+            assert_eq!(
+                blocked_with(name, with(&[LIGHTING, DEPTH_MAPPING]), None, false),
+                Some(Blocked::NeedsArtPack),
                 "{name}"
             );
         }

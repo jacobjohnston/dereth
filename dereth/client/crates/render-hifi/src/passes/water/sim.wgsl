@@ -1,6 +1,6 @@
 // The water near the eye, simulated: a square of the surface a few tens of meters across, its
 // height in each small cell stepped as waves run, so what disturbs the water (a body moving through
-// it) spreads, crosses, meets the shore and dies away as waves do.
+// it, the rain's drops) spreads, crosses, meets the shore and dies away as waves do.
 //
 // The waves run as water's do, the longer the faster: each cell's height is pulled by its
 // neighbors' a few cells about it through `KERNEL`, the water's vertical derivative (Tessendorf's
@@ -28,9 +28,10 @@ struct Step {
     // xy the first cell's south-west corner in the world, meters; zw the same in render space.
     place: vec4<f32>,
     // x gravity times a step squared, in cells; y how much of its motion the water loses a step;
-    // zw unused.
+    // z the chance a drop lands in a patch of the rain's lattice in a step; w how deep a drop dents
+    // the water, meters.
     wave: vec4<f32>,
-    // x the step's count, for the bodies' sway; y how many bodies stand in `start` and `end`.
+    // x the step's count, for the rain; y how many bodies stand in `start` and `end`.
     misc: vec4<u32>,
     // Each body at the step's start and end: xy where it stands, render space; z its feet's
     // height; w how strongly it stirs the water.
@@ -75,6 +76,9 @@ const BOW_RISE: f32 = 0.008;
 const RUN: f32 = 4.0;
 // A step, seconds.
 const STEP_SECONDS: f32 = 1.0 / 60.0;
+// The rain's lattice, meters a patch, and a drop's dent's width, meters.
+const RAIN_PATCH: f32 = 0.4;
+const DROP: f32 = 0.07;
 
 var<workgroup> tile: array<f32, 676>;
 
@@ -156,6 +160,16 @@ fn pushed(q: vec2<f32>, at: vec4<f32>, level: f32) -> f32 {
     return PUSH * k * k * wet(at, level) * at.w;
 }
 
+fn rain_hash(c: vec2<i32>, n: u32) -> vec3<f32> {
+    var h = bitcast<u32>(c.x) * 0x8DA6B343u ^ bitcast<u32>(c.y) * 0xD8163841u ^ n * 0xCB1AB31Fu;
+    h = (h ^ (h >> 15u)) * 0x2C1B3C6Du;
+    h = (h ^ (h >> 12u)) * 0x297A2D39u;
+    h = h ^ (h >> 15u);
+    let h2 = (h ^ 0x9E3779B9u) * 0x85EBCA6Bu;
+    let h3 = (h2 ^ (h2 >> 13u)) * 0xC2B2AE35u;
+    return vec3<f32>(f32(h & 0xFFFFu), f32(h2 >> 16u), f32(h3 & 0xFFFFu)) / 65535.0;
+}
+
 @compute @workgroup_size(16, 16, 1)
 fn cs_step(
     @builtin(global_invocation_id) id: vec3<u32>,
@@ -212,6 +226,21 @@ fn cs_step(
         let lap = clamp(0.5 + now.x * 30.0, 0.15, 1.5);
         let d = (r - LEGS * 1.1) / (0.04 + 0.04 * lap);
         waterline = max(waterline, there * lap * exp(-d * d));
+    }
+    // The rain: now and then a drop lands in a patch of the lattice and dents the water.
+    if (S.wave.z > 0.0) {
+        let home = vec2<i32>(floor(p / RAIN_PATCH));
+        for (var j = -1; j <= 1; j = j + 1) {
+            for (var i = -1; i <= 1; i = i + 1) {
+                let c = home + vec2<i32>(i, j);
+                let r = rain_hash(c, S.misc.x);
+                if (r.z < S.wave.z) {
+                    let at = (vec2<f32>(c) + r.xy) * RAIN_PATCH;
+                    let d = p - at;
+                    h = h - S.wave.w * exp(-dot(d, d) / (2.0 * DROP * DROP));
+                }
+            }
+        }
     }
     // Toward the square's edges the waves are taken up.
     let edge = min(min(rel.x, rel.y), min(f32(SIDE - 1) - rel.x, f32(SIDE - 1) - rel.y));

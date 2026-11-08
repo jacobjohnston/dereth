@@ -15,10 +15,10 @@
 // run waves as large as the water is: the sea's swell, a lake's chop by how far it reaches, hardly
 // any on a river; foam gathers along the shore, rolls in with the surf and caps the sea's highest
 // crests. Through shallow water the sun's light ripples over the bed. Near the eye the water is
-// simulated (`sim.wgsl`): what disturbs it, a body moving through it, spreads as waves, crosses and
-// meets the shore, and the water is drawn bent, mirroring and focusing the light by the simulated
-// surface as by the rest. Where it is not simulated, small rings spread round each body standing
-// in it instead.
+// simulated (`sim.wgsl`): what disturbs it, a body moving through it or the rain's drops, spreads
+// as waves, crosses and meets the shore, and the water is drawn bent, mirroring and focusing the
+// light by the simulated surface as by the rest. Where it is not simulated, small rings spread
+// round each body standing in it instead.
 
 struct Water {
     // Render space, height up, to clip space, at the frame's jitter.
@@ -83,7 +83,8 @@ struct Water {
     // x how large the waves run; y how much foam gathers; z how brightly the light ripples over the
     // bed; w how far the surf has rolled in, a share of its period.
     surf: vec4<f32>,
-    // rgb a white foam as the ordinary picture draws it under the frame's light, linear; w unused.
+    // rgb a white foam as the ordinary picture draws it under the frame's light, linear; w how
+    // much rain falls on the water, 0 dry.
     foam: vec4<f32>,
     // xy where render space's origin lies in the world, wrapped to the lattices' period; z the
     // share of the sun's light that reaches the ground in its beam; w unused.
@@ -1009,9 +1010,10 @@ fn fs_water(in: FullscreenOut) -> @location(0) vec4<f32> {
         * max(kinds.x * 0.15 + kinds.y * mix(0.3, 1.0, fetch) + kinds.z + kinds.w * 0.5, fetch * 0.6);
     let sea = W.surf.x * (kinds.z + kinds.w * 0.35) * smoothstep(1.0, 10.0, inside);
     let waves = swell(s.xy, foot, chop, sea, toward_shore(sw));
-    // The simulated water near the eye: what the bodies have stirred.
+    // The simulated water near the eye: what the bodies and the rain have stirred.
     let stirred = sim_surface(s.xy, foot);
     let folded = s.xy + W.fold.xy;
+    let rain = W.foam.w;
     // The surface's slope: its ripples', its waves' and the simulated water's, as the pixel sees
     // them.
     let cap = dist * 0.01 + 0.01;
@@ -1090,8 +1092,9 @@ fn fs_water(in: FullscreenOut) -> @location(0) vec4<f32> {
     r = normalize(r);
     // Rough water seen low shows mostly the faces tilted toward the eye, which reflect less.
     let cos_v = clamp(dot(nr, v) + lost * 0.4, 0.0, 1.0);
+    // Rain on the water dulls what it mirrors.
     let fresnel = (F0 + (1.0 - F0) * pow(1.0 - cos_v, 5.0)) * W.look2.z * REFLECTED
-        * smoothstep(0.0, 0.3, max(deep_here, deep));
+        * smoothstep(0.0, 0.3, max(deep_here, deep)) * (1.0 - 0.25 * min(rain, 1.0));
     // Reflected over the pixel's height, two lines half a pixel apart, so what a reflected line
     // meets or misses by a fraction of a pixel (a leaf, a trunk, a bank's edge) is shared between
     // them and holds still under the anti-aliasing's jitter.

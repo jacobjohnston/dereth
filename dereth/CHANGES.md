@@ -102,6 +102,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: Light Draw Distance chooses how far lamps, flames and art pack lights shine and glow, from 0.5x to 5x, and they now fade out in the distance instead of going out at once.
 - Better Lighting: a Reflective Water box draws the world's water as water, with ripples, reflections of the sky and the land and a bed seen through it, without an art pack. The land and the Remastered sky are drawn with it, from the game's own pictures.
 - Better Lighting: the water has waves as large as it is, the sea's swell and surf, a lake's chop and hardly any on a river; foam gathers along the shore and on the crests, and the sun's light ripples over a shallow bed.
+- Weather: near the camera the rain's drops stir the water they fall on, and the water mirrors a little less while it rains.
 - Better Lighting: near the camera, a body moving through the water stirs it, and the waves spread, cross, meet the shore and die away. Graphics without compute shaders ring the water round a body standing in it instead, as before.
 - Better Lighting: far water is no longer a glassy mirror. Its reflections soften and stretch with distance, and the sun's glitter spreads wider, as on rippled water.
 - Weather: about one rainy day in eight is now a thunderstorm on your screen, with lightning and its thunder rolling in a few seconds later, a gale that slants heavier rain across the sky, and darker clouds. It is drawn by this client alone; @weather storm (or /weather storm) brings one on at any time.

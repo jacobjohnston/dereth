@@ -467,6 +467,8 @@ pub struct HifiWater {
     pub foam: f32,
     /// How brightly the sun's light ripples over a shallow bed: 0 none.
     pub caustics: f32,
+    /// How strongly the rain's drops stir the water they fall on: 0 not at all.
+    pub rain: f32,
 }
 
 impl Default for HifiWater {
@@ -491,6 +493,7 @@ impl Default for HifiWater {
             waves: 1.0,
             foam: 1.0,
             caustics: 1.0,
+            rain: 1.0,
         }
     }
 }

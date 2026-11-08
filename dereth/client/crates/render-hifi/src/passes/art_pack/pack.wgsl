@@ -34,6 +34,9 @@ struct Frame {
     // The wind: x the clock, y its strength (nought for none), zw render space's origin in the
     // world, so a plant keeps its place in the gusts as the origin moves.
     wind: vec4<f32>,
+    // A storm's gale: xy its heading, z how far the storm has come in (nought for none), w how
+    // hard it gusts now, 0 to 1.
+    gale: vec4<f32>,
 };
 
 struct Material {
@@ -140,11 +143,35 @@ fn in_the_wind(i: Instance, p: vec3<f32>, at: vec3<f32>) -> vec3<f32> {
     // Each leaf and blade flutters on its own, finer and faster than the whole plant sways.
     let flutter = sin(t * 6.1 + dot(p * scale, vec3<f32>(2.1, 1.7, 2.9))) * 0.14;
     let across = sin(t * 0.9 + phase * 0.7) * 0.35;
-    return at + reach * gust * vec3<f32>(
+    var moved_by = reach * gust * vec3<f32>(
         0.8 * (bend + flutter) - 0.6 * across,
         0.6 * (bend - flutter) + 0.8 * across,
         flutter * 0.5,
     );
+    let storm = frame.gale.z;
+    if (storm > 0.0) {
+        // A gale bends every plant hard downwind, far more than any breeze reaches, the more as
+        // it gusts, and thrashes it about that lean: leaves and blades whip on their own.
+        let tall = i.keep.z * scale;
+        let share = mix(0.35, 0.2, smoothstep(1.5, 12.0, tall));
+        let rise = clamp(p.z / i.keep.z, 0.0, 1.0);
+        let gale_reach = min(tall * share, 2.6) * rise * rise * i.keep.w;
+        let down = frame.gale.xy;
+        let side = vec2<f32>(-down.y, down.x);
+        let gusting = 0.6 + 0.4 * frame.gale.w;
+        let lean = gusting + 0.12 * sin(t * 1.1 + phase);
+        let thrash = 0.3 * (sin(t * 3.1 + phase * 1.9) + 0.5 * sin(t * 5.3 + phase * 2.7));
+        let whip = sin(t * 7.0 + dot(p * scale, vec3<f32>(2.1, 1.7, 2.9))) * 0.1;
+        let wild = vec3<f32>(down * (lean + thrash + whip) + side * (0.4 * thrash - whip), whip);
+        moved_by = mix(moved_by, gale_reach * wild, storm);
+    }
+    // A plant bent far stays its own length: what leans out comes down toward the ground.
+    let tall = max(i.keep.z * scale * clamp(p.z / i.keep.z, 0.0, 1.0), 0.05);
+    let out = length(moved_by.xy);
+    let held = min(out, tall * 0.9);
+    let flat = moved_by.xy * (held / max(out, 1.0e-4));
+    let drop = tall - sqrt(max(tall * tall - held * held, 0.0));
+    return at + vec3<f32>(flat, moved_by.z - drop);
 }
 
 @vertex

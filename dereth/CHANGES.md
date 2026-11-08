@@ -105,6 +105,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Weather: near the camera the rain's drops stir the water they fall on, and the water mirrors a little less while it rains.
 - Better Lighting: near the camera, a body moving through the water stirs it, and the waves spread, cross, meet the shore and die away. Graphics without compute shaders ring the water round a body standing in it instead, as before.
 - Better Lighting: far water is no longer a glassy mirror. Its reflections soften and stretch with distance, and the sun's glitter spreads wider, as on rippled water.
+- Weather: a storm's gale bends an art pack's trees and grass hard downwind and thrashes them in its gusts.
 - Weather: about one rainy day in eight is now a thunderstorm on your screen, with lightning and its thunder rolling in a few seconds later, a gale that slants heavier rain across the sky, and darker clouds. It is drawn by this client alone; @weather storm (or /weather storm) brings one on at any time.
 - Weather Sounds: rain now patters and hisses, harder in a storm with the wind roaring in its gusts and muffled indoors, made as it plays so it never repeats. A new Weather Sounds row in the sound options sets how loud the rain, the wind and the thunder are.
 

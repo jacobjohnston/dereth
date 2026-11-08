@@ -90,6 +90,14 @@ pub enum ResourceName {
     TaaHistory0,
     /// The second of them.
     TaaHistory1,
+    /// The distance each pixel of a history of the frame's size showed, read and written in
+    /// turn as the anti-aliasing's histories are: the temporal upscaler's.
+    UpscaleDistance0,
+    /// The second of them.
+    UpscaleDistance1,
+    /// The picture enlarged along its edges by the spatial upscaler, before its sharpening, at
+    /// the frame's size.
+    SpatialUpscaled,
     /// How far every pixel moved since the last frame, for MetalFX.
     UpscaleMotion,
     /// How little of the frames before it each pixel should keep, for MetalFX.

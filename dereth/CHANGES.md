@@ -69,6 +69,8 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: an art pack can draw the moons again as round worlds, lit from the sun's side as they wax and wane over months of their own, with lights twinkling on their night sides and clouds of their own.
 - /moon sets the phase of the moons this client draws, both or one at a time, until /moon reset.
 - Enhanced Graphics: a Render Scale menu draws the world at 85%, 75%, 67% or 50% of the screen's pixels each way, for a higher frame rate on large screens. On a Mac MetalFX rebuilds the picture at full size; elsewhere it is enlarged. Anti-Aliasing stays on below 100%, and pictures are read for the full frame.
+- Enhanced Graphics: a Render Scale menu draws the world at 85%, 75%, 67% or 50% of the screen's pixels each way, for a higher frame rate on large screens. On a Mac MetalFX rebuilds the picture at full size. Anti-Aliasing stays on below 100%, and pictures are read for the full frame.
+- Enhanced Graphics: below 100% Render Scale, Windows and Linux rebuild the picture at full size from the frames before it too, and sharpen it, so it is far less soft than enlarged. A frame that cannot be rebuilt, the first after a cut, is enlarged along its edges and sharpened.
 - Enhanced Graphics: Render Scale starts at Dynamic, as the Low, Medium and High presets have it (Ultra draws 100%): it lowers the render scale to hold the Dynamic Resolution Frame Rate (60 FPS unless chosen), shown only while Dynamic is chosen.
 - Performance Panel: SCALE shows the render scale drawn now, as a Dynamic render scale moves it.
 ## 0.4.15 (2026-11-07)

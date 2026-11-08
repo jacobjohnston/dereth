@@ -42,6 +42,7 @@ pub mod shared;
 pub mod snapshot;
 pub mod stamp;
 pub mod timing;
+pub mod upscaler;
 
 pub use dereth_render::hifi_mark::Mark;
 pub use dereth_render::wgpu::sidecar::{
@@ -1206,9 +1207,10 @@ impl HifiRenderer {
     }
 }
 
-/// Rebuild the world's picture at the frame's size with MetalFX: `wgpu` allows no raw commands in
-/// an encoder of its own, so what is recorded so far is submitted, the scale after it, and the
-/// frame goes on in a new encoder. The frame's picture, tone mapped target and depth at that size.
+/// Rebuild the world's picture at the frame's size: by a draw of the temporal upscaler's history,
+/// or with MetalFX. `wgpu` allows no raw commands in an encoder of its own, so for MetalFX what is
+/// recorded so far is submitted, the scale after it, and the frame goes on in a new encoder. The
+/// frame's picture, tone mapped target and depth at that size.
 #[allow(clippy::too_many_arguments)]
 fn upscale_world(
     compositor: &mut Compositor,
@@ -1236,11 +1238,17 @@ fn upscale_world(
     let drawn_into = wgpu::TextureUsages::RENDER_ATTACHMENT
         | wgpu::TextureUsages::TEXTURE_BINDING
         | wgpu::TextureUsages::COPY_SRC;
+    // MetalFX writes its picture as storage.
+    let written = if request.by_metalfx() {
+        wgpu::TextureUsages::STORAGE_BINDING
+    } else {
+        wgpu::TextureUsages::empty()
+    };
     let hdr = target(
         resources,
         resources::ResourceName::UpscaledHdr,
         dereth_render::wgpu::metalfx::COLOUR_FORMAT,
-        drawn_into | wgpu::TextureUsages::STORAGE_BINDING,
+        drawn_into | written,
     )?;
     let picture = target(
         resources,
@@ -1251,6 +1259,10 @@ fn upscale_world(
     let seen = compositor
         .enlarge_depth(cx, resources, encoder, colour, depth, near_far)?
         .ok_or(HifiError::NotReady("the composite is not built"))?;
+    if request.draw(cx, encoder, &hdr) {
+        cx.upscaled_to_output();
+        return Ok((hdr, picture, seen));
+    }
     // `wgpu` cannot see MetalFX write a texture, and would clear one it thinks was never written,
     // over the picture: a new texture is written here first.
     let output = hdr.texture();
@@ -1534,6 +1546,10 @@ impl FrameSidecar for HifiRenderer {
         report.notes.push((
             "drawn again for the unstamped depth",
             self.compositor.redrawn(),
+        ));
+        report.notes.push((
+            "enlarged by the spatial upscaler",
+            u64::from(self.compositor.spatial()),
         ));
         report.notes.push((
             "translucent draws drawn over the lit world",

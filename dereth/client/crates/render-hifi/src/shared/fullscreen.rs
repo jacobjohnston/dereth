@@ -6,3 +6,5 @@ pub const FULLSCREEN_WGSL: &str = include_str!("../../shaders/common/fullscreen.
 pub const COLOUR_WGSL: &str = include_str!("../../shaders/common/colour.wgsl");
 /// Positions back from depth.
 pub const DEPTH_WGSL: &str = include_str!("../../shaders/common/depth.wgsl");
+/// Enlarging by the edges and sharpening by the contrast, for the upscalers.
+pub const UPSCALE_WGSL: &str = include_str!("../../shaders/common/upscale.wgsl");

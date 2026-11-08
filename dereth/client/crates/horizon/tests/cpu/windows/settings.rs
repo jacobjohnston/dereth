@@ -412,8 +412,25 @@ fn off_the_wgpu_renderer_the_status_line_points_at_the_renderer_choice() {
         ..RendererStatus::default()
     };
     h.frame(&state);
-    let page = &h.ui.windows.options_page;
     let status = "Status: Off on this renderer: choose wgpu as the Renderer above, then restart";
+    // The effects' rows are more than the list shows at once: the page is scrolled until the
+    // choice and the status line both show.
+    assert!(show(&mut h, &state, renderer::CAPTION));
+    for _ in 0..200 {
+        if h.ui
+            .windows
+            .options_page
+            .controls
+            .iter()
+            .any(|(l, _)| l == status)
+        {
+            break;
+        }
+        let page = &mut h.ui.windows.options_page;
+        page.scroll[page.tab] += 6.0;
+        h.frame(&state);
+    }
+    let page = &h.ui.windows.options_page;
     let (_, line) = page
         .controls
         .iter()

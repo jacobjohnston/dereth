@@ -1214,11 +1214,11 @@ mod tests {
         // ...beside this client's three presentation options from another era, its interface, its
         // performance panel, its background slow-down, the classic interface's six, the renderer
         // and the landscape detail texture, and in a build with the high-fidelity presentation its
-        // boxes and its menu too.
+        // boxes and its two menus too.
         #[cfg(not(feature = "hifi"))]
         assert_eq!(len(), 48);
         #[cfg(feature = "hifi")]
-        assert_eq!(len(), 48 + super::super::fidelity::OPTIONS.len() + 1);
+        assert_eq!(len(), 48 + super::super::fidelity::OPTIONS.len() + 2);
         // The registration defaults are in force before any file is read.
         assert_eq!(
             inq_value("Input.MouseLookSensitivity"),

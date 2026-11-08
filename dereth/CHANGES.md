@@ -16,6 +16,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 
 - macOS: the client draws with Metal directly by default.
 
+- Better Lighting: Retail Look and No Slope Materials say so when no art pack is open.
 ## 0.4.15 (2026-11-07)
 - The relay that plays AC1999 now comes with Dereth.
 - Logging in now reports the world's player count to the hub, with no opt-out.

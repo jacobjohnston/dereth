@@ -10,6 +10,9 @@ section, dated, and opens a new empty one in the same commit as the version.
 
 ## Unreleased
 
+- The Library holds art packs as it holds data files, and a world's page chooses which the Dereth
+  client draws, or none.
+
 ## 0.5.2 (2026-11-07)
 - AC1999 is listed and played through a relay.
 - Every world can now show a player count, dimmer as it gets older.

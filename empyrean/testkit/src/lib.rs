@@ -55,7 +55,7 @@ use empyrean_world::World;
 pub use empty_shard::EmptyShard;
 pub use empyrean_net::testing::{ClientStatus, TestClient};
 
-/// ACE's default account settings, with account-level permissions: V509 changes Empyrean's.
+/// ACE's default account settings, with account-level permissions: V517 changes Empyrean's.
 #[must_use]
 pub fn ace_account_defaults() -> AccountDefaults {
     AccountDefaults {

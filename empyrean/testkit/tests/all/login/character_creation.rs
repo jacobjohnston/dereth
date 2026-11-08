@@ -60,7 +60,7 @@ fn create(ts: &mut TestServer, id: ClientId, name: &str) -> Vec<CharGenVerificat
         .split_off(before)
 }
 
-/// DIVERGE: V509. An Admin account's new character is a plain player unless permissions follow the
+/// DIVERGE: V517. An Admin account's new character is a plain player unless permissions follow the
 /// account.
 #[test]
 fn a_new_character_on_an_admin_account_is_a_plain_player_by_default() {

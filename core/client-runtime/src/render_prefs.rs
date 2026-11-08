@@ -774,14 +774,13 @@ impl FidelityPreferences {
         self
     }
 
-    /// Whether any option is stored on, whatever the interface; the presentation choices alone
-    /// are none.
+    /// Whether any option is stored on, whatever the interface; the presentation choices and
+    /// Cloud Detail, which starts at a level and draws nothing alone, are none.
     #[must_use]
     pub fn any_stored(&self) -> bool {
-        FidelityFeature::ALL
-            .iter()
-            .zip(&self.values)
-            .any(|(f, v)| *v != 0 && !f.is_presentation_choice())
+        FidelityFeature::ALL.iter().zip(&self.values).any(|(f, v)| {
+            *v != 0 && !f.is_presentation_choice() && *f != FidelityFeature::CloudDetail
+        })
     }
 
     /// The settings a capture or a test names, as the Horizon interface draws them: a comma list

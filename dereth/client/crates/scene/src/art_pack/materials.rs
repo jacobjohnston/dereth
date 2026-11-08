@@ -36,6 +36,8 @@ pub struct TextureMaterial {
     pub slime: bool,
     /// Whether it is glacier ice: deep blue, opaque, with light bent through it.
     pub ice: bool,
+    /// How strongly it shines as silk or satin does, from 0 to 1.
+    pub sheen: f32,
     /// Who made it, with what, and under which license.
     pub credit: Credit,
 }
@@ -100,6 +102,7 @@ pub(super) fn with_pictures(
         damp_floors: entry.damp_floors,
         slime: entry.slime,
         ice: entry.ice,
+        sheen: entry.sheen,
         credit: entry.credit.clone(),
     }
 }

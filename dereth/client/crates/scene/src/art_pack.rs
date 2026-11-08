@@ -1446,6 +1446,7 @@ base_color = "m/fallback.png"
 keep_retail_picture = true
 normal = "m/wall_n.png"
 damp = 1
+sheen = 0.6
 author = "a"
 tool = "t"
 license = "CC0-1.0"
@@ -1461,6 +1462,7 @@ license = "CC0-1.0"
         assert_eq!(pack.materials.len(), 1, "{:?}", pack.problems);
         let wall = &pack.materials[0];
         assert!(wall.albedo.is_none());
+        assert!((wall.sheen - 0.6).abs() < 1e-6, "its sheen is kept");
         // Sized by the picture it has.
         assert_eq!((wall.normal.width, wall.surface.width), (8, 4));
         // Without the key the base color is read, and drawn.

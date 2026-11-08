@@ -32,6 +32,11 @@
 //! A fine picture many materials share, the grit, lies over the material at the size it has on the
 //! surface, adding a bend, a speckle of its color and some roughness finer than the retail picture.
 //!
+//! A material with a sheen shines as silk or satin does on a lit surface outdoors: a soft lobe
+//! about the sun's reflection, stretched along the picture's height as the threads run, and a
+//! glow of the sky where the surface turns away from the eye. It is added to the color before the
+//! light per pixel takes it, so the sun's shadow takes the sheen with the rest.
+//!
 //! A cut-out or unlit surface takes the material's color alone.
 
 use dereth_render::VertexFormat;
@@ -109,6 +114,16 @@ pub const WET_FLOOR: f32 = 0.3;
 /// How much of its color a damp surface keeps.
 pub const DAMP_DARK: f32 = 0.82;
 
+/// How bright a whole sheen's lobe is about the sun's reflection.
+pub const SHEEN_SUN: f32 = 0.1;
+
+/// How bright a whole sheen's glow of the sky is at a surface's edge.
+pub const SHEEN_SKY: f32 = 0.12;
+
+/// How much of the material's relief the sheen follows: the rest is the surface's own smooth
+/// facing, so the sheen lies in bands over its folds rather than in a haze over the weave.
+pub const SHEEN_RELIEF: f32 = 0.35;
+
 /// The anchors the material variant applies to the re-shaded text.
 #[must_use]
 pub fn anchors() -> Vec<Anchor> {
@@ -167,6 +182,8 @@ struct HifiMatTile {{
     slime: f32,
     // 1 where it is ice.
     ice: f32,
+    // How strongly it shines as silk does, 0 to 1.
+    sheen: f32,
 }};
 @group({group}) @binding(5) var<uniform> g_mat_tile: HifiMatTile;
 
@@ -464,6 +481,50 @@ fn hifi_mat_ice(i: VsOut, n: vec3<f32>, body: vec3<f32>) -> vec4<f32> {{
     return vec4<f32>(mix(inside, sky, mirror) + glint, 1.0);
 }}
 
+// The direction up the picture on a surface at `p` facing `n` with coordinates `uv`, from how the
+// two change across the pixel; zero where they do not tell.
+fn hifi_mat_up(n: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {{
+    let up = cross(dpdy(p), n) * dpdx(uv).y + cross(n, dpdx(p)) * dpdy(uv).y;
+    return select(vec3<f32>(0.0), normalize(up), dot(up, up) > 1e-24);
+}}
+
+// What a silk surface at `i` facing `n`, its threads running `up`, with roughness `rough` adds to its
+// color: a lobe about the sun's reflection, narrow across the threads and long along them, and the
+// sky's glow at a glancing angle. In the draw's own light, linear.
+fn hifi_mat_sheen(i: VsOut, n: vec3<f32>, up: vec3<f32>, rough: f32) -> vec3<f32> {{
+    let v = normalize(hifi_mat_eye() - i.world_p);
+    let ndv = dot(n, v);
+    if (ndv <= 0.0) {{
+        return vec3<f32>(0.0);
+    }}
+    let edge = pow(1.0 - ndv, 4.0);
+    var glow = hifi_linear_rgb(g_frame.ambient.rgb) * edge * {sheen_sky:.2};
+    let along = up - n * dot(up, n);
+    let has_along = dot(along, along) > 1e-24;
+    let b = select(vec3<f32>(0.0), normalize(along), has_along);
+    let t = cross(n, b);
+    let count = i32(g_draw.lighting_params.y);
+    for (var k: i32 = 0; k < 8; k = k + 1) {{
+        if (k < count && g_draw.light_diffuse[k].w == 3.0) {{
+            let l = -normalize(g_draw.light_pos[k].xyz);
+            let ndl = dot(n, l);
+            if (ndl > 0.0) {{
+                let h = normalize(l + v);
+                let hn = max(dot(h, n), 1e-3);
+                // Ward's lobe: rough across the threads, rougher along them.
+                let across = mix(0.08, 0.3, clamp(rough, 0.0, 1.0));
+                let along_r = select(across, across * 1.6, has_along);
+                let x = dot(h, t) / across;
+                let y = dot(h, b) / along_r;
+                let lobe = exp(-(x * x + y * y) / (hn * hn)) / (4.0 * across * along_r * sqrt(ndl * max(ndv, 0.05)));
+                glow = glow + hifi_linear_rgb(g_draw.light_diffuse[k].rgb) * ndl * lobe * {sheen_sun:.2};
+            }}
+            break;
+        }}
+    }}
+    return glow * g_mat_tile.sheen;
+}}
+
 fn hifi_material_out(c: vec4<f32>, i: VsOut, material: f32) -> HifiOut {{
     // Every picture and every change across the pixel is read before anything branches.
     let surface = hifi_mat_sample(g_mat_surface, i);
@@ -472,6 +533,7 @@ fn hifi_material_out(c: vec4<f32>, i: VsOut, material: f32) -> HifiOut {{
     let grit = hifi_mat_grit_sample(i);
     let strength = g_mat_level.w * g_mat_tile.at.z;
     let bent = hifi_mat_bent(own, i.world_p, i.uv0, hifi_mat_with_grit(bend, grit, strength));
+    let up = hifi_mat_up(own, i.world_p, i.uv0);
     let lit = g_draw.lighting_params.x > 0.5;
     let solid = {solid};
     var shaded = c;
@@ -485,6 +547,12 @@ fn hifi_material_out(c: vec4<f32>, i: VsOut, material: f32) -> HifiOut {{
             k = k * hifi_mat_shape(i, own, bent);
         }}
         shaded = vec4<f32>(c.rgb * k, c.a);
+        if (lit && g_draw.lighting_params.w < 0.5 && g_mat_tile.sheen > 0.0) {{
+            let rough = surface.r + (grit.a * 2.0 - 1.0) * strength;
+            let sheen = hifi_mat_sheen(i, normalize(mix(own, bent, {sheen_relief:.2})), up, rough) * k;
+            // Added in linear light, so it lies over a dark cloth without greying it.
+            shaded = vec4<f32>(linear_to_srgb(hifi_linear_rgb(shaded.rgb) + sheen), c.a);
+        }}
         let damp = surface.a * hifi_mat_wet_here(own) * g_mat_rooms.head.y;
         if (lit && g_draw.lighting_params.w > 0.5 && damp > 0.0) {{
             let wet = mix(1.0, {damp_dark:.2} + hifi_mat_damp(i, bent), damp);
@@ -523,6 +591,9 @@ fn hifi_material_out(c: vec4<f32>, i: VsOut, material: f32) -> HifiOut {{
         self_shadow = SELF_SHADOW,
         damp_sheen = DAMP_SHEEN,
         damp_dark = DAMP_DARK,
+        sheen_sun = SHEEN_SUN,
+        sheen_sky = SHEEN_SKY,
+        sheen_relief = SHEEN_RELIEF,
         lo = ROUGHNESS_CODES.0,
         hi = ROUGHNESS_CODES.1,
         lit = super::reshade::MaterialClass::Lit.wgsl_name(),

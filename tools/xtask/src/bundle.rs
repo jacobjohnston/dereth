@@ -452,6 +452,7 @@ mod tests {
                 "{plist}"
             );
             assert!(plist.starts_with("<?xml version=\"1.0\""), "{plist}");
+            assert!(plist.contains("<key>LSSupportsGameMode</key>"), "{plist}");
         }
     }
 

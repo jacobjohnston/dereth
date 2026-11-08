@@ -139,6 +139,10 @@ pub mod fidelity {
     /// `Fidelity.NoSlopeMaterials`: an art pack's ground is laid without the scree and rock it
     /// lays on steep slopes.
     pub const NO_SLOPE_MATERIALS: &str = "Fidelity.NoSlopeMaterials";
+    /// `Fidelity.VSync`: frames are presented on the display's refresh.
+    pub const VSYNC: &str = "Fidelity.VSync";
+    /// `Fidelity.Hdr`: the frame is presented with the display's extended range.
+    pub const HDR: &str = "Fidelity.Hdr";
     /// `Fidelity.Debug`: a diagnostic view, set only by `--set-at`: 0 Off, 1 Passthrough,
     /// 2 Depth, 3 Normals, 4 AO, 5 Shadows, 6 Census, 7 Parity (re-shaded with no pass).
     pub const DEBUG: &str = "Fidelity.Debug";
@@ -151,7 +155,7 @@ pub mod fidelity {
     /// over it. No box sets it.
     pub const ART_PACK: &str = "Fidelity.ArtPack";
 
-    /// Every name the profile and `--set-at` may set, the ten boxes first.
+    /// Every name the profile and `--set-at` may set, the twelve boxes first.
     pub const NAMES: &[&str] = &[
         LIGHTING,
         SHADOWS,
@@ -163,6 +167,8 @@ pub mod fidelity {
         RETAIL_LOOK,
         NO_ANTI_ALIASING,
         NO_SLOPE_MATERIALS,
+        VSYNC,
+        HDR,
         DEBUG,
     ];
 }

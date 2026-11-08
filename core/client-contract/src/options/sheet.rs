@@ -1163,7 +1163,7 @@ const CLIENT_SHARED: [Heading; 5] = [
 const CLIENT: [Heading; 5] = CLIENT_SHARED;
 
 /// With the optional high-fidelity presentation built in, the Client Options page ends with its
-/// ten boxes under a heading of their own, on the Horizon interface's page alone: it is the only
+/// twelve boxes under a heading of their own, on the Horizon interface's page alone: it is the only
 /// interface the presentation draws under.
 #[cfg(feature = "hifi")]
 const CLIENT: [Heading; 6] = {
@@ -1182,18 +1182,21 @@ const CLIENT: [Heading; 6] = {
     ]
 };
 
-/// The ten boxes, each off by default and on the Horizon page alone.
+/// The twelve boxes, each at its default and on the Horizon page alone: the two switches, then how
+/// frames reach the display, then the effects.
 #[cfg(feature = "hifi")]
-const FIDELITY_ROWS: [Row; 10] = [
+const FIDELITY_ROWS: [Row; 12] = [
     fidelity_box(0),
     fidelity_box(1),
+    fidelity_box(8),
+    fidelity_box(10),
+    fidelity_box(11),
     fidelity_box(2),
     fidelity_box(3),
     fidelity_box(4),
     fidelity_box(5),
     fidelity_box(6),
     fidelity_box(7),
-    fidelity_box(8),
     fidelity_box(9),
 ];
 
@@ -1203,7 +1206,10 @@ const fn fidelity_box(i: usize) -> Row {
     let o = &super::fidelity::OPTIONS[i];
     only(
         Shown::Only(Interface::Horizon),
-        noted(o.note, pref(o.caption, Value::Check(o.name), Bool(false))),
+        noted(
+            o.note,
+            pref(o.caption, Value::Check(o.name), Bool(o.on_by_default)),
+        ),
     )
 }
 
@@ -1499,13 +1505,13 @@ mod tests {
     }
 
     /// The experimental rendering effects' boxes are on the Horizon interface's Client page
-    /// alone, last, under their own heading, each off by default; the classic and the modern
+    /// alone, last, under their own heading, each at its default; the classic and the modern
     /// interfaces' pages are exactly the shared headings', row for row; and a build without the
     /// effects has no such heading anywhere.
     ///
-    /// Behaviour: hifi.options.the-boxes-are-on-horizons-page-alone-each-off
+    /// Behaviour: hifi.options.the-boxes-are-on-horizons-page-alone-each-at-its-default
     #[test]
-    fn the_effects_boxes_are_on_horizons_client_page_alone_each_off() {
+    fn the_effects_boxes_are_on_horizons_client_page_alone_each_at_its_default() {
         use crate::options::fidelity;
         for face in [Interface::Modern, Interface::Classic] {
             let shown: Vec<&Row> = rows_for(PageId::Client, face).collect();
@@ -1523,12 +1529,18 @@ mod tests {
             let (heading, rows) = horizon.last().expect("Horizon's Client page has headings");
             assert_eq!(heading.title, fidelity::HEADING);
             assert_eq!(rows.len(), fidelity::OPTIONS.len());
-            for (row, o) in rows.iter().zip(fidelity::OPTIONS.iter()) {
-                assert_eq!(row.value, Value::Check(o.name));
+            for o in &fidelity::OPTIONS {
+                let row = rows
+                    .iter()
+                    .find(|r| r.value == Value::Check(o.name))
+                    .expect("every box has its row");
                 assert_eq!(row.caption, o.caption);
-                assert_eq!(row.default, Some(Bool(false)), "{}", o.name);
+                assert_eq!(row.default, Some(Bool(o.on_by_default)), "{}", o.name);
                 assert_eq!(row.shown, Shown::Only(Interface::Horizon));
             }
+            // The two switches first.
+            assert_eq!(rows[0].value, Value::Check(fidelity::OPTIONS[0].name));
+            assert_eq!(rows[1].value, Value::Check(fidelity::OPTIONS[1].name));
             // The rest of Horizon's page is the shared headings'.
             let rest: Vec<&Row> = horizon[..horizon.len() - 1]
                 .iter()

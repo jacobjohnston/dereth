@@ -476,7 +476,7 @@ fn far_trees_for_presentation(
 }
 
 /// The Remastered sky as the presentation reads it, while its knob has it on.
-fn sky_knobs(k: &Knobs) -> Option<dereth_render_hifi::snapshot::HifiSkyKnobs> {
+pub(super) fn sky_knobs(k: &Knobs) -> Option<dereth_render_hifi::snapshot::HifiSkyKnobs> {
     // LINT-OK: a step count knob, 1 to 64.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let steps = k.get(Knob::CloudSteps).round() as u32;
@@ -709,7 +709,9 @@ pub(super) fn apply_preferences(
     // Before the first poll the presentation is off, as the default preferences have it.
     let last = sh.applied.unwrap_or((FidelityPreferences::default(), rays));
     sh.applied = Some((*prefs, rays));
-    if last == (*prefs, rays) {
+    // How frames reach the display is the device's and the next start's, not the presentation's.
+    let drawn = |p: &FidelityPreferences| p.without_presentation_choices();
+    if (drawn(&last.0), last.1) == (drawn(prefs), rays) {
         return Applied::default();
     }
     // A new start: the presentation's retained copies go with its old settings.
@@ -792,6 +794,8 @@ pub(super) fn publish(draw: &SceneDraw, sh: &mut Shadow, ws: &WorldState, gpu: &
     }
     let reuse = renderer(gpu).and_then(HifiRenderer::recycle_frame);
     let mut frame = snapshot(draw, ws, stamp, (width, height), sh, reuse);
+    frame.brightness = gpu.gamma();
+    frame.hdr_headroom = dereth_render::wgpu::hdr_headroom();
     // The slots holding the retail pictures the pack's materials stand for, as they are now.
     frame.material_slots.clear();
     if frame.materials.is_some() {
@@ -1336,7 +1340,11 @@ mod tests {
     use super::*;
 
     use dereth_client_contract::options::fidelity::{blocked_with, OPTIONS};
+    use dereth_client_contract::options::names::fidelity::{HDR, VSYNC};
     use dereth_render_hifi::composite::CompositeMode;
+
+    /// The boxes the settings do not carry: they reach the device instead.
+    const OWN_RULES: [&str; 2] = [VSYNC, HDR];
 
     /// The preferences with the boxes `ticked` (one bit each, in the page's order) under the
     /// Horizon interface.
@@ -1369,7 +1377,7 @@ mod tests {
             n::WEATHER => s.weather.is_on(),
             n::RETAIL_LOOK => s.lighting.is_on() && !s.art_pack,
             n::NO_ANTI_ALIASING => s.lighting.is_on() && !s.anti_aliasing,
-            n::NO_SLOPE_MATERIALS => s.lighting.is_on() && !s.slope_materials,
+            n::NO_SLOPE_MATERIALS => s.art_pack && !s.slope_materials,
             _ => unreachable!("{name}"),
         }
     }
@@ -1487,7 +1495,7 @@ mod tests {
                         .position(|o| o.name == name)
                         .is_some_and(|i| ticked & (1 << i) != 0)
                 };
-                for o in &OPTIONS {
+                for o in OPTIONS.iter().filter(|o| !OWN_RULES.contains(&o.name)) {
                     let drawn = drawn(&s, o.name);
                     // With an art pack open, which draws what every box asks for.
                     let greyed = blocked_with(o.name, is, Some(rays), true).is_some();
@@ -1514,12 +1522,12 @@ mod tests {
             }
         }
         // Lighting off keeps the dependents' ticks; on again, they draw again.
-        let both = boxes(0b000_0011);
+        let both = boxes(0b000_0101);
         assert!(settings(&both, true).shadows.is_on());
-        let unlit = boxes(0b000_0010);
+        let unlit = boxes(0b000_0100);
         assert!(!settings(&unlit, true).shadows.is_on());
         assert_eq!(unlit.value(FidelityFeature::Shadows), 1);
-        assert_eq!(settings(&boxes(0b000_0011), true), settings(&both, true));
+        assert_eq!(settings(&boxes(0b000_0101), true), settings(&both, true));
     }
 
     /// An art pack's model is turned and placed exactly as the bake turns and places the object

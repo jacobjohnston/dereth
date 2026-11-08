@@ -76,6 +76,9 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: a Cloud Detail menu, Off to High: Medium and High draw the Remastered sky's clouds with two and four times the steps, smoothing the stripes along their edges; Off draws retail's flat cloud deck.
 - Better Lighting: an art pack can plant grass and low plants over the land, and a Ground Cover menu chooses how far they are drawn, from 0.5x to 5x, or Off.
 - Better Lighting: the wind moves an art pack's trees and plants, and No Wind holds them still.
+- Better Lighting: the doors and windows of buildings behind an art pack's trees and plants no longer show through them.
+- Better Lighting: an art pack's trees and plants past a nearby building no longer show through its walls.
+- Better Lighting: a wielded weapon stays in its holder's hand where an art pack's ground stands above the original.
 
 ## 0.4.14 (2026-11-05)
 

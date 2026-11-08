@@ -192,6 +192,7 @@ pub const OPTIONS: [FidelityOption; 13] = [
 pub const MENUS: &[(&str, Needs)] = &[
     (fidelity::DEPTH_MAPPING, Needs::ArtPackWithoutRetailLook),
     (fidelity::GOD_RAYS, Needs::Lighting),
+    (fidelity::CLOUD_DETAIL, Needs::Lighting),
 ];
 
 /// The heading's caption.
@@ -231,6 +232,15 @@ pub const PRESET_VALUES: &[(&str, [PrefValue; PRESET_NAMES.len()])] = &[
     (fidelity::DEPTH_MAPPING, [Int(0), Int(3), Int(3), Int(3)]),
     (fidelity::NO_DAMP, [ON, OFF, OFF, OFF]),
     (fidelity::GOD_RAYS, [Int(0), Int(1), Int(1), Int(1)]),
+    (
+        fidelity::CLOUD_DETAIL,
+        [
+            PrefValue::Int(super::cloud_detail::LOW),
+            PrefValue::Int(super::cloud_detail::MEDIUM),
+            PrefValue::Int(super::cloud_detail::HIGH),
+            PrefValue::Int(super::cloud_detail::HIGH),
+        ],
+    ),
 ];
 
 /// One quality preset, by its place in [`PRESET_NAMES`].
@@ -813,16 +823,21 @@ mod tests {
             Int(super::super::depth_mapping::OFF)
         )));
         assert!(low.contains(&(fidelity::GOD_RAYS, Int(super::super::god_rays::OFF))));
+        assert!(low.contains(&(fidelity::CLOUD_DETAIL, Int(super::super::cloud_detail::LOW))));
         let ultra = PRESETS[3].values();
         assert!(ultra.iter().all(|(name, v)| match find(name) {
             Some(o) => *v == PrefValue::Bool(!o.inverted),
             None if *name == fidelity::GOD_RAYS => *v == Int(super::super::god_rays::LOW),
+            None if *name == fidelity::CLOUD_DETAIL => *v == Int(super::super::cloud_detail::HIGH),
             None => *v == Int(super::super::depth_mapping::MOST),
         }));
         // The defaults of the boxes and the menu are the Medium preset's.
         let defaults = |name: &str| match find(name) {
             Some(o) => Some(PrefValue::Bool(o.on_by_default)),
             None if name == fidelity::GOD_RAYS => Some(Int(super::super::god_rays::DEFAULT)),
+            None if name == fidelity::CLOUD_DETAIL => {
+                Some(Int(super::super::cloud_detail::DEFAULT))
+            }
             None => is_a_menu(name).then_some(Int(super::super::depth_mapping::DEFAULT)),
         };
         assert_eq!(preset_in_use(defaults), Some(PRESETS[1]));

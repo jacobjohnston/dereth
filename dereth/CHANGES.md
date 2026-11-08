@@ -40,6 +40,8 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: a God Rays menu, Off to High: sunlight shows in the air in shafts where walls, roofs and trees break it, most at dawn and dusk, in fog and under trees.
 - Better Lighting: a God Rays menu, Off to High: sunlight shows in the air in shafts where walls, roofs and trees break it, most at dawn and dusk, in fog and under trees.
 - Enhanced Graphics: God Rays starts at Low, as the Medium preset has it, and the Low preset turns it off. It leaves the page with Enhanced Graphics Mode off.
+- Better Lighting: a Cloud Detail menu, Off to High: Medium and High draw the Remastered sky's clouds with two and four times the steps, smoothing the stripes along their edges; Off draws retail's flat cloud deck.
+- Enhanced Graphics: Cloud Detail starts at Medium, as the Medium preset has it; the Low preset sets it Low, and High and Ultra set it High. It leaves the page with Enhanced Graphics Mode off.
 ## 0.4.15 (2026-11-07)
 - The relay that plays AC1999 now comes with Dereth.
 - Logging in now reports the world's player count to the hub, with no opt-out.

@@ -508,18 +508,17 @@ impl Windows {
     }
 
     /// The map's Teleport button, for an administrator: once pressed, the next press on the
-    /// picture sends them there. `at` is the map's body, its picture and the picture's scale.
+    /// picture sends them there. `at` is the map's body and its picture.
     pub(super) fn map_teleport(
         &mut self,
         p: &mut Painter<'_>,
         ctx: &mut Ctx<'_>,
         state: &GameState,
-        at: (Rect, Rect, f32),
+        at: (Rect, Rect),
         out: &mut Outcome,
     ) {
-        use dereth_ui_screens::mapradar::map::{map_coords_at, SHIPPED_NOTE_BINDING};
         const CANCEL: &str = "Cancel Teleport";
-        let (body, area, fit) = at;
+        let (body, area) = at;
         let k = p.scale;
         self.admin.map_button = None;
         if !state.is_admin {
@@ -539,13 +538,11 @@ impl Windows {
             self.admin.map_armed = !armed;
             return;
         }
-        if !armed || fit <= 0.0 || !ctx.input.hover(&area) {
+        if !armed || !ctx.input.hover(&area) {
             return;
         }
-        let (_, _, markers) = SHIPPED_NOTE_BINDING;
-        let x = f64::from((ctx.input.mouse.0 - area.x) / fit);
-        let y = f64::from((ctx.input.mouse.1 - area.y) / fit);
-        let Some((ns, ew)) = map_coords_at(markers, x, y) else {
+        let (x, y) = self.map_view.on_picture(area, ctx.input.mouse);
+        let Some((ns, ew)) = super::map::map_place(x, y) else {
             return;
         };
         let place = tele_place(ns, ew);

@@ -9,7 +9,7 @@
 //!
 //! The picture names nothing: the places are [`PLACES_FILE`]'s, drawn over it. Players see the
 //! major towns, each a [`town_icon`] with its name, and the houses as the map is zoomed in far
-//! enough to tell them apart.
+//! enough to tell them apart; an administrator also sees the landmarks, portals and lifestones.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,6 +25,7 @@ use crate::draw::{Rect, WHITE};
 use crate::ui::game::GameState;
 use crate::ui::kit::{self, Ctx};
 use crate::ui::paint::{Align, Painter, TextStyle};
+use crate::ui::Outcome;
 
 /// The picture's side, in its own pixels.
 #[allow(clippy::cast_precision_loss)] // LINT-OK: 6123.
@@ -457,6 +458,7 @@ impl Windows {
         ctx: &mut Ctx<'_>,
         state: &GameState,
         body: Rect,
+        out: &mut Outcome,
     ) {
         let k = p.scale;
         p.fill(body, 0xFF2A_2418);
@@ -477,7 +479,7 @@ impl Windows {
         }
         self.map_picture = Some(area);
         self.tell_map_presses(ctx, area);
-        self.map_places(p, ctx, area);
+        self.map_places(p, ctx, state, area);
         // The plugins' points and lines on the map.
         if !self.plugins.frame.marks.map.is_empty() {
             let view = &self.map_view;
@@ -505,6 +507,7 @@ impl Windows {
                 &label,
             );
         }
+        self.map_teleport(p, ctx, state, (body, area), out);
     }
 
     /// The buttons under the picture: closer about the player while they are in view and otherwise
@@ -546,8 +549,10 @@ impl Windows {
         }
     }
 
-    /// The wheel over the picture zooms about the pointer, and a drag begun on it pans.
+    /// The wheel over the picture zooms about the pointer, and a drag begun on it pans, unless a
+    /// teleport is waiting for that press.
     fn map_pointer(&mut self, ctx: &mut Ctx<'_>, area: Rect) {
+        let armed = self.admin.map_armed;
         let view = &mut self.map_view;
         let mouse = ctx.input.mouse;
         let over = ctx.input.hover(&area);
@@ -567,7 +572,7 @@ impl Windows {
             } else {
                 view.drag = None;
             }
-        } else if over && ctx.input.pressed[0] {
+        } else if over && !armed && ctx.input.pressed[0] {
             view.drag = Some(mouse);
         }
     }
@@ -644,9 +649,15 @@ impl Windows {
     }
 
     /// The places over the picture: the major towns' icons and names, then the houses' marks as
-    /// the zoom shows them, with the landmarks' names and the portals' where they fit; and the name
-    /// and place of the one under the pointer.
-    fn map_places(&mut self, p: &mut Painter<'_>, ctx: &mut Ctx<'_>, area: Rect) {
+    /// the zoom shows them, and for an administrator the other places' too, with the landmarks'
+    /// names and the portals' where they fit; and the name and place of the one under the pointer.
+    fn map_places(
+        &mut self,
+        p: &mut Painter<'_>,
+        ctx: &mut Ctx<'_>,
+        state: &GameState,
+        area: Rect,
+    ) {
         let places = Arc::clone(self.map_view.places.get_or_insert_with(|| {
             Arc::new(p.art.file(PLACES_FILE).map(read_places).unwrap_or_default())
         }));
@@ -688,7 +699,9 @@ impl Windows {
             let mark_side = MARK_SIDE * k;
             let mut nearest: Option<(f32, &Place)> = None;
             let shown = |kind: PlaceKind| {
-                kind != PlaceKind::Town && kind.players_see() && view.zoom >= kind.marked_from()
+                kind != PlaceKind::Town
+                    && (kind.players_see() || state.is_admin)
+                    && view.zoom >= kind.marked_from()
             };
             for place in places.iter().filter(|pl| shown(pl.kind)) {
                 let at = view.on_screen(area, map_pixel(place.ns, place.ew));

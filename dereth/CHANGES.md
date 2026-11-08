@@ -76,6 +76,10 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - macOS: Command takes the place of Control for shortcuts, copy and paste among them, and the key bindings pages show it as Cmd.
 - Horizon: an administrator has an Admin window (Ctrl+Shift+A, Cmd+Shift+A on a Mac, or Admin on the System menu) whose buttons send the server's admin commands, and a Teleport button on the map.
 - Horizon: an administrator has an Admin window (Ctrl+Shift+A, or Admin on the System menu) whose buttons send the server's admin commands, and a Teleport button on the map.
+- Horizon: an administrator has an Admin window (Ctrl+Shift+A, or Admin on the System menu) whose buttons send the server's admin commands, and a Teleport button on the map.
+- Horizon: a new, far more detailed world map, drawn from the game's own files in the original
+  map's colours, with every major town marked and named on it, and the cottages, villas and
+  mansions as you zoom in. The wheel zooms in on it and a drag pans around it.
 ## 0.4.15 (2026-11-07)
 - The relay that plays AC1999 now comes with Dereth.
 - Logging in now reports the world's player count to the hub, with no opt-out.

@@ -811,6 +811,14 @@ pub(super) fn publish(draw: &SceneDraw, sh: &mut Shadow, ws: &WorldState, gpu: &
     let mut frame = snapshot(draw, ws, stamp, (width, height), sh, reuse);
     frame.brightness = gpu.gamma();
     frame.hdr_headroom = dereth_render::wgpu::hdr_headroom();
+    frame.god_rays = u8::try_from(
+        draw.cfg
+            .render
+            .fidelity
+            .effective(FidelityFeature::GodRays)
+            .min(3),
+    )
+    .unwrap_or(0);
     // The slots holding the retail pictures the pack's materials stand for, as they are now.
     frame.material_slots.clear();
     if frame.materials.is_some() {
@@ -1090,12 +1098,10 @@ fn snapshot(
         None => None,
     };
     frame.pack_light = pack_light(&draw.drawn.knobs);
-    frame.sky_knobs = frame.art_pack.as_ref().and_then(|_| {
-        sky_knobs(&super::asked_clouds::with_asked_clouds(
-            &draw.drawn.knobs,
-            &ws.clouds,
-        ))
-    });
+    frame.sky_knobs = frame
+        .art_pack
+        .as_ref()
+        .and_then(|_| sky_knobs(&super::asked_clouds::with_asked_clouds(&draw.drawn.knobs, &ws.clouds)));
     frame.far = far_knobs(&draw.drawn.knobs);
     frame.far_trees = if draw.far.active && frame.art_pack.is_some() {
         if sh

@@ -243,6 +243,12 @@ pub trait Presentation: std::fmt::Debug {
     fn hifi_availability(&self) -> dereth_client_contract::options::fidelity::Availability {
         dereth_client_contract::options::fidelity::Availability::default()
     }
+    /// The share of the frame's pixels the enhanced graphics draw the world at now, percent,
+    /// while they draw: what a Dynamic render scale has moved it to.
+    #[cfg(feature = "hifi")]
+    fn render_scale_in_use(&self) -> Option<u32> {
+        None
+    }
     /// The device-owned `Render.*` names alone.
     fn apply_device_preference_requests(
         &mut self,

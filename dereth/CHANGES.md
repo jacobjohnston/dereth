@@ -68,6 +68,9 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Weather Sounds: rain now patters and hisses, harder in a storm with the wind roaring in its gusts and muffled indoors, made as it plays so it never repeats. A new Weather Sounds row in the sound options sets how loud the rain, the wind and the thunder are.
 - Better Lighting: an art pack can draw the moons again as round worlds, lit from the sun's side as they wax and wane over months of their own, with lights twinkling on their night sides and clouds of their own.
 - /moon sets the phase of the moons this client draws, both or one at a time, until /moon reset.
+- Enhanced Graphics: a Render Scale menu draws the world at 85%, 75%, 67% or 50% of the screen's pixels each way, for a higher frame rate on large screens. On a Mac MetalFX rebuilds the picture at full size; elsewhere it is enlarged. Anti-Aliasing stays on below 100%, and pictures are read for the full frame.
+- Enhanced Graphics: Render Scale starts at Dynamic, as the Low, Medium and High presets have it (Ultra draws 100%): it lowers the render scale to hold the Dynamic Resolution Frame Rate (60 FPS unless chosen), shown only while Dynamic is chosen.
+- Performance Panel: SCALE shows the render scale drawn now, as a Dynamic render scale moves it.
 ## 0.4.15 (2026-11-07)
 - The relay that plays AC1999 now comes with Dereth.
 - Logging in now reports the world's player count to the hub, with no opt-out.

@@ -21,6 +21,11 @@
 //! textures) where it stood; one that stood nowhere it stands now moved from where the nearest of
 //! them stood. Every other pixel follows the camera, worked out from its depth.
 //!
+//! **At a render scale, on Metal, MetalFX blends instead.** [`Resolve`] then writes what MetalFX
+//! reads, every pixel's motion and where a translucent draw changed the picture, and [`Upscale`]
+//! hands the frame over: MetalFX keeps the history, at the frame's size, and the frame goes on
+//! there. `DERETH_HIFI_UPSCALER=plain` keeps the blend and only enlarges its picture, to compare.
+//!
 //! The history is dropped whenever a frame breaks the sequence: a frame of the world not
 //! re-shaded, half a second of the game's clock between two frames, a new size or viewport.
 //!
@@ -37,6 +42,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use dereth_render::device::PerFrameConstants;
+use dereth_render::wgpu::metalfx::{self, ScaleInputs, TemporalScaler};
 use dereth_render::PipelineKey;
 use glam::{DMat4, Mat4, Vec2, Vec3};
 
@@ -71,6 +77,18 @@ const HISTORY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// How many offsets the jitter steps through before it repeats.
 pub const SEQUENCE: u32 = 8;
+
+/// How many offsets the jitter steps through to cover a pixel of the frame when the world is drawn
+/// at `drawn` of its `output` pixels: more the fewer are drawn, so each pixel of the frame is
+/// sampled as often.
+#[must_use]
+pub fn phases(drawn: (u32, u32), output: (u32, u32)) -> u32 {
+    let share = |d: u32, o: u32| f64::from(o) / f64::from(d.max(1));
+    let enlarged = share(drawn.0, output.0) * share(drawn.1, output.1);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // a small count
+    let more = (f64::from(SEQUENCE) * enlarged).ceil() as u32;
+    more.max(SEQUENCE)
+}
 
 /// How many frames the dither of the edges of cut-outs steps through before it repeats.
 const DITHER_SEQUENCE: u32 = 64;
@@ -109,7 +127,13 @@ pub fn halton(mut index: u32, base: u32) -> f32 {
 /// each way, and the frame's place in the dither of the edges of cut-outs (1 and over).
 #[must_use]
 pub fn jitter(n: u32, viewport: [u32; 4]) -> (Vec2, f32) {
-    let i = n % SEQUENCE + 1;
+    jitter_over(n, SEQUENCE, viewport)
+}
+
+/// As [`jitter`], over a sequence `phases` offsets long ([`phases`]).
+#[must_use]
+pub fn jitter_over(n: u32, phases: u32, viewport: [u32; 4]) -> (Vec2, f32) {
+    let i = n % phases.max(1) + 1;
     let pixel = Vec2::new(halton(i, 2) - 0.5, halton(i, 3) - 0.5);
     #[allow(clippy::cast_precision_loss)] // a viewport's size and a small count
     let (size, place) = (
@@ -129,6 +153,8 @@ pub struct Shift {
     pub jitter: Vec2,
     /// The frame's place in the dither of the edges of cut-outs.
     pub dither: f32,
+    /// How many levels finer the pictures are read ([`mip_bias`]).
+    pub mip_bias: f32,
     /// 1 where the frame is indoors, else 0.
     pub indoors: f32,
 }
@@ -138,6 +164,7 @@ impl Shift {
     pub const NONE: Self = Self {
         jitter: Vec2::ZERO,
         dither: 0.0,
+        mip_bias: 0.0,
         indoors: 0.0,
     };
 
@@ -147,6 +174,7 @@ impl Shift {
         Self {
             jitter,
             dither,
+            mip_bias: 0.0,
             indoors: 0.0,
         }
     }
@@ -161,6 +189,7 @@ impl Shift {
     #[must_use]
     pub fn of(frame: &HifiFrame) -> Self {
         Self {
+            mip_bias: frame.camera.mip_bias,
             indoors: if frame.sky.outdoor { 0.0 } else { 1.0 },
             ..Self::new(frame.camera.jitter, frame.camera.dither)
         }
@@ -174,8 +203,17 @@ pub fn jitter_block(block: &mut PerFrameConstants, shift: Shift) {
     let shifted = Mat4::from_translation(shift.jitter.extend(0.0)) * to_clip;
     block.view_proj = shifted.transpose().to_cols_array();
     block.screen[0] = 0.0;
+    block.screen[1] = shift.mip_bias;
     block.screen[2] = shift.dither;
     block.screen[3] = shift.indoors;
+}
+
+/// How many levels finer pictures are read for a frame of `drawn` pixels enlarged to `shown`.
+#[must_use]
+pub fn mip_bias(drawn: (u32, u32), shown: (u32, u32)) -> f32 {
+    #[allow(clippy::cast_precision_loss)] // pixels
+    let share = drawn.0.max(1) as f32 / shown.0.max(1) as f32;
+    (dereth_primitives::num::math::logf(share) / std::f32::consts::LN_2).min(0.0)
 }
 
 /// For each per-frame block a draw of the frame's world was recorded with, the block the replay
@@ -389,6 +427,7 @@ struct TaaGpu {
     resolve: wgpu::RenderPipeline,
     sharpen: wgpu::RenderPipeline,
     translucent: wgpu::RenderPipeline,
+    upscale_inputs: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     params: wgpu::Buffer,
 }
@@ -471,7 +510,32 @@ impl TaaGpu {
                 cache: None,
             })
         };
+        let upscale_inputs = device.build_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("MetalFX inputs"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_upscale_inputs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[
+                    Some(metalfx::MOTION_FORMAT.into()),
+                    Some(metalfx::REACTIVE_FORMAT.into()),
+                ],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
+            upscale_inputs,
             resolve: pipeline("fs_resolve", HISTORY_FORMAT, wgpu::ColorWrites::ALL),
             sharpen: pipeline("fs_sharpen", HDR_FORMAT, wgpu::ColorWrites::COLOR),
             translucent: pipeline("fs_translucent", MOTION_FORMAT, wgpu::ColorWrites::BLUE),
@@ -553,6 +617,12 @@ struct State {
     /// How many draws moved this frame, and whether the history was used.
     moved_draws: u64,
     blended: bool,
+    /// The scaler for the sizes last asked for, or that there is none for them.
+    scaler: Option<ScalerFor>,
+    /// Whether the last frame drawn with the anti-aliasing was MetalFX's.
+    upscaled: bool,
+    /// This frame's scale, once its inputs are written.
+    pending: Option<UpscaleRequest>,
 }
 
 impl State {
@@ -583,14 +653,18 @@ fn objects_followed() -> bool {
     std::env::var("DERETH_HIFI_TAA_OBJECTS").map_or(true, |v| v.trim() != "0")
 }
 
-/// The three passes of the anti-aliasing, sharing their state.
+/// A scaler from one size to another, or that there is none for them.
+type ScalerFor = ((u32, u32), (u32, u32), Option<Rc<TemporalScaler>>);
+
+/// The passes of the anti-aliasing, sharing their state.
 #[must_use]
-pub fn passes() -> (Keep, Translucent, Resolve) {
+pub fn passes() -> (Keep, Translucent, Resolve, Upscale) {
     let state = Rc::new(RefCell::new(State::default()));
     (
         Keep(Rc::clone(&state)),
         Translucent(Rc::clone(&state)),
-        Resolve(state),
+        Resolve(Rc::clone(&state)),
+        Upscale(state),
     )
 }
 
@@ -602,9 +676,52 @@ pub struct Keep(Rc<RefCell<State>>);
 #[derive(Debug)]
 pub struct Translucent(Rc<RefCell<State>>);
 
-/// After the air: the blend and the sharpening.
+/// After the air: the blend and the sharpening, or what MetalFX reads.
 #[derive(Debug)]
 pub struct Resolve(Rc<RefCell<State>>);
+
+/// Once the frame's measures have read the picture as drawn: the frame handed to MetalFX.
+#[derive(Debug)]
+pub struct Upscale(Rc<RefCell<State>>);
+
+/// A frame's scale, for the presentation to run between its submissions.
+#[derive(Debug, Clone)]
+pub struct UpscaleRequest {
+    scaler: Rc<TemporalScaler>,
+    colour: wgpu::TextureView,
+    depth: wgpu::TextureView,
+    motion: wgpu::TextureView,
+    reactive: wgpu::TextureView,
+    jitter: [f32; 2],
+    motion_scale: [f32; 2],
+    reset: bool,
+}
+
+impl UpscaleRequest {
+    /// Scale the frame into `output`, after everything already submitted. False when it could not.
+    #[must_use]
+    pub fn encode(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        output: &wgpu::Texture,
+    ) -> bool {
+        self.scaler.encode(
+            device,
+            queue,
+            &ScaleInputs {
+                colour: self.colour.texture(),
+                depth: self.depth.texture(),
+                motion: self.motion.texture(),
+                reactive: self.reactive.texture(),
+                output,
+                jitter: self.jitter,
+                motion_scale: self.motion_scale,
+                reset: self.reset,
+            },
+        )
+    }
+}
 
 /// The texture slots bound for each draw of `tables`, by the draw's index: the last bind of each
 /// stage's texture before it.
@@ -676,7 +793,11 @@ impl Keep {
             let Some(mut block) = cx.seam.frame_block(d.frame) else {
                 continue;
             };
-            jitter_block(&mut block, Shift::new(cam.jitter, cam.dither));
+            let shift = Shift {
+                mip_bias: cam.mip_bias,
+                ..Shift::new(cam.jitter, cam.dither)
+            };
+            jitter_block(&mut block, shift);
             // From where the draw's vertices stand now to where they stood in the last frame's
             // clip space.
             let back = last.view_projection * was * now.inverse();
@@ -718,6 +839,7 @@ impl HifiPass for Keep {
         let s = self.0.borrow();
         notes.push(("anti-aliasing draws that moved", s.moved_draws));
         notes.push(("anti-aliasing blended a history", u64::from(s.blended)));
+        notes.push(("upscaled by MetalFX", u64::from(s.upscaled)));
     }
 
     fn prepare(&mut self, cx: &mut PrepareCx<'_, '_>) -> Result<(), HifiError> {
@@ -992,6 +1114,134 @@ impl Resolve {
     }
 }
 
+impl Resolve {
+    /// The scaler this frame is upscaled with: at a render scale, with the world filling the whole
+    /// frame, on a device MetalFX can scale, unless `DERETH_HIFI_UPSCALER=plain` asks otherwise.
+    fn scaler_for(s: &mut State, cx: &EncodeCx<'_, '_>) -> Option<Rc<TemporalScaler>> {
+        if !cx.seam.scaled()
+            || *cx.resolved
+            || std::env::var("DERETH_HIFI_UPSCALER").is_ok_and(|v| v.trim() == "plain")
+        {
+            return None;
+        }
+        let (input, output) = (cx.seam.surface_size(), cx.seam.output_size());
+        let fills = |v: Option<[u32; 4]>, (w, h): (u32, u32)| v == Some([0, 0, w, h]);
+        let edges = |v: dereth_primitives::Viewport| [v.x, v.y, v.width, v.height];
+        if !fills(cx.seam.world_viewport().map(edges), input)
+            || !fills(cx.seam.output_viewport().map(edges), output)
+            || cx.depth.texture().format()
+                != dereth_render::wgpu::sidecar::SidecarContext::depth_format()
+        {
+            return None;
+        }
+        match &s.scaler {
+            Some((i, o, made)) if *i == input && *o == output => made.clone(),
+            _ => {
+                let made = TemporalScaler::new(cx.seam.device(), input, output).map(Rc::new);
+                s.scaler = Some((input, output, made.clone()));
+                made
+            }
+        }
+    }
+
+    /// Write what MetalFX reads, into the textures of a frame's scale.
+    fn upscale_inputs(
+        s: &mut State,
+        cx: &mut EncodeCx<'_, '_>,
+        scaler: Rc<TemporalScaler>,
+        moved: &wgpu::TextureView,
+        reset: bool,
+        viewport: [f32; 4],
+    ) -> Result<Option<UpscaleRequest>, HifiError> {
+        let Some(rt) = cx.reshade else {
+            return Ok(None);
+        };
+        let device = cx.seam.device().clone();
+        let (width, height) = cx.seam.surface_size();
+        let mut target = |name, format| {
+            cx.resources.texture(
+                &device,
+                name,
+                TextureSpec {
+                    width,
+                    height,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                },
+            )
+        };
+        let motion = target(ResourceName::UpscaleMotion, metalfx::MOTION_FORMAT)?;
+        let reactive = target(ResourceName::UpscaleReactive, metalfx::REACTIVE_FORMAT)?;
+        let Some(gpu) = s.gpu.as_ref() else {
+            return Ok(None);
+        };
+        let bind = gpu.bind(&device, &rt.hdr, cx.depth, moved, moved, moved);
+        {
+            let attachment = |view| {
+                Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })
+            };
+            let mut pass = cx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("MetalFX inputs"),
+                color_attachments: &[attachment(&motion), attachment(&reactive)],
+                depth_stencil_attachment: None,
+                timestamp_writes: cx.timer.writes("MetalFX inputs"),
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            cx.seam.count_pass();
+            pass.set_pipeline(&gpu.upscale_inputs);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        // The jitter in the picture's pixels, `y` down, as the camera was shifted by it; and the
+        // motion, this frame's place less the last's across the viewport, as pixels back to where
+        // the surface stood. A sign to look into the jitter with: `DERETH_HIFI_METALFX_JITTER`.
+        let jitter = cx.frame.camera.jitter;
+        let sign = env_f32("DERETH_HIFI_METALFX_JITTER", 1.0);
+        Ok(Some(UpscaleRequest {
+            scaler,
+            colour: rt.hdr.clone(),
+            depth: cx.depth.clone(),
+            motion,
+            reactive,
+            jitter: [
+                sign * jitter.x * viewport[2] * 0.5,
+                sign * -jitter.y * viewport[3] * 0.5,
+            ],
+            motion_scale: [-viewport[2], -viewport[3]],
+            reset,
+        }))
+    }
+}
+
+impl HifiPass for Upscale {
+    fn name(&self) -> &'static str {
+        "upscale"
+    }
+
+    fn wanted(&self, s: &HifiSettings, _f: &HifiFrame, _caps: &Caps) -> bool {
+        wanted(s) && self.0.borrow().ready()
+    }
+
+    fn prepare(&mut self, _cx: &mut PrepareCx<'_, '_>) -> Result<(), HifiError> {
+        Ok(())
+    }
+
+    fn encode(&mut self, cx: &mut EncodeCx<'_, '_>) -> Result<(), HifiError> {
+        *cx.upscale = self.0.borrow_mut().pending.take();
+        Ok(())
+    }
+}
+
 impl HifiPass for Resolve {
     fn name(&self) -> &'static str {
         "anti-aliasing"
@@ -1020,6 +1270,47 @@ impl HifiPass for Resolve {
         let device = cx.seam.device().clone();
         let queue = cx.seam.queue().clone();
         let size = cx.seam.surface_size();
+        let Some(motion) = texture_of(cx, ResourceName::TaaMotion) else {
+            s.reset();
+            return Ok(());
+        };
+        let cam = cx.frame.camera;
+        let now = cx.frame.time;
+        // The history holds the frames before this one only when the last frame drawn with it
+        // was drawn a moment ago by the game's clock, at this size and in this viewport. (Frames
+        // drawn without the world in between, a preview of an item say, leave it as it is.)
+        let scaler = Self::scaler_for(s, cx);
+        let last = s.last.filter(|l| {
+            s.valid
+                && s.upscaled == scaler.is_some()
+                && (now - l.clock).abs() <= HISTORY_KEPT
+                && l.size == size
+                && l.viewport == cam.viewport
+        });
+        s.blended = last.is_some();
+        let viewport = viewport_of(cx);
+        queue.write_buffer(
+            &s.device_objects(&device).params,
+            0,
+            &Self::constants(cx.frame, last.as_ref(), viewport, size)
+                .iter()
+                .flat_map(|f| f.to_le_bytes())
+                .collect::<Vec<u8>>(),
+        );
+        if let Some(scaler) = scaler {
+            s.pending = Self::upscale_inputs(s, cx, scaler, &motion, last.is_none(), viewport)?;
+            s.upscaled = true;
+            s.valid = true;
+            s.last = Some(LastFrame {
+                view_projection: cam.projection * cam.view,
+                shift: cam.block_shift,
+                clock: now,
+                viewport: cam.viewport,
+                size,
+            });
+            return Ok(());
+        }
+        s.upscaled = false;
         let history: Vec<wgpu::TextureView> =
             [ResourceName::TaaHistory0, ResourceName::TaaHistory1]
                 .into_iter()
@@ -1037,31 +1328,6 @@ impl HifiPass for Resolve {
                     )
                 })
                 .collect::<Result<_, _>>()?;
-        let Some(motion) = texture_of(cx, ResourceName::TaaMotion) else {
-            s.reset();
-            return Ok(());
-        };
-        let cam = cx.frame.camera;
-        let now = cx.frame.time;
-        // The history holds the frames before this one only when the last frame drawn with it
-        // was drawn a moment ago by the game's clock, at this size and in this viewport. (Frames
-        // drawn without the world in between, a preview of an item say, leave it as it is.)
-        let last = s.last.filter(|l| {
-            s.valid
-                && (now - l.clock).abs() <= HISTORY_KEPT
-                && l.size == size
-                && l.viewport == cam.viewport
-        });
-        s.blended = last.is_some();
-        let viewport = viewport_of(cx);
-        queue.write_buffer(
-            &s.device_objects(&device).params,
-            0,
-            &Self::constants(cx.frame, last.as_ref(), viewport, size)
-                .iter()
-                .flat_map(|f| f.to_le_bytes())
-                .collect::<Vec<u8>>(),
-        );
         let Some(gpu) = s.gpu.as_ref() else {
             return Ok(());
         };
@@ -1104,6 +1370,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pictures_are_read_finer_only_as_far_as_the_frame_is_enlarged() {
+        assert!((mip_bias((800, 500), (1600, 1000)) + 1.0).abs() < 1e-5);
+        assert!(mip_bias((1600, 1000), (1600, 1000)).abs() < 1e-5);
+        assert!(
+            mip_bias((1600, 1000), (800, 500)).abs() < 1e-5,
+            "never coarser"
+        );
+        let mut block = PerFrameConstants {
+            screen: [0.5, -1.4, 0.0, 0.0],
+            ..PerFrameConstants::default()
+        };
+        let shift = Shift {
+            mip_bias: -1.0,
+            ..Shift::new(Vec2::ZERO, 1.5)
+        };
+        jitter_block(&mut block, shift);
+        assert_eq!(
+            block.screen[0], 0.0,
+            "the brightness is the finished picture's"
+        );
+        assert_eq!(block.screen[1], -1.0);
+        assert_eq!(block.screen[2], 1.5);
+    }
+
+    #[test]
     fn the_anti_aliasing_shader_parses_and_validates_with_its_entry_points() {
         let source = shader_source();
         let module = naga::front::wgsl::parse_str(&source)
@@ -1121,7 +1412,13 @@ mod tests {
             .collect();
         assert_eq!(
             entries,
-            ["vs", "fs_resolve", "fs_sharpen", "fs_translucent"]
+            [
+                "vs",
+                "fs_resolve",
+                "fs_sharpen",
+                "fs_upscale_inputs",
+                "fs_translucent"
+            ]
         );
     }
 
@@ -1152,12 +1449,27 @@ mod tests {
     }
 
     #[test]
+    fn the_jitter_grows_with_how_much_the_picture_is_enlarged_and_never_repeats_sooner() {
+        assert_eq!(phases((1920, 1080), (1920, 1080)), SEQUENCE);
+        assert_eq!(phases((960, 540), (1920, 1080)), 32);
+        assert_eq!(phases((1286, 724), (1920, 1080)), 18);
+        let viewport = [0, 0, 960, 540];
+        let offsets: Vec<Vec2> = (0..32).map(|n| jitter_over(n, 32, viewport).0).collect();
+        for (i, a) in offsets.iter().enumerate() {
+            assert!(a.x.abs() * 480.0 <= 0.5 + 1e-4 && a.y.abs() * 270.0 <= 0.5 + 1e-4);
+            for b in &offsets[i + 1..] {
+                assert!(a.distance(*b) > 1e-6);
+            }
+        }
+        assert_eq!(jitter_over(32, 32, viewport).0, offsets[0]);
+    }
+
+    #[test]
     fn a_jittered_block_moves_every_point_by_the_jitter_on_screen() {
         let to_clip = Mat4::perspective_lh(1.0, 1.6, 0.5, 1000.0)
             * Mat4::look_at_lh(Vec3::new(1.0, 2.0, -5.0), Vec3::ZERO, Vec3::Y);
         let mut block = PerFrameConstants {
             view_proj: to_clip.transpose().to_cols_array(),
-            screen: [0.5, 0.0, 0.0, 0.0],
             ..PerFrameConstants::default()
         };
         let j = Vec2::new(0.002, -0.001);
@@ -1171,10 +1483,6 @@ mod tests {
             assert!((b.z / b.w - a.z / a.w).abs() < 1e-7, "the depth is kept");
         }
         assert_eq!(block.screen[2], 1.5);
-        assert_eq!(
-            block.screen[0], 0.0,
-            "the brightness is the finished picture's"
-        );
     }
 
     fn id(vertices: u32) -> Identity {

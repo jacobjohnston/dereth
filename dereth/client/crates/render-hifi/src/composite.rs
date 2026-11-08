@@ -731,35 +731,20 @@ impl Compositor {
         cx.replay(range, &mut pass, filter);
     }
 
-    /// Copy `picture` into the frame target texel for texel; with the depth view asked for,
-    /// show `depth` inside the world viewport instead. Where the world was drawn at fewer pixels
-    /// than the frame has, the picture is enlarged to the frame and sharpened, and `depth` is
-    /// enlarged into a depth of the frame's size, which is returned: what the interface drawn
-    /// over the world tests against.
-    ///
-    /// # Errors
-    /// [`HifiError::Budget`] when the enlarged depth does not fit the video memory budget.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    pub fn composite(
+    /// The pipelines and bindings of the composite of `picture` and `depth`, its constants written.
+    fn prepared(
         &mut self,
-        cx: &mut SidecarContext<'_>,
-        resources: &mut Resources,
-        encoder: &mut wgpu::CommandEncoder,
+        cx: &SidecarContext<'_>,
         picture: &wgpu::TextureView,
         depth: &wgpu::TextureView,
-        target: &wgpu::TextureView,
-        view: DebugView,
         near_far: (f32, f32),
-        timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
-    ) -> Result<Option<wgpu::TextureView>, HifiError> {
+    ) -> Option<(&Pipelines, wgpu::BindGroup)> {
         let format = cx.surface_format();
         if self.pipelines.as_ref().is_none_or(|p| p.format != format) {
             let built = self.pre_pipelines.take().filter(|p| p.format == format);
             self.pipelines = Some(built.unwrap_or_else(|| make_pipelines(cx.device(), format)));
         }
-        let Some(p) = self.pipelines.as_ref() else {
-            return Ok(None);
-        };
+        let p = self.pipelines.as_ref()?;
         let viewport = cx.output_viewport().map_or([0.0; 4], |v| {
             #[allow(clippy::cast_precision_loss)] // pixel extents
             [v.x as f32, v.y as f32, v.width as f32, v.height as f32]
@@ -808,40 +793,56 @@ impl Compositor {
                 },
             ],
         });
+        Some((p, bind))
+    }
+
+    /// The world's `depth`, enlarged to the frame for a frame about to go on at the frame's size.
+    /// Its constants are written here, so it must be submitted before the composite's are.
+    ///
+    /// # Errors
+    /// [`HifiError::Budget`] when it does not fit the video memory budget.
+    pub fn enlarge_depth(
+        &mut self,
+        cx: &mut SidecarContext<'_>,
+        resources: &mut Resources,
+        encoder: &mut wgpu::CommandEncoder,
+        picture: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        near_far: (f32, f32),
+    ) -> Result<Option<wgpu::TextureView>, HifiError> {
+        let Some((p, bind)) = self.prepared(cx, picture, depth, near_far) else {
+            return Ok(None);
+        };
+        enlarged_depth(p, &bind, cx, resources, encoder).map(Some)
+    }
+
+    /// Copy `picture` into the frame target texel for texel; with the depth view asked for,
+    /// show `depth` inside the world viewport instead. Where the world was drawn at fewer pixels
+    /// than the frame has, the picture is enlarged to the frame and sharpened, and `depth` is
+    /// enlarged into a depth of the frame's size, which is returned: what the interface drawn
+    /// over the world tests against.
+    ///
+    /// # Errors
+    /// [`HifiError::Budget`] when the enlarged depth does not fit the video memory budget.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub fn composite(
+        &mut self,
+        cx: &mut SidecarContext<'_>,
+        resources: &mut Resources,
+        encoder: &mut wgpu::CommandEncoder,
+        picture: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        view: DebugView,
+        near_far: (f32, f32),
+        timestamps: Option<wgpu::RenderPassTimestampWrites<'_>>,
+    ) -> Result<Option<wgpu::TextureView>, HifiError> {
+        let Some((p, bind)) = self.prepared(cx, picture, depth, near_far) else {
+            return Ok(None);
+        };
         let scaled = cx.scaled();
         let enlarged = if scaled {
-            let view = resources.texture(
-                cx.device(),
-                ResourceName::WorldDepthOutput,
-                TextureSpec {
-                    width: ow,
-                    height: oh,
-                    format: SidecarContext::depth_format(),
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | wgpu::TextureUsages::TEXTURE_BINDING,
-                },
-            )?;
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("composite depth"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            cx.count_pass();
-            pass.set_pipeline(&p.scale_depth);
-            pass.set_bind_group(0, &bind, &[]);
-            pass.draw(0..3, 0..1);
-            drop(pass);
-            Some(view)
+            Some(enlarged_depth(p, &bind, cx, resources, encoder)?)
         } else {
             None
         };
@@ -871,6 +872,48 @@ impl Compositor {
         pass.draw(0..3, 0..1);
         Ok(enlarged)
     }
+}
+
+/// The world's depth drawn at fewer pixels, enlarged to the frame.
+fn enlarged_depth(
+    p: &Pipelines,
+    bind: &wgpu::BindGroup,
+    cx: &mut SidecarContext<'_>,
+    resources: &mut Resources,
+    encoder: &mut wgpu::CommandEncoder,
+) -> Result<wgpu::TextureView, HifiError> {
+    let (ow, oh) = cx.output_size();
+    let view = resources.texture(
+        cx.device(),
+        ResourceName::WorldDepthOutput,
+        TextureSpec {
+            width: ow,
+            height: oh,
+            format: SidecarContext::depth_format(),
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        },
+    )?;
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("composite depth"),
+        color_attachments: &[],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &view,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(1.0),
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    cx.count_pass();
+    pass.set_pipeline(&p.scale_depth);
+    pass.set_bind_group(0, bind, &[]);
+    pass.draw(0..3, 0..1);
+    drop(pass);
+    Ok(view)
 }
 
 fn make_pipelines(device: &wgpu::Device, format: wgpu::TextureFormat) -> Pipelines {

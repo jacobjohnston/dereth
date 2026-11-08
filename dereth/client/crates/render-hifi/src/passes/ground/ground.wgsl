@@ -30,7 +30,8 @@ struct Params {
     render_to_view: mat4x4<f32>,
     // The world viewport: x, y, width, height, in target pixels.
     viewport: vec4<f32>,
-    // xyz the eye, render space.
+    // xyz the eye, render space; w how far a pixel's step shrinks for reading its pictures, for
+    // the anti-aliasing's enlargement.
     eye: vec4<f32>,
     // xyz toward the sun.
     sun_dir: vec4<f32>,
@@ -883,8 +884,8 @@ fn fs_ground(@builtin(position) p: vec4<f32>) -> Out {
     at.cell_uv = cell_uv;
     at.cell_dx = cell_dx;
     at.cell_dy = cell_dy;
-    at.dx = dx;
-    at.dy = dy;
+    at.dx = dx * params.eye.w;
+    at.dy = dy * params.eye.w;
     at.dist = dist;
     at.cell_m = cell_m;
     at.near = near;
@@ -904,7 +905,7 @@ fn fs_ground(@builtin(position) p: vec4<f32>) -> Out {
         let lo = 0.72 - 0.45 * away;
         let share = params.water.w * m.mud * away * smoothstep(lo, lo + 0.16, n);
         if (share > 0.002) {
-            let grass = plain_ground(grass_beside(at.gt), pos, cell_uv, dx, dy, dist, cell_m);
+            let grass = plain_ground(grass_beside(at.gt), pos, cell_uv, at.dx, at.dy, dist, cell_m);
             m = mix_layer(m, grass, height_blend(m.height, grass.height, share, near));
         }
     }

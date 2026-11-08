@@ -1009,6 +1009,11 @@ mod imp {
             SceneRenderer::hifi_availability(self)
         }
 
+        #[cfg(feature = "hifi")]
+        fn render_scale_in_use(&self) -> Option<u32> {
+            SceneRenderer::render_scale_in_use(self)
+        }
+
         fn render_context(
             &self,
             world: Option<&dereth_client_runtime::world_state::WorldState>,

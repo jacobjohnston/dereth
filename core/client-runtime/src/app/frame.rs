@@ -454,8 +454,14 @@ impl<S: Shell> App<S> {
             }
             // The performance panel, over whatever the interface drew.
             if perf_panel && self.perf_font {
-                let items =
-                    crate::perf::panel_items(&self.perf.summary().lines(), self.present.size());
+                #[cfg_attr(not(feature = "hifi"), allow(unused_mut))]
+                let mut lines = self.perf.summary().lines();
+                // The render scale drawn now, which a Dynamic render scale moves.
+                #[cfg(feature = "hifi")]
+                if let Some(scale) = self.present.render_scale_in_use() {
+                    lines.push(format!("{:<9} {scale:5}%", "SCALE"));
+                }
+                let items = crate::perf::panel_items(&lines, self.present.size());
                 if let Err(e) = self.present.draw_overlay(&items) {
                     tracing::warn!("the performance panel failed: {e}");
                 }

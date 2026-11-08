@@ -135,6 +135,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
   map's colours, with every major town marked and named on it, and the cottages, villas and
   mansions as you zoom in. The wheel zooms in on it and a drag pans around it.
 - Better Lighting: frames draw faster outdoors, about a fifth in a forest and nearly a third in open country, with the same look.
+- Fixed the paper doll and the character previews showing an item a world's patch changed in its old look.
 
 ## 0.4.14 (2026-11-05)
 

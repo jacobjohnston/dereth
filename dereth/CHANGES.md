@@ -26,6 +26,22 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Better Lighting: the water has waves as large as it is, the sea's swell and surf, a lake's chop and hardly any on a river; foam gathers along the shore and on the crests, and the sun's light ripples over a shallow bed.
 - Better Lighting: near the camera, a body moving through the water stirs it, and the waves spread, cross, meet the shore and die away. Graphics without compute shaders ring the water round a body standing in it instead, as before.
 - Better Lighting: far water is no longer a glassy mirror. Its reflections soften and stretch with distance, and the sun's glitter spreads wider, as on rippled water.
+## 0.4.15 (2026-11-07)
+- The relay that plays AC1999 now comes with Dereth.
+- Logging in now reports the world's player count to the hub, with no opt-out.
+- Fixed a crash on exit on Linux with Wayland and NVIDIA.
+- Launch: the character page and character options show only what 1999's did.
+- Launch: spells ask for the tapers of your own account.
+- A window nobody can see no longer runs flat out.
+- macOS: Command works as Control, for shortcuts and copy and paste too.
+- macOS: the client asks for Game Mode.
+- macOS: drag the window to any size; it reopens that size, in points on Retina.
+- macOS: Horizon draws at the screen's own pixels, sharp in a window too, with a new render scale option.
+- Horizon: lighter text outlines, easier to read over a bright sky.
+- macOS: fixed the game running at 10 frames a second after starting behind another window.
+- macOS: logging out of full screen puts the window back where it was.
+- Better Lighting: smoke now covers distant trees instead of fading into the haze.
+- Better Lighting: glows and torches add as they do in the ordinary picture.
 
 ## 0.4.14 (2026-11-05)
 

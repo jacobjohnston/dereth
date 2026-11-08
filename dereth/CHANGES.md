@@ -120,6 +120,9 @@ pre-release leaves it for the final release, and its notes show it as it is);
 - Weather Sounds: rain now patters and hisses, harder in a storm with the wind roaring in its gusts and muffled indoors, made as it plays so it never repeats. A new Weather Sounds row in the sound options sets how loud the rain, the wind and the thunder are.
 - Better Lighting: everything past the blocks round the viewer is drawn out to the landscape's draw distance: retail's scenery, statics and buildings as pictures baked from them as the world loads, an art pack's models among them, shaded as the objects are and sparse where their crowns are.
 - Better Lighting: objects keep their whole shape out to the edge of the loaded blocks, without retail's simpler stand-ins far off.
+- Horizon: a new, far more detailed world map, drawn from the game's own files in the original
+  map's colours, with every major town marked and named on it, and the cottages, villas and
+  mansions as you zoom in. The wheel zooms in on it and a drag pans around it.
 
 ## 0.4.14 (2026-11-05)
 

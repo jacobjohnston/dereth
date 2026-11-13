@@ -34,6 +34,9 @@ CONFIG = ROOT / "build.ini"
 # The launcher's choices: its Library and what each world plays with.
 LAUNCHER_STATE = Path.home() / "Library/Application Support/Dereth/launcher/launcher-state.json"
 
+# Builds are taken from this branch only; upstream builds lack its custom server rules.
+BRANCH = "local/combined"
+
 ACCOUNT_FILE = "local-account.ini"
 # How long the world may take to load before the client is started anyway.
 READY_SECONDS = 180
@@ -64,11 +67,20 @@ def load_config():
         raise Failed(f"{CONFIG.name} is missing {e}") from None
 
 
+def on_branch(commit):
+    """Whether `commit` (a build folder's name) is on BRANCH."""
+    return subprocess.run(
+        ["git", "merge-base", "--is-ancestor", commit, BRANCH],
+        cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+
 def newest(out_dir, pattern, what):
-    """The newest build matching `pattern` under `out_dir`, by when it was written."""
-    found = [p for p in out_dir.glob(pattern) if p.exists()]
+    """The newest build of BRANCH matching `pattern` under `out_dir`, by when it was written."""
+    found = [p for p in out_dir.glob(pattern)
+             if p.exists() and on_branch(p.relative_to(out_dir).parts[0])]
     if not found:
-        raise Failed(f"no {what} in {out_dir}: run python3 build.py --allow-dirty")
+        raise Failed(f"no {what} built from {BRANCH} in {out_dir}: run python3 build.py --allow-dirty")
     return max(found, key=lambda p: p.stat().st_mtime)
 
 

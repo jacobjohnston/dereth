@@ -1786,7 +1786,10 @@ pub fn handle_gamecast(w: &mut World, session: Option<SessionId>, parameters: &[
 /// `addspell <spellid>`: adds the specified spell to your own spellbook.
 pub fn handle_add_spell(w: &mut World, session: Option<SessionId>, parameters: &[String]) {
     if let Some(spell_id) = try_parse_spell_id(&parameters[0], true) {
-        if spell_id.is_defined() {
+        // Not ACE: a spell of this world's data overlay is in no enum.
+        if spell_id.is_defined()
+            || spell_id.0 == empyrean_world::world_objects::world_object_magic::ETHANGARS_WRATH
+        {
             let player = session_player(w, require(session));
             player_learn_spell_with_networking(w, player, spell_id.0);
         }

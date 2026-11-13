@@ -507,7 +507,10 @@ pub fn get_caster_elemental_damage_modifier(
         return 1.0;
     };
     let wo = object(w, weapon);
-    if !wo.is_caster() || wo.w_damage_type() != damage_type {
+    // Not ACE: a caster of several elements has its bonus on each, as Ethangar's Staff does.
+    if !wo.is_caster()
+        || (wo.w_damage_type() != damage_type && wo.w_damage_type().0 & damage_type.0 == 0)
+    {
         return 1.0;
     }
 

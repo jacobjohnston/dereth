@@ -15,6 +15,9 @@ pre-release leaves it for the final release, and its notes show it as it is);
 ## Unreleased
 
 - `@god` and `@ungod` work on a character of any era, not only the end of retail's.
+- `set-characterplus <character> [on|off]` puts the + before a character's name, or takes it away.
+- An administrator can learn Ethangar's Wrath (spell 6341, from a world's data overlay) with `@addspell 6341`: it strikes down every creature attacking them and the one they have selected.
+- A caster weapon of several elements gives its damage bonus to each of them.
 
 ## 0.3.13 (2026-11-10)
 - Dereth players download a world's own data much faster.

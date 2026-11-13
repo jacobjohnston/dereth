@@ -466,6 +466,13 @@ pub const ADMIN_COMMANDS: &[AdminCommand] = {
             "Set a character's access",
         ),
         c(
+            "set-characterplus",
+            Pl,
+            false,
+            "character [on|off]",
+            "Put the + before a character's name",
+        ),
+        c(
             "set-accountaccess",
             Pl,
             true,

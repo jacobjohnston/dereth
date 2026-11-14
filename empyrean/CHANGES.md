@@ -13,6 +13,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 ([`RELEASING.md`](RELEASING.md)).
 
 ## Unreleased
+- A world can publish its places for a map at /places on its status endpoint (`publish_places`), and `--write-places` writes them to a file.
 
 ## 0.3.13 (2026-11-10)
 - Dereth players download a world's own data much faster.

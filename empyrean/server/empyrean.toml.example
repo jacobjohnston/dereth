@@ -111,6 +111,12 @@ status_public_url = ""
 # route through portals. Off by default; it needs status_address.
 publish_portals = false
 
+# default: false (Empyrean only)
+# Also serve GET /places on the status endpoint: the world's places for a map (towns,
+# houses, portals, lifestones, vendors, NPCs, dungeons and spawn areas) as JSON. Anyone
+# who can reach the endpoint can read them. Off by default; it needs status_address.
+publish_places = false
+
 # default: true (Empyrean only)
 # Read console commands from standard input. Set it false when the server runs as a
 # service or in a container with no terminal.

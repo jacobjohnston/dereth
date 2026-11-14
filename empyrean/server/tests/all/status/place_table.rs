@@ -272,6 +272,16 @@ fn towns_and_landmarks_are_those_of_the_world_s_era_and_a_town_stands_where_its_
     assert!(!has(&launch, "Fiun Outpost") && has(&eor, "Fiun Outpost"));
     assert!(!has(&places(EraId::Infiltration), "Silyun"));
     assert!(has(&launch, "Stonehold") && !has(&launch, "Bandit Castle"));
+    assert!(has(&launch, "The Pit") && !has(&places(EraId::Infiltration), "Westwatch"));
+    let castle = eor
+        .iter()
+        .find(|p| p.name == "Bandit Castle")
+        .expect("Bandit Castle");
+    assert_eq!(
+        (castle.ns, castle.ew),
+        (66.4, 49.9),
+        "where the wiki puts it"
+    );
 
     let town = |name: &str| eor.iter().find(|p| p.name == name).expect(name).clone();
     let holtburg = town("Holtburg");

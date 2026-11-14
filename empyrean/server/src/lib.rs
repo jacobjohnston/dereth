@@ -29,6 +29,7 @@ pub mod dat_identity;
 pub mod database_manager;
 pub mod federation_link;
 pub mod guid_manager_boot;
+pub mod place_table;
 pub mod portal_table;
 pub mod status_endpoint;
 pub mod update;

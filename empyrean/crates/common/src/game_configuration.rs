@@ -127,6 +127,12 @@ pub struct GameConfiguration {
     /// DIVERGE: an extra key; ACE publishes no portal table.
     #[serde(rename = "PublishPortals")]
     pub publish_portals: bool,
+    /// Not ACE: whether the status endpoint also serves `GET /places`, the world's places for a
+    /// map: towns, houses, portals, lifestones, vendors, NPCs, dungeons and spawn areas (default
+    /// false).
+    /// DIVERGE: an extra key; ACE publishes no places.
+    #[serde(rename = "PublishPlaces")]
+    pub publish_places: bool,
 
     /// Not ACE: whether the server reads console commands from its standard input (default true).
     /// DIVERGE: ACE turns its console off with the environment variable `ACE_NONINTERACTIVE_CONSOLE`.
@@ -234,6 +240,7 @@ impl Default for GameConfiguration {
             status_address: String::new(),
             status_public_url: String::new(),
             publish_portals: false,
+            publish_places: false,
             interactive_console: true,
             watchdog_seconds: 300,
             admin_channel: true,

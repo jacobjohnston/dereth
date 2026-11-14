@@ -86,6 +86,10 @@ pub struct Options {
     /// Not ACE, hidden: `--update-test-version <version>`, for the updater's own tests: the updater
     /// takes this process for that version (`crate::server_update::TEST_VERSION_FLAG`).
     pub update_test_version: Option<String>,
+    /// Not ACE: `--write-places <file>`: write the world's places for a map (the document
+    /// `GET /places` serves, [`empyrean_server::place_table`]) to `<file>` and exit, without
+    /// opening the shard or starting the world.
+    pub write_places: Option<PathBuf>,
 }
 
 impl Options {
@@ -131,6 +135,12 @@ impl Options {
                     options.update_test_version =
                         Some(args.next().ok_or("--update-test-version needs a version")?)
                 }
+                "--write-places" => {
+                    options.write_places = Some(PathBuf::from(
+                        args.next()
+                            .ok_or("--write-places needs the path to write")?,
+                    ))
+                }
                 "--help" | "-h" => return Err(USAGE.to_owned()),
                 other => return Err(format!("unknown argument: {other}")),
             }
@@ -149,7 +159,7 @@ impl Options {
 }
 
 /// The usage line (`--help`).
-pub const USAGE: &str = "usage: empyrean-server [--config <empyrean.toml>] [--run-for <seconds>] [--status <ip>:<port>]\n       empyrean-server --write-config [<path>] [--from <Config.js>] [--out <path>]\n       empyrean-server --version";
+pub const USAGE: &str = "usage: empyrean-server [--config <empyrean.toml>] [--run-for <seconds>] [--status <ip>:<port>]\n       empyrean-server [--config <empyrean.toml>] --write-places <file>\n       empyrean-server --write-config [<path>] [--from <Config.js>] [--out <path>]\n       empyrean-server --version";
 
 // ACE: Program.Main
 /// Brings the server up, runs it until Ctrl-C or `--run-for`, and shuts it down.
@@ -249,7 +259,9 @@ pub fn main(options: &Options) -> ExitCode {
     } else {
         log::info!("DAT Patching Disabled...");
     }
-    start_bulk_patch(&config);
+    if options.write_places.is_none() {
+        start_bulk_patch(&config);
+    }
 
     log::info!("Initializing DatabaseManager...");
     let clock = Arc::new(SystemClock::new());
@@ -278,6 +290,9 @@ pub fn main(options: &Options) -> ExitCode {
         log::error!("{message}");
         return ExitCode::FAILURE;
     }
+    if let Some(path) = &options.write_places {
+        return write_places(&config, &content, &dats, path);
+    }
     // DatabaseManager.Shard and .Authentication: shard.db and auth.db (database.shard_db_path,
     // database.auth_db_path).
     let opened = database_manager::open_databases(
@@ -304,6 +319,7 @@ pub fn main(options: &Options) -> ExitCode {
     let world_loop_ended = Arc::new(AtomicBool::new(false));
     // Not ACE: the status endpoint's portal table reads the same content, off the world thread.
     let portal_content = Arc::clone(&content);
+    let place_dats = config.server.publish_places.then(|| Arc::clone(&dats));
     let world_thread = {
         let loop_ended = Arc::clone(&world_loop_ended);
         let clock = Arc::clone(&clock);
@@ -509,7 +525,14 @@ pub fn main(options: &Options) -> ExitCode {
     // ACE: ModManager.RegisterCommands
     // Not ported: without a mod loader there are no mod commands to register.
 
-    let status = start_status_endpoint(options, &config, &commands, started, &portal_content);
+    let status = start_status_endpoint(
+        options,
+        &config,
+        &commands,
+        started,
+        &portal_content,
+        place_dats,
+    );
 
     // Not ACE: the admin channel (`server.admin_channel`), never in the updater's health check,
     // which must leave the running server's file alone.
@@ -1259,13 +1282,15 @@ fn start_bulk_patch(config: &MasterConfiguration) {
 
 /// Not ACE: starts the status endpoint when `--status` or `server.status_address` names an
 /// address. Each request takes its snapshot on the world thread through `commands`. With
-/// `server.publish_portals` on, it also serves `content`'s portal table.
+/// `server.publish_portals` on, it also serves `content`'s portal table, and with
+/// `server.publish_places` on its places, rooms told apart by `dats`.
 fn start_status_endpoint(
     options: &Options,
     config: &MasterConfiguration,
     commands: &Sender<WorldCommand>,
     started: std::time::Instant,
     content: &Arc<dyn WorldDatabase>,
+    dats: Option<Arc<DatManager>>,
 ) -> Option<empyrean_server::status_endpoint::StatusEndpoint> {
     use empyrean_server::status_endpoint::{self, StatusSnapshot};
     let addr = match status_endpoint::status_address(
@@ -1309,19 +1334,61 @@ fn start_status_endpoint(
             Arc::clone(content),
         )
     });
-    let publishing = portals.is_some();
-    match status_endpoint::start(addr, allowed_origins, portals, snapshot) {
+    let places = config.server.publish_places.then(|| {
+        empyrean_server::place_table::PlaceTable::new(
+            &config.server.world_name,
+            config.era.profile,
+            Arc::clone(content),
+            dats,
+        )
+    });
+    let also = match (portals.is_some(), places.is_some()) {
+        (true, true) => ", /portals and /places",
+        (true, false) => " and /portals",
+        (false, true) => " and /places",
+        (false, false) => "",
+    };
+    match status_endpoint::start_publishing(addr, allowed_origins, portals, places, snapshot) {
         Ok(endpoint) => {
             log::info!(
-                "Status endpoint: http://{}/status and /health{}",
+                "Status endpoint: http://{}/status, /health{also}",
                 endpoint.local_addr(),
-                if publishing { " and /portals" } else { "" }
             );
             Some(endpoint)
         }
         Err(e) => {
             log::error!("Status endpoint not started: {e}");
             None
+        }
+    }
+}
+
+/// Not ACE: `--write-places <file>`: writes the places document of `content` to `path`.
+fn write_places(
+    config: &MasterConfiguration,
+    content: &Arc<dyn WorldDatabase>,
+    dats: &DatManager,
+    path: &std::path::Path,
+) -> ExitCode {
+    use empyrean_server::place_table;
+    let rooms = place_table::dat_rooms(dats);
+    let document = place_table::document(
+        &config.server.world_name,
+        config.era.profile,
+        &**content,
+        Some(&rooms),
+    );
+    match std::fs::write(path, document) {
+        Ok(()) => {
+            log::info!(
+                "The world's places are written to {}",
+                absolute(path).display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            log::error!("Unable to write {}: {e}", absolute(path).display());
+            ExitCode::FAILURE
         }
     }
 }

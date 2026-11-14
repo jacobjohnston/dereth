@@ -213,6 +213,13 @@ pub const SECTIONS: &[Section] = &[
                  route through portals. Off by default; it needs status_address.",
             ),
             e(
+                "publish_places",
+                "PublishPlaces",
+                "Also serve GET /places on the status endpoint: the world's places for a map (towns,\n\
+                 houses, portals, lifestones, vendors, NPCs, dungeons and spawn areas) as JSON. Anyone\n\
+                 who can reach the endpoint can read them. Off by default; it needs status_address.",
+            ),
+            e(
                 "interactive_console",
                 "InteractiveConsole",
                 "Read console commands from standard input. Set it false when the server runs as a\n\

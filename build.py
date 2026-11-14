@@ -174,11 +174,11 @@ def unpack_outputs(stage, out):
     return unpacked
 
 
-def package(product, stage, cfg, env, allow_dirty):
+def package(product, stage, cfg, env, allow_dirty, extra=()):
     """Run the project's packager for `product`, writing into a new `stage`."""
     shutil.rmtree(stage, ignore_errors=True)
-    command = ["cargo", "xtask", "package", product, "--out", str(stage)]
-    if product == "dereth":
+    command = ["cargo", "xtask", "package", product, "--out", str(stage), *extra]
+    if product in ("dereth", "launcher"):
         command += ["--moltenvk", str(cfg["moltenvk_dir"])]
     if allow_dirty:
         command.append("--allow-dirty")
@@ -188,8 +188,11 @@ def package(product, stage, cfg, env, allow_dirty):
 
 
 def build_dereth(out, cfg, env, allow_dirty):
+    # The game's package is built around the launcher's own release, made here from this tree.
+    launcher = ROOT / STAGE / "launcher"
+    package("launcher", launcher, cfg, env, allow_dirty)
     stage = ROOT / STAGE / "dereth"
-    package("dereth", stage, cfg, env, allow_dirty)
+    package("dereth", stage, cfg, env, allow_dirty, ["--launcher", str(launcher)])
     apps = [p for p in unpack_outputs(stage, out) if p.suffix == ".app"]
     if not apps:
         raise Failed(f"no .app among the archives in {stage}")

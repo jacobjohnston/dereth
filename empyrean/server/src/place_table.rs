@@ -305,17 +305,23 @@ fn coords_text((ns, ew): (f64, f64)) -> String {
     )
 }
 
-/// A portal's level limits as a few words: `levels 30+`, `levels 30-60`, `up to level 15`.
+/// A portal's level limits as a sentence: `For levels 30 to 60.`
 fn limits_text(w: &Weenie) -> Option<String> {
     match (
         int_of(w, PropertyInt::MinLevel).filter(|&l| l > 0),
         int_of(w, PropertyInt::MaxLevel).filter(|&l| l > 0),
     ) {
-        (Some(lo), Some(hi)) => Some(format!("levels {lo}-{hi}")),
-        (Some(lo), None) => Some(format!("levels {lo}+")),
-        (None, Some(hi)) => Some(format!("up to level {hi}")),
+        (Some(lo), Some(hi)) => Some(format!("For levels {lo} to {hi}.")),
+        (Some(lo), None) => Some(format!("For levels {lo} and up.")),
+        (None, Some(hi)) => Some(format!("For levels up to {hi}.")),
         (None, None) => None,
     }
+}
+
+/// `lines` as a detail, one sentence a line; `None` for none.
+fn lines(lines: impl IntoIterator<Item = String>) -> Option<String> {
+    let text: Vec<String> = lines.into_iter().collect();
+    (!text.is_empty()).then(|| text.join("\n"))
 }
 
 /// Creatures, each with its level.
@@ -385,27 +391,55 @@ impl Inside {
         }
     }
 
-    /// `lifestone, 3 vendors, 12 NPCs, levels 20-45: Drudge Skulker, Mosswart`.
+    /// What it holds as sentences, one a line: `Holds a lifestone and 3 vendors.` and
+    /// `Drudge Skulker and Mosswart spawn here at levels 2 to 6.`
     fn text(&self) -> Option<String> {
-        let mut parts = Vec::new();
         let count = |n: u32, one: &str, many: &str| match n {
             0 => None,
-            1 => Some(format!("1 {one}")),
+            1 => Some(one.to_owned()),
             n => Some(format!("{n} {many}")),
         };
-        if self.lifestones > 0 {
-            parts.push("lifestone".to_owned());
+        let held: Vec<String> = [
+            count(self.lifestones, "a lifestone", "lifestones"),
+            count(self.vendors, "a vendor", "vendors"),
+            count(self.npcs, "a person to talk to", "people to talk to"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let mut out = Vec::new();
+        if !held.is_empty() {
+            out.push(format!("Holds {}.", and_list(&held)));
         }
-        parts.extend(count(self.vendors, "vendor", "vendors"));
-        parts.extend(count(self.npcs, "NPC", "NPCs"));
+        out.extend(self.spawn_text());
+        lines(out)
+    }
+
+    /// Its creatures as a sentence: `Drudge Skulker and Mosswart spawn here at levels 2 to 6.`
+    fn spawn_text(&self) -> Option<String> {
+        if self.creatures.is_empty() {
+            return None;
+        }
         let named = most_common(&self.creatures, SPAWN_NAMED);
-        match (self.levels, named.is_empty()) {
-            (Some((lo, hi)), false) if lo == hi => parts.push(format!("level {lo}: {named}")),
-            (Some((lo, hi)), false) => parts.push(format!("levels {lo}-{hi}: {named}")),
-            (None, false) => parts.push(named),
-            _ => {}
-        }
-        (!parts.is_empty()).then(|| parts.join(", "))
+        let verb = if self.creatures.len() == 1 {
+            "spawns"
+        } else {
+            "spawn"
+        };
+        Some(match self.levels {
+            Some((lo, hi)) if lo == hi => format!("{named} {verb} here at level {lo}."),
+            Some((lo, hi)) => format!("{named} {verb} here at levels {lo} to {hi}."),
+            None => format!("{named} {verb} here."),
+        })
+    }
+}
+
+/// `items` joined as a list in a sentence: `a, b and c`.
+fn and_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
 
@@ -413,12 +447,11 @@ impl Inside {
 fn most_common(counts: &BTreeMap<String, u32>, n: usize) -> String {
     let mut names: Vec<(&String, &u32)> = counts.iter().collect();
     names.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-    let shown: Vec<&str> = names.iter().take(n).map(|(s, _)| s.as_str()).collect();
-    let mut text = shown.join(", ");
+    let mut shown: Vec<String> = names.iter().take(n).map(|(s, _)| (*s).clone()).collect();
     if names.len() > n {
-        text.push_str(&format!(" and {} more", names.len() - n));
+        shown.push(format!("{} more", names.len() - n));
     }
-    text
+    and_list(&shown)
 }
 
 /// Every place of `content` in a world playing `era`, in kind, then name, then spot order.
@@ -502,6 +535,25 @@ pub fn places(
         }
     }
 
+    // The apartments a dungeon leads to: its own, and those one portal further in (a block of
+    // apartments is reached through a hall of portals).
+    let mut onward: HashMap<u32, HashSet<u32>> = HashMap::new();
+    for (i, w) in portals.iter().filter(|(i, _)| !on_land(i.obj_cell_id)) {
+        if let Some((to, _, _)) = destination(w) {
+            onward
+                .entry(i.obj_cell_id >> 16)
+                .or_default()
+                .insert(to >> 16);
+        }
+    }
+    let apartments = |block: u32| -> u32 {
+        let own = |b: &u32| inside.get(b).map_or(0, |h| h.apartments);
+        own(&block)
+            + onward.get(&block).map_or(0, |next| {
+                next.iter().filter(|&&b| b != block).map(own).sum()
+            })
+    };
+
     // Portals on the land: into dungeons, apartments and meeting halls, or across the land.
     let mut drops: BTreeMap<(i64, i64), Place> = BTreeMap::new();
     for (i, w) in portals.iter().filter(|(i, _)| on_land(i.obj_cell_id)) {
@@ -513,30 +565,26 @@ pub fn places(
         let hall = name.contains("Meeting Hall");
         if !on_land(to) {
             let held = inside.get(&(to >> 16));
+            let flats = apartments(to >> 16);
             let (kind, detail) = if hall {
                 ("meeting_hall", None)
-            } else if let Some(n) = held.map(|h| h.apartments).filter(|&n| n > 0) {
-                ("apartments", Some(format!("{n} apartments")))
+            } else if flats > 0 {
+                ("apartments", Some(format!("Leads to {flats} apartments.")))
             } else {
                 ("dungeon", held.and_then(Inside::text))
             };
-            let detail = match (limits, detail) {
-                (Some(l), Some(d)) => Some(format!("{l}; {d}")),
-                (l, d) => l.or(d),
-            };
+            let detail = lines(limits.into_iter().chain(detail));
             out.push(place(kind, name, at(i), detail));
             continue;
         }
         let there = coords(to, x, y);
-        let detail = match limits {
-            Some(l) => format!("to {}, {l}", coords_text(there)),
-            None => format!("to {}", coords_text(there)),
-        };
+        let detail =
+            lines(std::iter::once(format!("Leads to {}.", coords_text(there))).chain(limits));
         out.push(place(
             if hall { "meeting_hall" } else { "portal" },
             name,
             at(i),
-            Some(detail),
+            detail,
         ));
         #[allow(clippy::cast_possible_truncation)]
         let key = (
@@ -556,7 +604,7 @@ pub fn places(
                     "drop",
                     name,
                     there,
-                    Some(format!("from {}", coords_text(at(i)))),
+                    Some(format!("A portal at {} leads here.", coords_text(at(i)))),
                 )
             });
     }
@@ -765,18 +813,11 @@ fn spawn_areas(
         if camp.creatures.is_empty() {
             continue;
         }
-        let detail = camp.levels.map(|(lo, hi)| {
-            if lo == hi {
-                format!("level {lo}")
-            } else {
-                format!("levels {lo}-{hi}")
-            }
-        });
         out.push(place(
             "camp",
             &most_common(&camp.creatures, SPAWN_NAMED),
             nearest_middle(spots),
-            detail,
+            camp.spawn_text(),
         ));
     }
     out

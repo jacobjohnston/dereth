@@ -225,12 +225,12 @@ fn what_stands_on_the_land_is_placed_and_a_dungeon_is_summed_up_at_its_entrance(
     assert_eq!(dungeon[0].name, "Drudge Hideout");
     assert_eq!(
         dungeon[0].detail.as_deref(),
-        Some("levels 5+; lifestone, 1 vendor, level 10: Drudge Skulker")
+        Some("For levels 5 and up.\nHolds a lifestone and a vendor.\nDrudge Skulker spawns here at level 10.")
     );
 
     let portal = of(&all, "portal");
     assert_eq!(portal.len(), 1);
-    assert_eq!(portal[0].detail.as_deref(), Some("to 33.7N 56.6E"));
+    assert_eq!(portal[0].detail.as_deref(), Some("Leads to 33.7N 56.6E."));
     let drop = of(&all, "drop");
     assert_eq!(drop.len(), 1);
     assert_eq!(drop[0].name, "Arwic Portal");
@@ -250,11 +250,17 @@ fn a_region_s_landblocks_are_one_spawn_area_and_what_is_placed_outdoors_is_a_cam
         "a lone landblock is not marked: {spawns:?}"
     );
     assert_eq!(spawns[0].name, "Low Swamp");
-    assert_eq!(spawns[0].detail.as_deref(), Some("level 5: Mosswart"));
+    assert_eq!(
+        spawns[0].detail.as_deref(),
+        Some("Mosswart spawns here at level 5.")
+    );
     let camps = of(&all, "camp");
     assert_eq!(camps.len(), 1, "{camps:?}");
     assert_eq!(camps[0].name, "Mud Golem");
-    assert_eq!(camps[0].detail.as_deref(), Some("level 30"));
+    assert_eq!(
+        camps[0].detail.as_deref(),
+        Some("Mud Golem spawns here at level 30.")
+    );
 }
 
 #[test]

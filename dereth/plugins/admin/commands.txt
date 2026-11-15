@@ -58,6 +58,7 @@ showsession	Players	selection	-	The examined player's address and session
 bornagain	Players	confirm	deletedCharID(, newName)(, account)	Restore a deleted character
 deletecharacter	Players	confirm	[character]	Delete a character for good
 set-characteraccess	Players	confirm	character (level)	Set a character's access
+set-characterplus	Players	-	character [on|off]	Put the + before a character's name
 set-accountaccess	Players	confirm	account (level)	Set an account's access
 watchmen	Players	-	(level)	List accounts by staff level
 attackable	Character	-	on or off	Whether monsters attack you

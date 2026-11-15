@@ -47,6 +47,11 @@ impl ObjectStore {
         self.objects.contains_key(&guid)
     }
 
+    /// Every object's guid, in no particular order.
+    pub fn guids(&self) -> impl Iterator<Item = ObjectGuid> + '_ {
+        self.objects.keys().copied()
+    }
+
     pub fn get(&self, guid: ObjectGuid) -> Option<&WorldObject> {
         self.objects.get(&guid).map(|b| &**b)
     }

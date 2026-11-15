@@ -86,6 +86,10 @@ pub struct Options {
     /// Not ACE, hidden: `--update-test-version <version>`, for the updater's own tests: the updater
     /// takes this process for that version (`crate::server_update::TEST_VERSION_FLAG`).
     pub update_test_version: Option<String>,
+    /// Not ACE: `--write-places <file>`: write version 2 of the world's places, with its map marks
+    /// (the document `GET /places?version=2` serves, [`empyrean_server::portal_table`]), to
+    /// `<file>` and exit, without opening the shard or starting the world.
+    pub write_places: Option<PathBuf>,
 }
 
 impl Options {
@@ -131,6 +135,12 @@ impl Options {
                     options.update_test_version =
                         Some(args.next().ok_or("--update-test-version needs a version")?)
                 }
+                "--write-places" => {
+                    options.write_places = Some(PathBuf::from(
+                        args.next()
+                            .ok_or("--write-places needs the path to write")?,
+                    ))
+                }
                 "--help" | "-h" => return Err(USAGE.to_owned()),
                 other => return Err(format!("unknown argument: {other}")),
             }
@@ -149,7 +159,7 @@ impl Options {
 }
 
 /// The usage line (`--help`).
-pub const USAGE: &str = "usage: empyrean-server [--config <empyrean.toml>] [--run-for <seconds>] [--status <ip>:<port>]\n       empyrean-server --write-config [<path>] [--from <Config.js>] [--out <path>]\n       empyrean-server --version";
+pub const USAGE: &str = "usage: empyrean-server [--config <empyrean.toml>] [--run-for <seconds>] [--status <ip>:<port>]\n       empyrean-server [--config <empyrean.toml>] --write-places <file>\n       empyrean-server --write-config [<path>] [--from <Config.js>] [--out <path>]\n       empyrean-server --version";
 
 // ACE: Program.Main
 /// Brings the server up, runs it until Ctrl-C or `--run-for`, and shuts it down.
@@ -256,7 +266,9 @@ pub fn main(options: &Options) -> ExitCode {
     } else {
         log::info!("DAT Patching Disabled...");
     }
-    start_bulk_patch(&config);
+    if options.write_places.is_none() {
+        start_bulk_patch(&config);
+    }
 
     log::info!("Initializing DatabaseManager...");
     let clock = Arc::new(SystemClock::new());
@@ -284,6 +296,9 @@ pub fn main(options: &Options) -> ExitCode {
     if let Some(message) = world_pack::unusable_pack_message(&world_pack_path, &world_pack_status) {
         log::error!("{message}");
         return ExitCode::FAILURE;
+    }
+    if let Some(path) = &options.write_places {
+        return write_places(&config, &content, &dats, path);
     }
     // DatabaseManager.Shard and .Authentication: shard.db and auth.db (database.shard_db_path,
     // database.auth_db_path).
@@ -1346,6 +1361,33 @@ fn start_status_endpoint(
         Err(e) => {
             log::error!("Status endpoint not started: {e}");
             None
+        }
+    }
+}
+
+/// Not ACE: `--write-places <file>`: writes version 2 of the places of `content`, with its map
+/// marks, to `path`.
+fn write_places(
+    config: &MasterConfiguration,
+    content: &Arc<dyn WorldDatabase>,
+    dats: &DatManager,
+    path: &std::path::Path,
+) -> ExitCode {
+    use empyrean_server::{place_marks, portal_table};
+    let rooms = place_marks::dat_rooms(dats);
+    let marks = place_marks::marks(config.era.profile, &**content, Some(&rooms));
+    let document = portal_table::places_document_2(&config.server.world_name, &**content, &marks);
+    match std::fs::write(path, document) {
+        Ok(()) => {
+            log::info!(
+                "The world's places are written to {}",
+                absolute(path).display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            log::error!("Unable to write {}: {e}", absolute(path).display());
+            ExitCode::FAILURE
         }
     }
 }

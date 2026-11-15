@@ -65,7 +65,11 @@ language models. This is a local feature (`local/ai-players`), not for upstream.
 3. Done. Movement: AI Players send a client's motion and position messages through the server's
    own handlers, along routes from the client's planner (`dereth-navigation`) on a thread of its
    own; trips longer than 180 m go in hops, and a body stopped by something replans. Town AI
-   Players wander within 40 m of the centre, stand a while, and now and then sit. A new area's
+   Players run errands at their town's own places, read from the world's spawns within 160 m:
+   a shop most often (20 to 60 s there), the lifestone, a portal or townsfolk, never the same
+   place twice running, on a spot no other AI Player stands on or heads for; a shop inside a
+   building is visited at its door. One in twelve times idle they sit a while instead. They log
+   in beside the lifestone, a portal or townsfolk rather than at the town's centre. A new area's
    first route takes seconds to plan (its map is built once); later ones take milliseconds.
 4. Done. Level map: each outdoor landblock's creatures, from its encounters and outdoor
    generators (followed four deep), with their levels and chances, worked out as asked. A town's
@@ -83,11 +87,12 @@ language models. This is a local feature (`local/ai-players`), not for upstream.
    player no hunter could be placed near is passed over for two minutes.
 6. Done. Town buffers: a town AI Player's buffs are its best spell of each kind it can cast on
    someone else (beneficial creature and life enchantments, not item ones). Every 5 seconds an
-   idle one looks for the nearest real player within 30 m, outdoors, whom no other AI Player is
+   idle one looks for the nearest real player within 60 m, outdoors, whom no other AI Player is
    buffing and who was not buffed in the last ten minutes, and who lacks some of them: none of
    that kind, a weaker one, or under five minutes left; a skill's buff only if the player trains
-   the skill. It walks within 10 m, readies magic and casts one every 3 seconds, then goes back
-   to its day. It reads the player's enchantments directly.
+   the skill. It gives at most five, the ones the player wants most (their specialized skills,
+   then trained skills, then attributes, then the rest), walking within 10 m, readying magic and
+   casting one every 3 seconds, then goes back to its day. It reads the player's enchantments directly.
 7. Tests and soak runs with AI Players on.
 
 ## Load

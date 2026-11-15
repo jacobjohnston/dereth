@@ -30,7 +30,8 @@ struct Request {
 #[derive(Debug)]
 pub struct Answer {
     pub bot: u32,
-    pub route: Result<Vec<[f32; 3]>, String>,
+    /// The corners, and whether the route was cut short at a building's door.
+    pub route: Result<(Vec<[f32; 3]>, bool), String>,
     /// The planner's seconds on it.
     pub took: f64,
 }
@@ -137,21 +138,27 @@ fn spawn(w: &World, i: usize, inbox: Receiver<Request>, outbox: Sender<Answer>) 
                         .plan_near(&r.from, &r.to, r.reach)
                         .map_err(|e| format!("{e:?}"))
                         .and_then(|path| {
+                            // AI Players stay outdoors: a route into a building ends at its door.
                             let mut out = Vec::new();
+                            let mut door = false;
                             for p in path.waypoints.iter().skip(1) {
                                 if p.position.cell.0 & 0xFFFF >= 0x100 {
-                                    return Err("the route goes indoors".to_owned());
+                                    door = true;
+                                    break;
                                 }
                                 let g = dereth_navigation::global(&p.position);
                                 out.push([g.x, g.y, g.z]);
                             }
-                            Ok(out)
+                            if door && out.is_empty() {
+                                return Err("the route goes indoors".to_owned());
+                            }
+                            Ok((out, door))
                         });
                     log::debug!(
                         "AI Players: route for {:#x} in {:?}: {:?}",
                         r.bot,
                         started.elapsed(),
-                        route.as_ref().map(Vec::len)
+                        route.as_ref().map(|r| r.0.len())
                     );
                     let took = started.elapsed().as_secs_f64();
                     if outbox

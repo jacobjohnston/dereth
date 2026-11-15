@@ -2,8 +2,8 @@
 //!
 //! A buffer's buffs are its best spell of each kind (stacking category) that it can cast on
 //! someone else: beneficial creature and life enchantments, not item ones. Every few seconds an
-//! idle buffer looks for a real player within reach whom no other buffer is buffing and who has
-//! not been buffed in the last ten minutes, then walks near and casts each buff the player lacks,
+//! idle buffer looks for a real player within 60 m whom no other buffer is buffing and who has
+//! not been buffed in the last ten minutes, then walks near and casts up to five buffs the player lacks,
 //! has weaker, or has with little time left; a skill's buff only if the player trains the skill. It reads the player's enchantments directly, as a
 //! player inspecting them would see them.
 
@@ -18,8 +18,8 @@ use crate::world_objects::managers::enchantment_manager;
 use crate::world_objects::{creature_combat, monster_combat, player_combat, player_magic};
 use crate::World;
 
-/// Metres within which a buffer notices a real player.
-const NOTICE: f64 = 30.0;
+/// Metres within which a buffer notices a real player: across a town square.
+const NOTICE: f64 = 60.0;
 /// Metres within which it casts.
 const CAST_RANGE: f32 = 10.0;
 /// Seconds between looks for someone to buff.
@@ -30,6 +30,8 @@ const CAST_EVERY: f64 = 3.0;
 const AGAIN_AFTER: f64 = 600.0;
 /// A buff with less than this many seconds left is cast again.
 const RENEW_UNDER: f64 = 300.0;
+/// The most buffs a buffer gives a player at once, as a real player would.
+const ROUND: usize = 5;
 
 /// A buffer at work.
 #[derive(Debug, Clone)]
@@ -116,6 +118,45 @@ pub fn wanted(w: &World, target: ObjectGuid, spell: u32) -> bool {
         })
 }
 
+/// How much `target` would want `spell`: a buff for a skill it specializes most, then a skill it
+/// trains, then an attribute, then anything else.
+fn worth(w: &World, target: ObjectGuid, spell: u32) -> f32 {
+    let s = Spell::new(w, spell, true);
+    if s.not_found() {
+        return 1.0;
+    }
+    let flags = s.stat_mod_type().0;
+    if flags & EnchantmentTypeFlags::Skill.0 != 0 {
+        let skill = Skill(i32::try_from(s.stat_mod_key()).unwrap_or(-1));
+        let sac = w
+            .objects
+            .get(target)
+            .and_then(|o| o.biota.properties_skill.as_ref())
+            .and_then(|k| k.get(&skill))
+            .map(|k| k.sac);
+        return if sac == Some(SkillAdvancementClass::Specialized) {
+            4.0
+        } else {
+            3.0
+        };
+    }
+    if flags & EnchantmentTypeFlags::Attribute.0 != 0 {
+        return 2.0;
+    }
+    1.0
+}
+
+/// The buffs of `left` a buffer gives `target` this round: the five it wants most, a little at
+/// random among equals.
+fn round_of(w: &mut World, target: ObjectGuid, left: Vec<u32>) -> Vec<u32> {
+    let mut scored: Vec<(f32, u32)> = left
+        .into_iter()
+        .map(|s| (worth(w, target, s) + w.ai_players.unit() * 0.9, s))
+        .collect();
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+    scored.into_iter().take(ROUND).map(|(_, s)| s).collect()
+}
+
 /// A town AI Player's buffing: carry on with a player, or look for one. Answers whether it is
 /// buffing (and so busy).
 pub fn live(w: &mut World, id: u32, p: ObjectGuid, now: f64) -> bool {
@@ -143,6 +184,7 @@ pub fn live(w: &mut World, id: u32, p: ObjectGuid, now: f64) -> bool {
     let Some((target, left)) = someone(w, id, p, &buffs, now) else {
         return false;
     };
+    let left = round_of(w, target, left);
     w.ai_players.buffed.insert(target.full(), now + AGAIN_AFTER);
     if let Some(b) = w.ai_players.bots.get_mut(&id) {
         b.sitting = false;

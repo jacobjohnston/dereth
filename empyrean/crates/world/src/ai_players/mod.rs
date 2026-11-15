@@ -10,6 +10,7 @@ pub mod buff;
 pub mod hunt;
 pub mod levels;
 pub mod names;
+pub mod places;
 pub mod planner;
 pub mod towns;
 pub mod walk;
@@ -26,7 +27,6 @@ use crate::managers::{player_manager, world_manager};
 use crate::sessions::{self, SessionData};
 use crate::world_objects::{player_location, player_networking};
 use crate::World;
-use dereth_primitives::num::math as m;
 
 /// What an AI Player's name starts with, as an admin's starts with `+`.
 pub const MARKER: char = '~';
@@ -118,6 +118,9 @@ pub struct Bot {
     /// The real player a town AI Player is buffing, and when it next looks for one.
     pub buffing: Option<buff::Buffing>,
     pub next_buff_look: f64,
+    /// A town AI Player's errand, and where the last one was.
+    pub errand: Option<places::Kind>,
+    pub errand_at: Option<[f32; 2]>,
 }
 
 /// The world's AI Players.
@@ -155,6 +158,8 @@ pub struct AiPlayersState {
     pub buffed: HashMap<u32, f64>,
     /// Buffs AI Players have cast (for operators).
     pub buffs_cast: u64,
+    /// Each town's places, read once.
+    pub places: HashMap<usize, std::sync::Arc<Vec<places::Place>>>,
 }
 
 impl AiPlayersState {
@@ -406,8 +411,10 @@ fn login_complete(w: &mut World, p: ObjectGuid) {
     }
 }
 
-/// Metres from a town's centre a town AI Player wanders.
+/// Metres from a town's centre a town AI Player wanders, where the town lists no places.
 const WANDER: f32 = 40.0;
+/// The chance an idle town AI Player sits down for a while.
+const SIT_CHANCE: f32 = 0.08;
 
 /// Each AI Player in the world does what it is doing: walks on, or, idle long enough, sets off
 /// somewhere in town or sits down for a while.
@@ -440,7 +447,8 @@ fn live(w: &mut World, now: f64) {
     }
 }
 
-/// A town AI Player's day: walk somewhere near the centre, stand a while, now and then sit.
+/// A town AI Player's day: errands round town, a shop most often, then the lifestone, a portal or
+/// someone to talk to, a while at each; now and then a sit. It never stops on another's spot.
 fn town_life(w: &mut World, id: u32, p: ObjectGuid, now: f64) {
     if buff::live(w, id, p, now) {
         return;
@@ -454,8 +462,11 @@ fn town_life(w: &mut World, id: u32, p: ObjectGuid, now: f64) {
                 walk::step(w, id, p, now);
                 return;
             }
-            Some(walk::Outcome::Arrived) => 10.0 + f64::from(w.ai_players.unit()) * 30.0,
-            Some(walk::Outcome::Failed) => 3.0 + f64::from(w.ai_players.unit()) * 5.0,
+            Some(walk::Outcome::Arrived) => {
+                let (low, high) = bot.errand.map_or((5.0, 15.0), places::Kind::dwell);
+                low + f64::from(w.ai_players.unit()) * (high - low)
+            }
+            Some(walk::Outcome::Failed) => 2.0 + f64::from(w.ai_players.unit()) * 3.0,
         };
         if let Some(b) = w.ai_players.bots.get_mut(&id) {
             b.walk = None;
@@ -469,36 +480,51 @@ fn town_life(w: &mut World, id: u32, p: ObjectGuid, now: f64) {
     if bot.sitting {
         walk::stand(w, id, p);
     }
-    let sit = !bot.sitting && w.ai_players.unit() < 0.2;
+    let sit = !bot.sitting && w.ai_players.unit() < SIT_CHANCE;
+    if let Some(b) = w.ai_players.bots.get_mut(&id) {
+        b.sitting = sit;
+    }
     if sit {
         walk::sit(w, id, p);
-        let rest = 20.0 + f64::from(w.ai_players.unit()) * 40.0;
+        let rest = 15.0 + f64::from(w.ai_players.unit()) * 30.0;
         if let Some(b) = w.ai_players.bots.get_mut(&id) {
-            b.sitting = true;
             b.idle_until = now + rest;
         }
         return;
     }
+    let last = bot.errand_at;
+    let (kind, to) = match places::pick(w, bot.town, last) {
+        Some(place) => {
+            // A shop's door, or a few steps from anything outdoors.
+            let (near, far) = if place.indoors {
+                (1.0, 3.0)
+            } else {
+                (2.0, 5.0)
+            };
+            (
+                Some(place.kind),
+                (place.at, places::free_spot(w, id, place.at, near, far)),
+            )
+        }
+        None => {
+            // A town with no places listed: somewhere near its centre.
+            let t = towns::TOWNS[bot.town];
+            #[allow(clippy::cast_possible_truncation)]
+            let centre = [
+                ((t.ew + 101.95) * METRES_PER_UNIT) as f32,
+                ((t.ns + 101.95) * METRES_PER_UNIT) as f32,
+            ];
+            (
+                None,
+                (centre, places::free_spot(w, id, centre, 5.0, WANDER)),
+            )
+        }
+    };
     if let Some(b) = w.ai_players.bots.get_mut(&id) {
-        b.sitting = false;
+        b.errand = kind;
+        b.errand_at = Some(to.0);
     }
-    let t = towns::TOWNS[bot.town];
-    #[allow(clippy::cast_possible_truncation)]
-    let centre = [
-        ((t.ew + 101.95) * METRES_PER_UNIT) as f32,
-        ((t.ns + 101.95) * METRES_PER_UNIT) as f32,
-    ];
-    let angle = w.ai_players.unit() * std::f32::consts::TAU;
-    let r = w.ai_players.unit().sqrt() * WANDER;
-    walk::go(
-        w,
-        id,
-        [
-            centre[0] + m::cosf(angle) * r,
-            centre[1] + m::sinf(angle) * r,
-        ],
-        3.0,
-    );
+    walk::go(w, id, to.1, 1.5);
 }
 
 /// The magic schools, and how sure of a cast an AI Player must be to learn a level's spells.
@@ -595,17 +621,28 @@ fn send_to_town(w: &mut World, id: u32, p: ObjectGuid, town: usize) {
         b.placed = true;
     }
     let t = towns::TOWNS[town];
-    let (dx, dy) = {
-        let s = &mut w.ai_players;
-        (
-            (s.unit() * 2.0 - 1.0) * TOWN_SPREAD,
-            (s.unit() * 2.0 - 1.0) * TOWN_SPREAD,
-        )
+    // Somewhere a player would be: beside the lifestone, a portal or someone outdoors, on a spot
+    // of its own; the centre where the town lists none.
+    let outdoors: Vec<places::Place> = places::of_town(w, town)
+        .iter()
+        .filter(|p| !p.indoors && p.kind != places::Kind::Shop)
+        .copied()
+        .collect();
+    let at = if outdoors.is_empty() {
+        #[allow(clippy::cast_possible_truncation)]
+        let centre = [
+            ((t.ew + 101.95) * METRES_PER_UNIT) as f32,
+            ((t.ns + 101.95) * METRES_PER_UNIT) as f32,
+        ];
+        places::free_spot(w, id, centre, 0.0, TOWN_SPREAD)
+    } else {
+        let i = w.ai_players.below(outdoors.len());
+        places::free_spot(w, id, outdoors[i].at, 3.0, 8.0)
     };
     #[allow(clippy::cast_possible_truncation)]
     let spot = empyrean_entity::Vector2::new(
-        t.ew as f32 + dx / METRES_PER_UNIT as f32,
-        t.ns as f32 + dy / METRES_PER_UNIT as f32,
+        (f64::from(at[0]) / METRES_PER_UNIT - 101.95) as f32,
+        (f64::from(at[1]) / METRES_PER_UNIT - 101.95) as f32,
     );
     let mut pos = Position::from_map_coordinates(spot);
     if let Err(e) = position_extensions::adjust_map_coords(w, &mut pos) {
@@ -967,6 +1004,8 @@ fn log_in_as(
             hunt: ground.map(hunt::Hunt::new),
             buffing: None,
             next_buff_look: now + 10.0,
+            errand: None,
+            errand_at: None,
         },
     );
     world_manager::player_enter_world(w, session, character);

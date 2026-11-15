@@ -209,7 +209,7 @@ mod real {
                     .max(dereth_primitives::num::math::hypot(a.0 - s.0, a.1 - s.1) * 240.0);
                 let from_centre =
                     dereth_primitives::num::math::hypot(a.0 - HOLTBURG.0, a.1 - HOLTBURG.1) * 240.0;
-                assert!(from_centre < 80.0, "stays in town: {from_centre} m");
+                assert!(from_centre < 200.0, "stays in town: {from_centre} m");
                 assert!(!at.indoors(), "stays outdoors");
             }
         }
@@ -218,6 +218,43 @@ mod real {
             farthest.iter().any(|d| *d > 5.0),
             "someone walked: {farthest:?}"
         );
+        // Errands at the town's places, and no two standing on one spot.
+        let places = ai_players::places::of_town(&mut l.ts.world, 11);
+        assert!(
+            places
+                .iter()
+                .any(|p| p.kind == ai_players::places::Kind::Shop),
+            "Holtburg has shops"
+        );
+        let w = &l.ts.world;
+        let errands: Vec<_> = w
+            .ai_players
+            .bots
+            .values()
+            .filter_map(|b| b.errand)
+            .collect();
+        println!(
+            "{} places in Holtburg; errands now: {errands:?}",
+            places.len()
+        );
+        let spots: Vec<[f32; 2]> = w
+            .ai_players
+            .bots
+            .values()
+            .filter(|b| b.walk.is_none() && !b.sitting && b.hunt.is_none())
+            .filter_map(|b| w.sessions.player(b.session))
+            .filter_map(|p| w.objects.get(p).and_then(WorldObject::location))
+            .map(|l| {
+                let g = ai_players::walk::global(&l);
+                [g[0], g[1]]
+            })
+            .collect();
+        for (i, a) in spots.iter().enumerate() {
+            for b in &spots[i + 1..] {
+                let d = dereth_primitives::num::math::hypotf(a[0] - b[0], a[1] - b[1]);
+                assert!(d > 1.0, "two AI Players on one spot: {d} m apart");
+            }
+        }
         let seen: Vec<MovementPositionEvent> = l.since(mark);
         assert!(
             seen.iter().any(|m| bots.iter().any(|b| m.id.0 == b.full())),
@@ -608,6 +645,17 @@ mod real {
     fn a_town_ai_player_buffs_a_real_player_who_lacks_its_buffs() {
         let (mut l, _) = holtburg_with_a_bot();
         let me = l.g;
+        // The real player waits beside Holtburg's lifestone, where players stand.
+        let stone = ai_players::places::of_town(&mut l.ts.world, 11)
+            .iter()
+            .find(|p| p.kind == ai_players::places::Kind::Lifestone)
+            .map(|p| p.at)
+            .expect("Holtburg's lifestone");
+        let beside = ai_players::walk::ground_at(&l.ts.world, stone[0] + 4.0, stone[1], 0.0);
+        player_location::teleport(&mut l.ts.world, me, &beside, false);
+        l.advance(0.5);
+        l.action(&CharacterLoginCompleteNotification);
+        l.advance(1.0);
         let holtburg = ai_players::towns::TOWNS
             .iter()
             .position(|t| t.name == "Holtburg")
@@ -666,6 +714,17 @@ mod real {
             ai_players::describe(&l.ts.world)
         );
         assert!(got > 0, "the real player was buffed by an AI Player");
+        let rounds: Vec<usize> =
+            l.ts.world
+                .ai_players
+                .bots
+                .values()
+                .filter_map(|b| b.buffing.as_ref().map(|x| x.cast as usize + x.left.len()))
+                .collect();
+        assert!(
+            rounds.iter().all(|n| *n <= 5),
+            "five buffs a round at most: {rounds:?}"
+        );
         assert!(l.ts.world.ai_players.buffs_cast > 0);
     }
 }

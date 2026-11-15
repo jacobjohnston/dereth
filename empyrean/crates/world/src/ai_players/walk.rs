@@ -299,7 +299,14 @@ pub fn take_routes(w: &mut World) {
             continue;
         };
         match answer.route {
-            Ok(route) if !route.is_empty() => {
+            Ok((route, door)) if !route.is_empty() => {
+                if door {
+                    // Cut short at a building's door: the door is where it is going.
+                    if let Some(last) = route.last() {
+                        walk.to = [last[0], last[1]];
+                        walk.reach = 1.0;
+                    }
+                }
                 walk.route = Some(route);
                 walk.next = 0;
             }

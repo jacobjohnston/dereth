@@ -2580,6 +2580,11 @@ fn do_enqueue(
     emote_idx: usize,
     emote: &PropertiesEmoteAction,
 ) {
+    // Not ACE: an object that has left the world (destroyed, or its landblock unloaded) runs no
+    // more of its emote chain; ACE runs it on the detached object.
+    if !w.objects.contains(this) {
+        return;
+    }
     if em(w, this).debug {
         log::debug!("{:?}", EmoteType(emote.r#type.cs_cast()));
     }
@@ -2589,6 +2594,10 @@ fn do_enqueue(
 
     let next_delay = execute_emote(w, this, emote_set, emote, target_object);
 
+    // Not ACE: the emote may have taken its own object out of the world.
+    if !w.objects.contains(this) {
+        return;
+    }
     if em(w, this).debug {
         log::debug!(" - {next_delay}");
     }

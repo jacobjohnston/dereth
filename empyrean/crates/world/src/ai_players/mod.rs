@@ -12,7 +12,7 @@ pub mod towns;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 
-use empyrean_entity::enums::AccessLevel;
+use empyrean_entity::enums::{AccessLevel, MagicSchool, SkillAdvancementClass};
 use empyrean_entity::{ObjectGuid, Position};
 use empyrean_net::{SessionId, SessionState};
 
@@ -163,6 +163,22 @@ pub fn is_ai_player(w: &World, guid: u32) -> bool {
         .is_some_and(|a| a.account_id == account)
 }
 
+/// When `bot` is an AI Player, tells `asker` it can't do `what` and answers true.
+pub fn turn_away(w: &mut World, asker: ObjectGuid, bot: u32, what: &str) -> bool {
+    if !is_ai_player(w, bot) {
+        return false;
+    }
+    let name = crate::dispatch::name::name(w, ObjectGuid::new(bot)).unwrap_or_default();
+    let session = crate::world_objects::world_object_networking::shims::player_session(w, asker);
+    crate::network::chat_packet::send_server_message(
+        w,
+        session,
+        &format!("{name} is an AI Player and can't {what}."),
+        empyrean_entity::enums::ChatMessageType::Broadcast,
+    );
+    true
+}
+
 /// Whether `session` is an AI Player's, still loading, which the session sweep must keep.
 #[must_use]
 pub fn holds(w: &World, session: SessionId) -> bool {
@@ -250,6 +266,8 @@ fn advance(w: &mut World, now: f64) {
             Stage::Entering { since } => {
                 if let Some(p) = player {
                     login_complete(w, p);
+                    learn_spells(w, p);
+                    resupply(w, p);
                     set_stage(w, id, Stage::InWorld);
                 } else if now - since > LOGIN_TIMEOUT {
                     log::warn!("AI Players: character {id:#x} did not load; given up");
@@ -307,6 +325,85 @@ fn login_complete(w: &mut World, p: ObjectGuid) {
         }
         player_networking::send_property_updates_and_overrides(w, p);
     }
+}
+
+/// The magic schools, and how sure of a cast an AI Player must be to learn a level's spells.
+const SCHOOLS: [MagicSchool; 5] = [
+    MagicSchool::CreatureEnchantment,
+    MagicSchool::ItemEnchantment,
+    MagicSchool::LifeMagic,
+    MagicSchool::WarMagic,
+    MagicSchool::VoidMagic,
+];
+const RELIABLE: f64 = 0.9;
+
+/// Every AI Player in the world, ready.
+fn bots_in_world(w: &World) -> Vec<ObjectGuid> {
+    w.ai_players
+        .bots
+        .values()
+        .filter(|b| b.stage == Stage::InWorld)
+        .filter_map(|b| w.sessions.player(b.session))
+        .filter(|p| w.objects.get(*p).is_some())
+        .collect()
+}
+
+/// The highest spell level an AI Player of `skill` casts reliably: one whose hardest spells it
+/// casts at least nine times in ten.
+#[must_use]
+pub fn reliable_level(skill: u32) -> u32 {
+    use crate::entity::spell_formula::{min_power, MAX_SPELL_LEVEL};
+    (1..=MAX_SPELL_LEVEL)
+        .rev()
+        .find(|&level| {
+            let hardest = if level < MAX_SPELL_LEVEL {
+                min_power(level + 1) - 1
+            } else {
+                min_power(level) + 50
+            };
+            let skill = i32::try_from(skill).unwrap_or(i32::MAX);
+            let hardest = i32::try_from(hardest).unwrap_or(i32::MAX);
+            skill >= hardest - 50
+                && crate::world_objects::skill_check::get_magic_skill_chance(skill, hardest)
+                    >= RELIABLE
+        })
+        .unwrap_or(0)
+}
+
+/// An AI Player knows every spell of the schools it trains, up to the level it casts reliably.
+fn learn_spells(w: &mut World, p: ObjectGuid) {
+    for school in SCHOOLS {
+        let Some(skill) = w
+            .objects
+            .get_mut(p)
+            .and_then(|o| o.get_creature_skill_school(school))
+        else {
+            continue;
+        };
+        let trained = w.objects.get(p).is_some_and(|o| {
+            matches!(
+                skill.advancement_class(o),
+                SkillAdvancementClass::Trained | SkillAdvancementClass::Specialized
+            )
+        });
+        if !trained {
+            continue;
+        }
+        let top = reliable_level(skill.current(w, p));
+        for level in 1..=top {
+            crate::world_objects::player_spells::learn_spells_in_bulk(w, p, school, level, false);
+        }
+    }
+}
+
+/// An AI Player never runs short of mana.
+fn resupply(w: &mut World, p: ObjectGuid) {
+    let Some(o) = w.objects.get(p) else { return };
+    if crate::world_objects::monster_combat::is_dead(o) {
+        return;
+    }
+    let mana = o.mana();
+    crate::world_objects::creature_vitals::update_vital_delta(w, p, mana, 1_000_000);
 }
 
 /// Sends AI Player `id` through a portal to a spot near the centre of town `town`.
@@ -383,6 +480,10 @@ fn direct(w: &mut World, now: f64) {
             log_out(w, id);
         }
         return;
+    }
+
+    for p in bots_in_world(w) {
+        resupply(w, p);
     }
 
     let anchors = anchors(w);
@@ -581,4 +682,19 @@ pub fn describe(w: &World) -> Vec<String> {
             format!("{MARKER}{name}: {}, {stage}", towns::TOWNS[b.town].name)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_spell_level_is_learned_when_its_hardest_spells_succeed_nine_times_in_ten() {
+        assert_eq!(reliable_level(0), 0);
+        assert_eq!(reliable_level(70), 0);
+        assert_eq!(reliable_level(90), 1);
+        assert_eq!(reliable_level(300), 5);
+        assert_eq!(reliable_level(440), 7);
+        assert_eq!(reliable_level(500), 8);
+    }
 }

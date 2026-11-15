@@ -236,6 +236,12 @@ pub fn fellowship_dismiss_player(w: &mut World, this: ObjectGuid, dismiss_guid: 
 pub fn fellowship_recruit(w: &mut World, this: ObjectGuid, new_player: Option<ObjectGuid>) {
     let Some(new_player) = new_player else { return };
 
+    // Not ACE: AI Players don't join fellowships.
+    if crate::ai_players::turn_away(w, this, new_player.full(), "join a fellowship") {
+        player_networking::send_weenie_error(w, this, WeenieError::None);
+        return;
+    }
+
     // An Olthoi player cannot join a fellowship
     if is_olthoi_player(w, new_player) {
         send(

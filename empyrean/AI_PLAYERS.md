@@ -50,9 +50,13 @@ language models. This is a local feature (`local/ai-players`), not for upstream.
 
 ## Phases
 
-0. Branch, plan, `~` marker, `@aiplayers`, the switch, one AI Player in at a town and out again.
-1. Identity: account, names, looks, archetype builds, gear, spells, unlimited supplies.
-2. Uncounted: one `is_ai_player` check wherever players are counted or listed.
+0. Done. Branch, plan, `~` marker, `@aiplayers`, the switch, AI Players in at a town and out.
+1. Done. Identity: account, names, random looks, archetype builds, gear, spells up to the level
+   each casts nine times in ten, unlimited components and mana. Arrows and kits come with the
+   hunters, who use them.
+2. Done. Uncounted and unchanged: no vitae, no items dropped, no experience, no loot or rares from
+   their kills, nothing spent of the spell economy or spell charge; trades, gifts, friends,
+   fellowships and oaths turned away with a message; left out of channel lists.
 3. Movement: client-style walking and routes.
 4. Level map and town levels.
 5. Hunters.

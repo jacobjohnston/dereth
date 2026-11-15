@@ -221,6 +221,10 @@ pub fn handle_action_open_trade_negotiations(
     let Some(trade_partner) = player_manager::get_online_player(w, trade_partner_guid) else {
         return;
     };
+    // Not ACE: AI Players don't trade.
+    if initiator && crate::ai_players::turn_away(w, this, trade_partner_guid, "trade") {
+        return;
+    }
 
     //Check to see if potential trading partner is an Olthoi player
     if initiator && is_olthoi_player(w, trade_partner) {

@@ -245,6 +245,13 @@ pub fn handle_action_add_friend(w: &mut World, this: ObjectGuid, friend_name: &s
     // get friend player info
     let (friend, _) = player_manager::find_by_name(w, friend_name);
 
+    // Not ACE: an AI Player is no one's friend.
+    if let Some(f) = friend {
+        if crate::ai_players::turn_away(w, this, f.guid().full(), "be added as a friend") {
+            return;
+        }
+    }
+
     let Some(friend) = friend else {
         crate::network::chat_packet::send_server_message(
             w,

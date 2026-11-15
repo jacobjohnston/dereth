@@ -1,32 +1,37 @@
-//! AI Players log in near a real player and out when switched off. Not ACE.
+//! AI Players log in near a real player and out when switched off, and keep to their rules. Not
+//! ACE.
 
 #[cfg(feature = "real-content")]
 mod real {
     use crate::support::real_content_bot::real::*;
+    use empyrean_entity::enums::{MagicSchool, ShareType, SkillAdvancementClass, XpType};
     use empyrean_entity::Vector2;
     use empyrean_world::ai_players::{self, Stage};
     use empyrean_world::entity::position_extensions;
     use empyrean_world::managers::player_manager;
-    use empyrean_world::world_objects::{player, player_location};
+    use empyrean_world::world_objects::player_xp::grant_xp;
+    use empyrean_world::world_objects::{
+        player, player_character, player_death, player_fellowship, player_inventory,
+        player_location, player_trade,
+    };
 
     const HOLTBURG: (f64, f64) = (42.28, 33.31);
 
-    fn in_the_world(l: &Loop) -> Vec<u32> {
+    fn in_the_world(l: &Loop) -> Vec<ObjectGuid> {
         l.ts.world
             .ai_players
             .bots
             .iter()
             .filter(|(_, b)| b.stage == Stage::InWorld && b.placed)
-            .map(|(id, _)| *id)
+            .map(|(id, _)| ObjectGuid::new(*id))
             .collect()
     }
 
-    #[test]
-    fn ai_players_log_in_near_a_real_player_and_out_when_switched_off() {
+    /// A real player standing outdoors in Holtburg, AI Players switched on, and the first of them
+    /// in town.
+    fn holtburg_with_a_bot() -> (Loop, ObjectGuid) {
         let mut l = create_character(&[44, 6, 21, 22, 24]);
         l.enter_world();
-
-        // The real player stands outdoors in Holtburg.
         #[allow(clippy::cast_possible_truncation)]
         let mut holtburg =
             Position::from_map_coordinates(Vector2::new(HOLTBURG.1 as f32, HOLTBURG.0 as f32));
@@ -50,14 +55,25 @@ mod real {
             ai_players::describe(&l.ts.world)
         );
         l.advance(2.0);
-        let first = in_the_world(&l)[0];
-        let bot = ObjectGuid::new(first);
+        let bot = in_the_world(&l)[0];
+        (l, bot)
+    }
+
+    fn told(l: &Loop, mark: usize, text: &str) -> bool {
+        l.since::<CommunicationTextboxString>(mark)
+            .iter()
+            .any(|m| m.text.contains(text))
+    }
+
+    #[test]
+    fn ai_players_log_in_near_a_real_player_and_out_when_switched_off() {
+        let (mut l, bot) = holtburg_with_a_bot();
         let name = player::player_name(&l.ts.world, bot).expect("a name");
         assert!(name.starts_with(ai_players::MARKER), "{name}");
         let at = ai_players::map_coords(&l.location_of(bot));
         let metres = ((at.0 - HOLTBURG.0).hypot(at.1 - HOLTBURG.1)) * 240.0;
         assert!(metres < 100.0, "in Holtburg: {at:?}");
-        assert!(ai_players::is_ai_player(&l.ts.world, first));
+        assert!(ai_players::is_ai_player(&l.ts.world, bot.full()));
         assert!(!ai_players::is_ai_player(&l.ts.world, l.g.full()));
         assert_eq!(ai_players::real_online_count(&l.ts.world), 1);
         assert!(player_manager::get_online_count(&l.ts.world) >= 2);
@@ -78,5 +94,94 @@ mod real {
             ai_players::describe(&l.ts.world)
         );
         assert_eq!(player_manager::get_online_count(&l.ts.world), 1);
+    }
+
+    #[test]
+    fn ai_players_know_their_spells_keep_their_mana_and_never_change() {
+        let (mut l, _) = holtburg_with_a_bot();
+        l.advance(15.0);
+        for bot in in_the_world(&l) {
+            let w = &mut l.ts.world;
+            // Spells: the trained schools, up to the level each casts reliably.
+            let mut castable = 0;
+            for school in [
+                MagicSchool::CreatureEnchantment,
+                MagicSchool::ItemEnchantment,
+                MagicSchool::LifeMagic,
+                MagicSchool::WarMagic,
+                MagicSchool::VoidMagic,
+            ] {
+                let skill = w
+                    .objects
+                    .get_mut(bot)
+                    .and_then(|o| o.get_creature_skill_school(school))
+                    .expect("a skill");
+                let o = w.objects.get(bot).expect("in the world");
+                if matches!(
+                    skill.advancement_class(o),
+                    SkillAdvancementClass::Trained | SkillAdvancementClass::Specialized
+                ) {
+                    castable += ai_players::reliable_level(skill.current(w, bot));
+                }
+            }
+            let known = w
+                .objects
+                .get(bot)
+                .and_then(|o| o.biota.properties_spell_book.as_ref())
+                .map_or(0, |b| b.len());
+            assert_eq!(castable > 0, known > 0, "{castable} levels, {known} spells");
+            println!("AI Player {bot:?}: {castable} spell levels, {known} spells");
+
+            // Mana: full.
+            let mana = w.objects.get(bot).expect("in the world").mana();
+            let max = mana.max_value(&mut StatCtx::in_world(w, bot));
+            let o = w.objects.get(bot).expect("in the world");
+            assert_eq!(mana.current(o), max, "full mana");
+
+            // No experience, and no vitae.
+            let xp = o.total_experience();
+            grant_xp(w, bot, 1_000_000, XpType::Kill, ShareType::All);
+            let o = w.objects.get(bot).expect("in the world");
+            assert_eq!(o.total_experience(), xp, "no experience");
+            player_death::inflict_vitae_penalty(w, bot, 5);
+            let o = w.objects.get(bot).expect("in the world");
+            assert!(o.death_level().is_none(), "no vitae");
+        }
+    }
+
+    #[test]
+    fn ai_players_turn_away_trades_gifts_friends_and_fellowships() {
+        let (mut l, bot) = holtburg_with_a_bot();
+        let me = l.g;
+        let name = player::player_name(&l.ts.world, bot).expect("a name");
+        let bare = name.trim_start_matches(ai_players::MARKER).to_owned();
+
+        let mark = l.mark();
+        player_trade::handle_action_open_trade_negotiations(&mut l.ts.world, me, bot.full(), true);
+        l.advance(0.5);
+        assert!(told(&l, mark, "is an AI Player and can't trade"));
+
+        let mark = l.mark();
+        player_inventory::handle_action_give_object_request(&mut l.ts.world, me, bot.full(), 1, 1);
+        l.advance(0.5);
+        assert!(told(&l, mark, "can't take items"));
+
+        let mark = l.mark();
+        player_character::handle_action_add_friend(&mut l.ts.world, me, &bare);
+        l.advance(0.5);
+        assert!(told(&l, mark, "can't be added as a friend"));
+
+        let mark = l.mark();
+        player_fellowship::fellowship_recruit(&mut l.ts.world, me, Some(bot));
+        l.advance(0.5);
+        assert!(told(&l, mark, "can't join a fellowship"));
+
+        let mark = l.mark();
+        l.action(&dereth_protocol::comms::CommunicationTalkDirectByName {
+            message: "hello".into(),
+            target_name: bare,
+        });
+        l.advance(0.5);
+        assert!(told(&l, mark, "is an AI Player and can't reply"));
     }
 }

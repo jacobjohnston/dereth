@@ -4651,6 +4651,12 @@ pub fn handle_action_give_object_request(
         return;
     }
 
+    // Not ACE: AI Players take no gifts.
+    if crate::ai_players::turn_away(w, this, target_guid, "take items") {
+        save_failed(w, this, item_guid, WeenieError::None);
+        return;
+    }
+
     let target = find_object(
         w,
         this,

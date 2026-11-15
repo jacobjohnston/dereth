@@ -7,6 +7,7 @@ use dereth_progression::archetypes::{builtin, Archetype};
 use dereth_progression::order::{Gear, Order, ORDER_VERSION};
 use dereth_progression::Extras;
 use empyrean_entity::enums::{AccessLevel, ChatMessageType, PropertyBool};
+use empyrean_entity::Appearance;
 use empyrean_net::SessionId;
 use empyrean_world::ai_players::{self, BotRequest};
 use empyrean_world::World;
@@ -102,7 +103,8 @@ pub fn build(w: &mut World, account: &str, request: &BotRequest) -> Result<u32, 
             slots: BTreeMap::new(),
             extras: Extras::default(),
         };
-        match create::create_from_order(w, account, &request.name, &order) {
+        let look = random_look(w, request.heritage, request.gender, request.seed);
+        match create::create_from_order(w, account, &request.name, &order, look) {
             Ok(made) => {
                 supplied(w, made.id);
                 return Ok(made.id);
@@ -119,6 +121,42 @@ pub fn build(w: &mut World, account: &str, request: &BotRequest) -> Result<u32, 
         }
     }
     Err(last)
+}
+
+/// A look of `heritage` and `gender` drawn from the creation table with `seed`: face, hair and
+/// skin, and the clothes it wears under its armour.
+fn random_look(w: &World, heritage: u32, gender: u32, seed: u64) -> Option<Appearance> {
+    let cg = w.dats.portal_dat().char_gen();
+    let sex = cg.heritage_groups.get(&heritage)?.sexes.get(&gender)?;
+    let mut state = seed | 1;
+    let mut next = |n: usize| -> u32 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        u32::try_from(state % (n.max(1) as u64)).unwrap_or(0)
+    };
+    Some(Appearance {
+        eyes: next(sex.eye_strips.len()),
+        nose: next(sex.nose_strips.len()),
+        mouth: next(sex.mouth_strips.len()),
+        hair_color: next(sex.hair_colors.len()),
+        eye_color: next(sex.eye_colors.len()),
+        hair_style: next(sex.hair_styles.len()),
+        headgear_style: u32::MAX,
+        headgear_color: 0,
+        shirt_style: next(sex.shirts.len()),
+        shirt_color: next(sex.clothing_colors.len()),
+        pants_style: next(sex.pants.len()),
+        pants_color: next(sex.clothing_colors.len()),
+        footwear_style: next(sex.footwear.len()),
+        footwear_color: next(sex.clothing_colors.len()),
+        skin_hue: f64::from(next(1000)) / 1000.0,
+        hair_hue: f64::from(next(1000)) / 1000.0,
+        headgear_hue: 0.0,
+        shirt_hue: f64::from(next(1000)) / 1000.0,
+        pants_hue: f64::from(next(1000)) / 1000.0,
+        footwear_hue: f64::from(next(1000)) / 1000.0,
+    })
 }
 
 /// An AI Player never runs out of spell components.

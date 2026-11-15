@@ -260,6 +260,10 @@ pub fn handle_pk_death_broadcast(
 /// Inflicts vitae: records the death level, resets the vitae XP pool, adds 5% vitae and tells the
 /// client. `amount` is unused in ACE.
 pub fn inflict_vitae_penalty(w: &mut World, this: ObjectGuid, _amount: i32) {
+    // Not ACE: an AI Player takes no vitae.
+    if crate::ai_players::is_ai_player(w, this.full()) {
+        return;
+    }
     {
         let o = obj_mut(w, this);
         let level = o.level();
@@ -625,7 +629,9 @@ pub fn calculate_death_items(
     // they don't drop any items
 
     let corpse_killer = obj(w, corpse).killer_id();
-    if crate::world_objects::corpse::is_on_no_drop_landblock(w, corpse)
+    // Not ACE: an AI Player drops nothing.
+    if crate::ai_players::is_ai_player(w, this.full())
+        || crate::world_objects::corpse::is_on_no_drop_landblock(w, corpse)
         || crate::world_objects::player_combat::is_pk_lite_death(w, this, corpse_killer)
     {
         return Vec::new();

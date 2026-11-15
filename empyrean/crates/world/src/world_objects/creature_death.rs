@@ -882,7 +882,11 @@ pub fn create_corpse(
             generate_treasure_olthoi(w, this, killer, corpse);
         }
 
-        if let Some(k) = killer.filter(|k| k.is_player() && !k.is_olthoi_player) {
+        if let Some(k) = killer.filter(|k| {
+            k.is_player()
+                && !k.is_olthoi_player
+                && !crate::ai_players::is_ai_player(w, k.guid.full())
+        }) {
             let level = obj(w, this).level();
             if level.is_some_and(|l| l >= 100) {
                 obj_mut(w, this).set_can_generate_rare(true);
@@ -969,6 +973,11 @@ fn generate_treasure(
     corpse: Option<ObjectGuid>,
 ) -> Vec<ObjectGuid> {
     let mut dropped_items = Vec::new();
+
+    // Not ACE: what an AI Player kills drops nothing.
+    if killer.is_some_and(|k| crate::ai_players::is_ai_player(w, k.guid.full())) {
+        return dropped_items;
+    }
 
     // create death treasure from loot generation factory
     if let Some(death_treasure) = death_treasure(w, this) {

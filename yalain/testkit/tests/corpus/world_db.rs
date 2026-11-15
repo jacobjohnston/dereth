@@ -74,10 +74,9 @@ fn compiled() -> &'static Compiled {
     C.get_or_init(|| compile_at(&database()))
 }
 
-/// The item rows the database's world plays by: its rows', the server's own for each kind it
-/// gives none of.
+/// The item rows the database's world plays by: its rows.
 pub(crate) fn item_rows() -> yalain_content::item_rows::ItemRows {
-    yalain_world::item_use::world_item_rows(compiled().tables.items.clone()).0
+    compiled().tables.items.clone()
 }
 
 /// The treasure numbers the database's world plays by: its rows', the server's own for each kind
@@ -86,11 +85,9 @@ pub(crate) fn treasure_tables() -> yalain_world::treasure::TreasureTables {
     yalain_world::treasure::TreasureTables::with_rows(&compiled().tables.treasure).0
 }
 
-/// The worn looks the database's world plays by: its `[[worn]]` rows, the server's own when it
-/// gives none.
+/// The worn looks the database's world plays by: its `[[worn]]` rows.
 pub(crate) fn worn_looks() -> &'static yalain_content::worn_table::WornLooks {
-    static W: OnceLock<yalain_content::worn_table::WornLooks> = OnceLock::new();
-    W.get_or_init(|| yalain_content::worn_table::world_worn(&compiled().tables.worn).0)
+    &compiled().tables.worn
 }
 
 /// The pinned release compiled, once (the database itself when it is the pinned release).
@@ -207,20 +204,14 @@ fn the_worlds_ward_rows_hold_the_six_wards_entry_for_entry() {
         .all(|w| !(w.classes.is_empty() && w.effects.is_empty())));
 }
 
-/// The immunities the database's world plays by are the server's own, entry for entry: the twelve
+/// The immunities the database's world plays by are the test world's, entry for entry: the twelve
 /// short effects of crowd control, each leaving its long one, and each long one's ward of its
-/// classes for certain; a world's rows are read as they are, one with none has the server's own.
+/// classes for certain.
 /// Behaviour: server.effects.immunity-rows-as-2017
 #[test]
-fn the_worlds_immunity_rows_are_the_servers_own_entry_for_entry() {
-    use yalain_world::effect_defs::{immunities_or_2017, EffectRules};
-    let world = &compiled().tables.effect_rules;
-    let mut rules = world.clone();
-    if !immunities_or_2017(&mut rules) {
-        assert_eq!(&rules, world, "its rows as they are");
-    }
-    let mut own = EffectRules::default();
-    immunities_or_2017(&mut own);
+fn the_worlds_immunity_rows_are_the_test_worlds_entry_for_entry() {
+    let rules = &compiled().tables.effect_rules;
+    let own = yalain_testkit::test_effect_rules();
     assert_eq!(rules.immunities.len(), 12);
     assert_eq!(rules.immunities, own.immunities);
     for long in own.immunities.values() {
@@ -257,7 +248,7 @@ fn the_worlds_crystalabra_rows_give_its_cure_through_its_quest() {
         quest
             .effects
             .iter()
-            .any(|(_, e)| *e == yalain_testkit::CRYSTALABRA_CURE),
+            .any(|(_, e, _)| *e == yalain_testkit::CRYSTALABRA_CURE),
         "{:?}",
         quest.effects
     );
@@ -265,12 +256,12 @@ fn the_worlds_crystalabra_rows_give_its_cure_through_its_quest() {
     assert!(quest.hidden);
 }
 
-/// A world's mine and map region rows hold the server's own, entry for entry: each mining skill's
+/// A world's mine and map region rows hold the test world's, entry for entry: each mining skill's
 /// behavior, tools, answers, delving node, lodestones and finds, each region's nodes by their
-/// effects, and what each mining tool yields unmade; so a world with them mines as one without.
+/// effects, and what each mining tool yields unmade.
 /// Behaviour: server.craft.gathering-rows-hold-the-servers-own
 #[test]
-fn the_worlds_mine_and_map_region_rows_hold_the_servers_own_entry_for_entry() {
+fn the_worlds_mine_and_map_region_rows_hold_the_test_worlds_entry_for_entry() {
     let t = &compiled().tables;
     let mut craft = yalain_world::craft::Crafting {
         tool_yields: t.crafting.tool_yields.clone().into_iter().collect(),
@@ -293,13 +284,12 @@ fn the_worlds_mine_and_map_region_rows_hold_the_servers_own_entry_for_entry() {
     }
 }
 
-/// A world's item use, book and first gift rows hold the server's own, entry for entry: the
+/// A world's item use, book and first gift rows hold the test world's, entry for entry: the
 /// forager's food's and the training hall's potions' effects, behavior and wear, what the cards and
-/// the Shi show, and the guide every new character is given; so a world with them plays as one
-/// without.
+/// the Shi show, and the guide every new character is given.
 /// Behaviour: server.items.item-rows-hold-the-servers-own
 #[test]
-fn the_worlds_item_use_book_and_start_item_rows_hold_the_servers_own_entry_for_entry() {
+fn the_worlds_item_use_book_and_start_item_rows_hold_the_test_worlds_entry_for_entry() {
     let world = item_rows();
     let own = yalain_testkit::test_item_rows();
     for (t, u) in &own.uses {
@@ -311,14 +301,13 @@ fn the_worlds_item_use_book_and_start_item_rows_hold_the_servers_own_entry_for_e
     assert_eq!(world.start_items, own.start_items);
 }
 
-/// A world's map recipes, spellbinding and refining rows hold the server's own, entry for entry: each
+/// A world's map recipes, spellbinding and refining rows hold the test world's, entry for entry: each
 /// region's five recipes, the effects that set and end their wait and how long; each sort's totem
 /// and its word; each refining recipe's product and the level it yields all at.
 /// Behaviour: server.craft.crafting-rows-hold-the-servers-own
 #[test]
-fn the_worlds_map_recipes_spellbinding_and_refining_rows_hold_the_servers_own_entry_for_entry() {
-    let t = &compiled().tables;
-    let (c, _) = yalain_world::craft::world_crafts(&t.crafts);
+fn the_worlds_map_recipes_spellbinding_and_refining_rows_hold_the_test_worlds_entry_for_entry() {
+    let c = &compiled().tables.crafts;
     let own = yalain_testkit::test_crafts();
     assert_eq!(c.map_recipes, own.map_recipes);
     assert_eq!(c.refining, own.refining);
@@ -328,14 +317,13 @@ fn the_worlds_map_recipes_spellbinding_and_refining_rows_hold_the_servers_own_en
     }
 }
 
-/// A world's plant and plant cross rows hold the server's own, entry for entry: each species'
+/// A world's plant and plant cross rows hold the test world's, entry for entry: each species'
 /// plant, seed, pollen, plant item and pollen's name, and each of its crosses' seeds and how many;
 /// and every other cross is of a species' plant and pollen and gives a species' seeds, one to three.
 /// Behaviour: server.plants.plant-rows-hold-the-servers-own
 #[test]
-fn the_worlds_plant_and_plant_cross_rows_hold_the_servers_own_entry_for_entry() {
-    let t = &compiled().tables;
-    let (plants, _) = yalain_world::plants::world_plants(&t.plants);
+fn the_worlds_plant_and_plant_cross_rows_hold_the_test_worlds_entry_for_entry() {
+    let plants = &compiled().tables.plants;
     let own = yalain_testkit::test_plants();
     assert_eq!(plants.species, own.species);
     for (pair, cross) in &own.crosses {
@@ -349,17 +337,12 @@ fn the_worlds_plant_and_plant_cross_rows_hold_the_servers_own_entry_for_entry() 
     }
 }
 
-/// A world's worn rows hold the server's own, entry for entry and in each template's order: 147
+/// A world's worn rows hold the test world's, entry for entry and in each template's order: 147
 /// looks of 75 templates.
 /// Behaviour: server.inventory.worn-rows-hold-the-servers-own
 #[test]
-fn the_worlds_worn_rows_hold_the_servers_own_entry_for_entry() {
-    let rows = &compiled().tables.worn;
-    println!("the world's worn rows: {}", rows.iter().count());
-    assert_eq!(
-        *worn_looks(),
-        yalain_content::worn_table::WornLooks::servers_own()
-    );
+fn the_worlds_worn_rows_hold_the_test_worlds_entry_for_entry() {
+    assert_eq!(worn_looks(), yalain_testkit::test_worn_looks());
     assert_eq!(worn_looks().iter().count(), 147);
 }
 
@@ -1030,7 +1013,13 @@ fn killed_as(h: &mut Harness, me: u64, template: u32, install: &DatInstall<'_>) 
         p.position.cell = 0x0299_0109;
         p.position.origin = [59.06, 240.2, -44.6];
     }
+    // The creatures' test catalog keeps the world's templates beside it: what a step gives after
+    // the kill is made from them.
+    let kept = std::mem::take(&mut h.server.catalog.templates);
     h.add_creatures(1);
+    for (id, t) in kept {
+        h.server.catalog.templates.entry(id).or_insert(t);
+    }
     h.run(20);
     let id = h
         .server
@@ -1156,7 +1145,7 @@ fn a_kill_sends_the_updates_recorded_kills_were_sent() {
             },
             (0, update::ADVANCE) => (Some((kind & 0xFFFF) - 1), *moves),
             // A last phase that waits is ended by someone used, not by a kill.
-            (0, update::COMPLETE) if t.quests.quest(quest).is_some_and(|d| d.last_waits) => {
+            (0, update::COMPLETE) if t.quests.quest(quest).is_some_and(|d| d.last_waits()) => {
                 continue
             }
             (0, update::COMPLETE) => (Some(last), *moves),
@@ -1205,7 +1194,7 @@ fn a_kill_sends_the_updates_recorded_kills_were_sent() {
     assert!(wrong.is_empty(), "{:08X?}", &wrong[..wrong.len().min(6)]);
     // A last phase that waits: the first kill quest of the people's is told nothing more.
     let waits = 0x8000_00B7;
-    assert!(t.quests.quest(waits).is_some_and(|d| d.last_waits));
+    assert!(t.quests.quest(waits).is_some_and(|d| d.last_waits()));
     let last = t.quests.quest(waits).expect("a row").journals.len();
     let last = u32::try_from(last).expect("a few phases");
     for p in h.server.players.values_mut() {
@@ -1423,6 +1412,18 @@ fn a_person_gives_a_kill_quest_and_takes_it_back_as_the_recordings_show() {
                         use_person(&mut h, b, me, t, o);
                         tries += 1;
                     }
+                    // A use that sends the player on (Kahuawa's duel) lands, and the client draws
+                    // the scene there, before the next.
+                    let until = h.now.0 + 12.0;
+                    h.run_to(yalain_net::LocalTime(until));
+                    h.bots[b].send(
+                        true,
+                        queue::WEENIE,
+                        &auberean_protocol::ClientMessage::SceneRenderingComplete(
+                            auberean_protocol::login::Empty,
+                        ),
+                    );
+                    h.run(5);
                 }
                 Do::Kill(creature) => killed_as(&mut h, me, creature, &install),
             }
@@ -1571,7 +1572,7 @@ fn the_death_spawns_name_creatures() {
         ("Eff_FortTears_SpawnDrudgeHelper1", 0.7),
         ("Eff_SpawnShrethHelpers", 1.0),
     ] {
-        let spawn = t.death_spawns[name];
+        let spawn = &t.death_spawns[name];
         assert!((spawn.chance - want).abs() < f32::EPSILON, "{name}");
         assert!(stats(spawn.template).is_some(), "{name} makes a creature");
     }
@@ -1579,7 +1580,7 @@ fn the_death_spawns_name_creatures() {
     assert!(sentry
         .death_effects
         .iter()
-        .any(|e| t.death_spawns.contains_key(e)));
+        .any(|(e, _)| t.death_spawns.contains_key(e)));
 }
 
 /// A Gauntlet: its band's use of the Master gives it, the Portal sends to the first arena, each kill
@@ -1953,7 +1954,7 @@ fn a_players_rating_moved_in_2017_by_the_points_of_what_it_completed() {
 
 /// The install's effects a quest's updates put on its player, read as a server reads them.
 fn effects_of(def: &yalain_content::quests::QuestDef) -> yalain_world::effect_defs::EffectTable {
-    let states: Vec<u32> = def.effects.iter().map(|(_, e)| *e).collect();
+    let states: Vec<u32> = def.effects.iter().map(|(_, e, _)| *e).collect();
     effects_read(&states, &compiled().tables.effect_rules)
 }
 
@@ -2337,9 +2338,34 @@ fn a_person_says_its_under_level_line_to_a_player_too_low_and_to_no_one_else() {
     }
 }
 
+/// A quest whose name the install's text can't write is named in the words of its own name in the
+/// quest enumeration: Marsh Terror's definition names a token its table sends on to a table of its
+/// own, which the install lacks (as 2017's servers sent it, which held that table), and another's
+/// a token its table doesn't hold. A name the install writes keeps its reference.
+/// Behaviour: server.world-db.quest-names-the-install-cannot-write
+#[test]
+fn a_quest_whose_name_the_install_cannot_write_is_named_in_its_own_names_words() {
+    use yalain_content::Words;
+    let t = &compiled().tables;
+    let name = |quest: u32| {
+        t.quests
+            .quest(quest)
+            .expect("the quest has a row")
+            .name
+            .clone()
+    };
+    assert_eq!(
+        name(0x8000_0383),
+        Words::Literal("Marsh Terror Must Be Stopped".into())
+    );
+    assert_eq!(name(0x8000_02D4), Words::Literal("SC 1 Hamekh".into()));
+    assert_eq!(name(0x8000_02DD), Words::Ref(0xB563_8728, 0x2500_174A));
+}
+
 /// The quests 2017 listed with no words of their own are shown, not hidden: three entries held
-/// the postings' two done quests, with the strings their definitions name, which are empty. A quest
-/// is hidden for having no string, not for an empty one.
+/// the postings' two done quests, with the strings their definitions name: an empty description,
+/// and names whose text the install doesn't hold, said instead in the words of the quests' own
+/// names. A quest is hidden for having no string, not for an empty one.
 /// Behaviour: server.quests.empty-words-are-still-listed
 #[test]
 fn the_quests_2017_listed_with_empty_words_are_listed() {
@@ -2347,12 +2373,12 @@ fn the_quests_2017_listed_with_empty_words_are_listed() {
     use yalain_world::state::QuestState;
     let t = &compiled().tables;
     for (quest, name, journal) in [
-        (0x8000_028D_u32, 0xC2D0_C9C9_u32, 0xFAA2_0995_u32),
-        (0x8000_028B, 0xDB7E_E1BD, 0xFAA2_0995),
+        (0x8000_028D_u32, "Posting Complete", 0xFAA2_0995_u32),
+        (0x8000_028B, "Posting Company Complete", 0xFAA2_0995),
     ] {
         const TABLE: u32 = 0x2500_1654;
         let d = t.quests.quest(quest).expect("the quest has a row");
-        assert_eq!(d.name, (name, TABLE));
+        assert_eq!(d.name, yalain_content::Words::Literal(name.into()));
         assert_eq!(d.description, (journal, TABLE));
         assert_eq!(d.icon, 0x4100_034B);
         assert!(!is_hidden(&t.quests, d), "{quest:08X} is shown");
@@ -3602,7 +3628,7 @@ fn an_ulkas_mine_is_given_by_a_guard_after_its_toll_and_its_last_gem_ends_the_to
                 &mut h.net,
                 world,
                 (0, guard, None),
-                &[effect.to_string()],
+                &[(effect.to_string(), 1)],
                 clock,
             );
             h.run(2);
@@ -4298,6 +4324,7 @@ fn creatures_hits_on_pets_take_what_2017_recorded_by_kind_and_level() {
                     variance,
                     added: 0.0,
                     factor: 1.0,
+                    threshold: yalain_world::rules::ARMOR_FLOOR.1,
                 };
                 let sum: i64 = (0..DRAWS)
                     .map(|_| {
@@ -4376,7 +4403,7 @@ fn a_practice_gem_makes_its_dummy_at_its_place_for_its_ninety_seconds() {
     h.server.death_spawns = t
         .death_spawns
         .iter()
-        .map(|(k, v)| (k.clone(), *v))
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let quest = ids["Quest_DeadlyDummy30"];
     h.server.quest_ids = ids;
@@ -4482,7 +4509,6 @@ fn everything_the_worlds_rows_make_reads_from_the_install() {
     let t = &compiled().tables;
     let portal = yalain_testkit::authored::Portal::open();
     let items = item_rows();
-    let (plants, _) = yalain_world::plants::world_plants(&t.plants);
     let named = yalain_world::makes::by_the_rows(yalain_world::makes::Rows {
         objects: &t.content.objects,
         stores: &t.stores,
@@ -4491,7 +4517,8 @@ fn everything_the_worlds_rows_make_reads_from_the_install() {
         death_spawns: &t.death_spawns,
         pets: &t.pet_kinds,
         items: &items,
-        plants: &plants,
+        plants: &t.plants,
+        effect_rules: &t.effect_rules,
     });
     for template in named {
         assert_eq!(portal.template(template).id, template);
@@ -4770,7 +4797,8 @@ fn the_loot_draw_holds_items_and_value_a_corpse_inside_2017s_intervals() {
             c.stats = s.clone();
             c.camp = None;
         }
-        yalain_world::death::roll_loot(&mut h.server, &creature, 0)
+        let clock = h.clock();
+        yalain_world::death::roll_loot(&mut h.server, &creature, 0, clock)
             .into_iter()
             .map(|(t, v)| (t, v.unwrap_or(0)))
             .collect()
@@ -4901,12 +4929,16 @@ fn the_loot_draw_holds_items_and_value_a_corpse_inside_2017s_intervals() {
 
 /// The world's treasure numbers, words, looks, potions and enchantments, its rows' or the server's
 /// own for each kind it gives none of, draw the seeded drops exactly as they were recorded: the world's treasure
-/// rows are 2017's.
+/// rows are 2017's. The weights for droppers with a loot quality override, which the server's own
+/// numbers leave out, are 2017's for those droppers where the world gives them.
 /// Behaviour: server.loot.treasure-numbers-from-rows
 #[test]
 fn the_worlds_treasure_numbers_draw_the_seeded_drops_as_recorded() {
     let t = &compiled().tables;
-    let (tables, fell_back) = yalain_world::treasure::TreasureTables::with_rows(&t.treasure);
+    let (mut tables, fell_back) = yalain_world::treasure::TreasureTables::with_rows(&t.treasure);
+    if let Some(w) = tables.rules.above_base_override.take() {
+        assert_eq!(w, [148.0, 183.0, 60.0], "2017's override drops");
+    }
     println!("the world's treasure numbers, the server's own for: {fell_back:?}");
     let p = yalain_testkit::authored::Portal::open();
     yalain_testkit::treasure_drops::seeded_drops(&p, tables).hold_recorded();
@@ -5054,17 +5086,16 @@ fn a_mushroom_hunt_gives_lies_hands_in_and_ends_with_its_stew() {
 }
 
 /// **A cancel waits as its world says**: every 2017 cancel's answer names the wait the world's rows
-/// give its quest before it may be taken again (a world naming none, the server's own), five hours
-/// for eleven quests and the rule's five minutes for the rest.
+/// give its quest before it may be taken again, five hours for eleven quests and the rule's five
+/// minutes for the rest.
 /// Behaviour: server.quests.cancel-waits-as-rows-say
 #[test]
 fn every_recorded_cancel_names_the_wait_the_world_gives_its_quest() {
     use auberean_script::args::{decode, Arg};
     use auberean_script::graph::{Body, PackedObject};
     use auberean_script::native_object::NativeObject;
-    use yalain_world::quests::{cancel_waits_or_2017, status, wait_after, UPDATE_QUEST};
-    let mut quests = compiled().tables.quests.clone();
-    cancel_waits_or_2017(&mut quests);
+    use yalain_world::quests::{status, wait_after, UPDATE_QUEST};
+    let quests = &compiled().tables.quests;
     let lib = super::keeping::library().expect("the client library reads");
     let con = super::keeping::open(&auberean_testkit::data::require_capture_index());
     let mut st = con
@@ -5125,12 +5156,9 @@ fn every_recorded_cancel_names_the_wait_the_world_gives_its_quest() {
 /// Behaviour: server.gives.hero-transformation
 #[test]
 fn the_heros_transformation_and_the_vitae_tap_read_as_the_server_starts_them() {
-    use yalain_world::effect_defs::{vitae_taps_or_2017, Kind};
+    use yalain_world::effect_defs::Kind;
     let t = &compiled().tables;
-    let mut quests = t.quests.clone();
-    yalain_world::gives::transformations_or_2017(&mut quests);
-    let mut rules = t.effect_rules.clone();
-    vitae_taps_or_2017(&mut rules);
+    let (quests, rules) = (&t.quests, &t.effect_rules);
     let hero = quests
         .steps
         .iter()
@@ -5141,7 +5169,13 @@ fn the_heros_transformation_and_the_vitae_tap_read_as_the_server_starts_them() {
         .expect("Elysa's last step");
     assert_eq!(
         hero.transforms,
-        Some(yalain_world::gives::transformation_2017())
+        Some(yalain_content::quests::Transformation {
+            seconds: 25.59,
+            fx: vec![0x4100_04A5, 0x4100_04B5],
+            behavior: Some(0x4100_0120),
+            text: Some((0x2EE2_0FE4, 0x2500_2BE3)),
+            name: 0x9D06_6C50,
+        })
     );
     let others = quests
         .steps
@@ -5150,7 +5184,7 @@ fn the_heros_transformation_and_the_vitae_tap_read_as_the_server_starts_them() {
         .count();
     assert_eq!(others, 1, "the one hero's step");
     let states: Vec<u32> = quests.effect_states().collect();
-    let effects = effects_read(&states, &rules);
+    let effects = effects_read(&states, rules);
     let tap = effects.get(0x6F00_1C64).expect("the tap");
     assert_eq!(tap.kind, Kind::VitaeTap(0.1));
     assert_eq!(tap.fx, 0x4100_030B, "its own appearance");
@@ -5162,30 +5196,702 @@ fn the_heros_transformation_and_the_vitae_tap_read_as_the_server_starts_them() {
     assert!(!heroize.lasts() && heroize.fx == 0, "nothing more");
 }
 
-/// **Creatures' behavior as 2017's**: what the server reads of creatures' behavior, the world's rows
-/// or its own for a kind the world has none of, is 2017's entry for entry: 27 concealing rows of 23
-/// effects, the five healers' behavior tables, the five friend tables that never attack a player
-/// first, and the six shooters' rhythms of the start area. A world's rows are read as they are.
+/// **Creatures' behavior as 2017's**: the world's creature rows are 2017's entry for entry, and
+/// the test world's: 28 concealing rows of 24 effects, the five healers' behavior tables, the five
+/// friend tables that never attack a player first, the six shooters' rhythms of the start area, the
+/// 14 guards that mark the players they see and the one turret that takes on only the marked. The
+/// safe passages and the effects creatures hold from their first moment are their walks' to hold.
 /// Behaviour: server.creatures.behavior-rows-as-2017
 #[test]
 fn the_worlds_creature_rows_are_2017s_entry_for_entry() {
-    let world = compiled().tables.creatures.clone();
-    let (rows, fell_back) = yalain_world::creature_rows::world_creature_rows(world.clone());
-    if fell_back.is_empty() {
-        assert_eq!(rows, world);
-    }
-    assert_eq!(rows.concealing.len(), 27);
+    let mut rows = compiled().tables.creatures.clone();
+    rows.safe_passage.clear();
+    rows.effects.clear();
+    let rows = &rows;
+    assert_eq!(rows.concealing.len(), 28);
     let effects: std::collections::BTreeSet<u32> =
         rows.concealing.keys().map(|(e, _)| *e).collect();
-    assert_eq!(effects.len(), 23);
+    assert_eq!(effects.len(), 24);
     assert_eq!(
         (
             rows.heals_kin.len(),
             rows.attacks_first.len(),
-            rows.rhythms.len()
+            rows.rhythms.len(),
+            rows.marks.len(),
+            rows.only_hated.len()
         ),
-        (5, 5, 6)
+        (5, 5, 6, 14, 1)
     );
-    assert_eq!(rows, yalain_world::creature_rows::fallback());
-    assert_eq!(rows, yalain_testkit::test_creature_rows());
+    assert_eq!(*rows, yalain_testkit::test_creature_rows());
+}
+
+/// **The marked alone are shot**: the world's 14 marking guards each put on the mark, whose row makes
+/// the turret's class hate its holder; the turret, of that class and of a friend table that never
+/// attacks first, takes on only those it hates, and each guard sees as far as its own data says.
+/// Behaviour: server.creatures.only-the-hated
+#[test]
+fn the_worlds_hated_only_turret_is_of_the_class_its_mark_makes_hate() {
+    use yalain_content::creature_rows::Regard;
+    use yalain_testkit::{MARK, MARKED_ONLY, MARKERS, MARK_HATED_BY};
+    let rows = &compiled().tables.creatures;
+    let portal = yalain_testkit::authored::Portal::open();
+    let turret = portal.template(MARKED_ONLY);
+    assert_eq!(
+        (
+            turret.props.word("AI_AISuperClass"),
+            turret.props.word("AI_LoveTable")
+        ),
+        (Some(MARK_HATED_BY), Some(0x23))
+    );
+    assert_eq!(rows.attacks_first.get(&0x23), Some(&false));
+    assert_eq!(
+        rows.concealing.get(&(MARK, Some(MARK_HATED_BY))),
+        Some(&Regard::Hates)
+    );
+    assert!(rows.only_hated.contains(&MARKED_ONLY));
+    for m in MARKERS {
+        assert_eq!(rows.marks.get(&m).map(|k| k.effect), Some(MARK), "{m:#x}");
+        let seen = portal.template(m).props.float("AI_PerceptionRadius");
+        assert!(matches!(seen, Some(r) if r == 10.0 || r == 15.0), "{m:#x}");
+    }
+}
+
+/// **Thorsten Cragstone's Olthoi hunts walk through**: a use of him gives each of his five hunts
+/// (one at random, as a person with several does), the kill of either creature the install names
+/// for it moves it on, and a use of him ends it.
+/// Behaviour: server.quests.olthoi-hunts-walk-through
+#[test]
+fn each_olthoi_hunt_is_given_by_thorsten_moved_by_its_kill_and_ended_by_him() {
+    use yalain_world::quests::status;
+    const THORSTEN: u32 = 0x4700_2F44;
+    const HUNTS: [(u32, [u32; 2]); 5] = [
+        (0x4000_0259, [0x4700_2939, 0x4700_293A]),
+        (0x4000_025A, [0x4700_292F, 0x4700_2930]),
+        (0x4000_025B, [0x4700_290D, 0x4700_290F]),
+        (0x4000_025C, [0x4700_2910, 0x4700_2913]),
+        (0x4000_025D, [0x4700_2929, 0x4700_292A]),
+    ];
+    let t = &compiled().tables;
+    let install = dat_install();
+    let o = t
+        .content
+        .objects
+        .iter()
+        .position(|o| o.template == THORSTEN)
+        .expect("Thorsten is placed");
+    let held = |h: &Harness, quest: u32| {
+        h.server.players.values().next().and_then(|p| {
+            p.play
+                .quests
+                .iter()
+                .find(|x| x.quest == quest)
+                .map(|x| (x.status, x.phase))
+        })
+    };
+    for (quest, creatures) in HUNTS {
+        for creature in creatures {
+            let (mut h, b, me) = served(t);
+            h.server.quest_ids = quest_ids();
+            set_level(&mut h, 50);
+            for p in h.server.players.values_mut() {
+                yalain_world::quals::set_bool(&mut p.qualities, yalain_world::focus::HERO, true);
+            }
+            let mut tries = 0;
+            use_person(&mut h, b, me, t, o);
+            while tries < 60 && !holds(&h, quest) {
+                for p in h.server.players.values_mut() {
+                    p.play.quests.clear();
+                }
+                use_person(&mut h, b, me, t, o);
+                tries += 1;
+            }
+            assert_eq!(
+                held(&h, quest),
+                Some((status::UNDERWAY, 1)),
+                "{quest:08X} given"
+            );
+            killed_as(&mut h, me, creature, &install);
+            assert_eq!(
+                held(&h, quest),
+                Some((status::UNDERWAY, 2)),
+                "{quest:08X} after {creature:08X}"
+            );
+            use_person(&mut h, b, me, t, o);
+            assert_eq!(
+                held(&h, quest).map(|x| x.0),
+                Some(status::COMPLETED),
+                "{quest:08X} ended"
+            );
+        }
+    }
+}
+
+/// **The Hierophant Temple walks through**: its portal takes in only a player with Seskri's quest
+/// under way; each of its four chamber doors is locked from the way in and opens with its
+/// preceptor's talisman; the Hierophant stands at its end and its corpse holds its talisman, whose
+/// taking brings her quest to its last phase, where she takes it; and its ways out lead back beside
+/// the portal.
+/// Behaviour: server.quests.hierophant-temple-walk-through
+#[test]
+fn the_hierophant_temple_opens_by_the_talismans_and_its_last_guardian_ends_seskris_quest() {
+    use yalain_store::StoredPosition;
+    use yalain_world::quests::status;
+    use yalain_world::usable::doors::in_front;
+    use yalain_world::usable::maps::ground_distance;
+    const QUEST: u32 = 0x4000_0101;
+    const TEMPLE: u32 = 0x09FB;
+    const HIEROPHANT: u32 = 0x4700_2A4E;
+    const ITS_TALISMAN: u32 = 0x4700_18A8;
+    // Each chamber door, by its id, and the preceptor's talisman that opens it.
+    const DOORS: [(u64, u32); 4] = [
+        (0x4009_FB00_0000_0001, 0x4700_18A4),
+        (0x4009_FB00_0000_0002, 0x4700_18A6),
+        (0x4009_FB00_0000_0003, 0x4700_18AC),
+        (0x4009_FB00_0000_0004, 0x4700_18AE),
+    ];
+    let t = &compiled().tables;
+    let portal = yalain_testkit::authored::Portal::open();
+    let at = |cell: u32, origin: [f32; 3], rotation: [f32; 4]| StoredPosition {
+        cell,
+        origin,
+        rotation,
+    };
+    let way_in = t
+        .content
+        .objects
+        .iter()
+        .find(|o| {
+            o.cell >> 16 != TEMPLE
+                && o.destination
+                    .as_ref()
+                    .is_some_and(|d| d.cell >> 16 == TEMPLE)
+        })
+        .expect("a portal into the temple");
+    let gate = way_in.gate.expect("the temple's portal is gated");
+    assert_eq!((gate.quest, gate.status), (QUEST, status::UNDERWAY));
+    let landing = way_in.destination.expect("its landing");
+    let mut before = at(landing.cell, landing.origin, landing.rotation);
+    for (id, talisman) in DOORS {
+        let door = t
+            .content
+            .objects
+            .iter()
+            .find(|o| o.object == Some(id))
+            .unwrap_or_else(|| panic!("{id:016X} placed"));
+        assert_eq!(door.cell >> 16, TEMPLE, "{id:016X}");
+        let key = as_installed(&portal, talisman).props.word("Lock_KeyID");
+        assert!(key.is_some(), "{talisman:08X} is a key");
+        assert_eq!(
+            t.locks.of(id).map(|l| l.key),
+            Some(key),
+            "{id:016X} is locked to {talisman:08X}"
+        );
+        let here = at(door.cell, door.origin, door.rotation);
+        assert!(
+            in_front(&here, &before),
+            "{id:016X} is locked from the way in"
+        );
+        before = here;
+    }
+    let camp = t
+        .spawns
+        .camps
+        .iter()
+        .find(|c| c.templates.iter().any(|(m, _)| *m == HIEROPHANT))
+        .expect("the Hierophant's camp");
+    assert_eq!(camp.cell >> 16, TEMPLE);
+    let hoard = as_installed(&portal, HIEROPHANT)
+        .props
+        .word("NPC_DeathLootProfile")
+        .expect("its loot profile");
+    let profile = t
+        .loot
+        .profiles
+        .iter()
+        .find(|p| p.name.contains("Hierophant"))
+        .expect("its loot row");
+    assert_eq!(hoard, 0x479, "{}", profile.name);
+    assert!(
+        profile.extras.contains(&(ITS_TALISMAN, 1.0)),
+        "{:?}",
+        profile.extras
+    );
+    let outs: Vec<_> = t
+        .content
+        .objects
+        .iter()
+        .filter(|o| {
+            o.cell >> 16 == TEMPLE
+                && o.destination
+                    .as_ref()
+                    .is_some_and(|d| d.cell >> 16 != TEMPLE)
+        })
+        .collect();
+    assert!(outs.len() >= 2, "a way out by the landing and at the end");
+    for o in outs {
+        let d = o.destination.as_ref().expect("a destination");
+        let near = ground_distance(
+            &at(d.cell, d.origin, d.rotation),
+            &at(way_in.cell, way_in.origin, way_in.rotation),
+        );
+        assert!(near < 10.0, "{near}");
+    }
+    let (mut h, _, _) = served(t);
+    h.server.quest_ids = quest_ids();
+    let world = player_world(&h);
+    h.server.catalog.insert(as_installed(&portal, ITS_TALISMAN));
+    quest_at(&mut h, QUEST, 5);
+    let clock = h.clock();
+    yalain_world::quests::took(&mut h.server, &mut h.net, world, ITS_TALISMAN, clock);
+    assert_eq!(quest_state(&h, QUEST), Some((status::UNDERWAY, 6)));
+    hand_in(&mut h, &portal, ITS_TALISMAN, 0x4700_3293);
+    assert_eq!(quest_state(&h, QUEST).map(|q| q.0), Some(status::COMPLETED));
+}
+
+/// Knorr's people for its connectors: Captain Trammel, Elite Legionary Otonku and Legionary
+/// Brigadier Maekarn.
+const TRAMMEL: u32 = 0x4700_30EB;
+const OTONKU: u32 = 0x4700_30ED;
+const MAEKARN: u32 = 0x4700_30EF;
+
+/// A Knorr kill task as the world walks it: a use of its giver gives it, each kill of the creature
+/// whose death the install names for it, which a camp places, moves it a phase on to the phase its
+/// giver takes it back at, and a use of the giver there ends it. The kills it took.
+fn kill_task_walked(
+    h: &mut Harness,
+    (b, me): (usize, u64),
+    t: &Tables,
+    install: &DatInstall<'_>,
+    (quest, creature): (u32, u32),
+) -> u32 {
+    use yalain_content::quests::{Trigger, Update};
+    use yalain_world::quests::status;
+    let giver = t
+        .quests
+        .steps
+        .iter()
+        .find_map(|s| match s.trigger {
+            Trigger::Use(p) if s.quest == quest && s.needs == 0 && s.update == Update::Bestow => {
+                Some(p)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{quest:08X} has a giver"));
+    let end = t
+        .quests
+        .steps
+        .iter()
+        .find(|s| {
+            s.quest == quest && s.update == Update::Complete && s.trigger == Trigger::Use(giver)
+        })
+        .unwrap_or_else(|| panic!("{giver:08X} takes {quest:08X} back"))
+        .needs;
+    assert!(
+        t.spawns
+            .camps
+            .iter()
+            .any(|c| c.templates.iter().any(|(m, _)| *m == creature)),
+        "{creature:08X} is camped"
+    );
+    let o = placed(t, giver);
+    use_person(h, b, me, t, o);
+    assert_eq!(
+        state_of(h, quest),
+        Some((status::UNDERWAY, 1)),
+        "{quest:08X} given"
+    );
+    let mut kills = 0;
+    while kills < 40 && state_of(h, quest).is_some_and(|q| q.1 < end) {
+        killed_as(h, me, creature, install);
+        kills += 1;
+    }
+    assert_eq!(
+        state_of(h, quest),
+        Some((status::UNDERWAY, end)),
+        "{quest:08X} after {kills} kills of {creature:08X}"
+    );
+    use_person(h, b, me, t, o);
+    assert_eq!(
+        state_of(h, quest).map(|q| q.0),
+        Some(status::COMPLETED),
+        "{quest:08X} ended"
+    );
+    kills
+}
+
+/// **Knorr's Connector C walks through**: Captain Trammel gives it only once all six of the
+/// region's third kill tasks are done, each given, counted to 15 kills and taken back by its own
+/// giver; Elite Legionary Otonku ends it.
+/// Behaviour: server.quests.knorr-connector-c-walk-through
+#[test]
+fn knorr_connector_c_follows_its_six_kill_tasks_and_otonku_ends_it() {
+    use yalain_world::quests::status;
+    const CONNECTOR: u32 = 0x8000_01C1;
+    // Each task, and the creature whose death counts for it.
+    const TASKS: [(u32, u32); 6] = [
+        (0x8000_01F9, 0x4700_27DA),
+        (0x8000_01FA, 0x4700_2BDB),
+        (0x8000_01FB, 0x4700_2A3C),
+        (0x8000_01FC, 0x4700_2BA6),
+        (0x8000_01FD, 0x4700_2767),
+        (0x8000_01FE, 0x4700_2BFC),
+    ];
+    let t = &compiled().tables;
+    let install = dat_install();
+    let (mut h, b, me) = served(t);
+    h.server.quest_ids = quest_ids();
+    set_level(&mut h, 70);
+    let trammel = placed(t, TRAMMEL);
+    for task in TASKS {
+        use_person(&mut h, b, me, t, trammel);
+        assert_eq!(state_of(&h, CONNECTOR), None, "not before {:08X}", task.0);
+        assert_eq!(kill_task_walked(&mut h, (b, me), t, &install, task), 15);
+    }
+    use_person(&mut h, b, me, t, trammel);
+    assert_eq!(state_of(&h, CONNECTOR), Some((status::UNDERWAY, 1)));
+    use_person(&mut h, b, me, t, placed(t, OTONKU));
+    assert_eq!(
+        state_of(&h, CONNECTOR).map(|q| q.0),
+        Some(status::COMPLETED)
+    );
+}
+
+/// **Knorr's Connector D walks through**: Elite Legionary Otonku gives it, and with it the Aerie
+/// Report, only once the four high camp kill tasks are done, each given, counted to 20 kills and
+/// taken back by its own giver; the report given to Legionary Brigadier Maekarn ends it.
+/// Behaviour: server.quests.knorr-connector-d-walk-through
+#[test]
+fn knorr_connector_d_follows_its_four_kill_tasks_and_its_report_to_maekarn_ends_it() {
+    use yalain_world::quests::status;
+    const CONNECTOR: u32 = 0x8000_01C2;
+    const REPORT: u32 = 0x4700_15A7;
+    const TASKS: [(u32, u32); 4] = [
+        (0x8000_01FF, 0x4700_2552),
+        (0x8000_0200, 0x4700_29E0),
+        (0x8000_0202, 0x4700_28D0),
+        (0x8000_0203, 0x4700_28EC),
+    ];
+    let t = &compiled().tables;
+    let install = dat_install();
+    let portal = yalain_testkit::authored::Portal::open();
+    let (mut h, b, me) = served(t);
+    h.server.quest_ids = quest_ids();
+    set_level(&mut h, 70);
+    let otonku = placed(t, OTONKU);
+    let report_held = |h: &Harness| {
+        h.server
+            .players
+            .values()
+            .any(|p| p.play.items.iter().any(|i| i.template == REPORT))
+    };
+    for task in TASKS {
+        use_person(&mut h, b, me, t, otonku);
+        assert_eq!(state_of(&h, CONNECTOR), None, "not before {:08X}", task.0);
+        assert_eq!(kill_task_walked(&mut h, (b, me), t, &install, task), 20);
+    }
+    use_person(&mut h, b, me, t, otonku);
+    assert_eq!(state_of(&h, CONNECTOR), Some((status::UNDERWAY, 1)));
+    assert!(report_held(&h), "the report given");
+    hand_in(&mut h, &portal, REPORT, MAEKARN);
+    assert_eq!(
+        state_of(&h, CONNECTOR).map(|q| q.0),
+        Some(status::COMPLETED)
+    );
+    assert!(!report_held(&h), "the report taken");
+}
+
+/// The pinned release, packaged again from its files' layout alone, is the pin's archive byte for
+/// byte, as a full read packages it; and the database under test counts the same either way.
+/// Behaviour: server.world-db.release-packaged-from-its-layout
+#[test]
+fn the_pinned_release_packaged_from_its_layout_alone_is_the_pins_archive() {
+    use yalain_world_db::release::{self, PINNED_ZIP_SHA256};
+    let dir = pinned_in_cache().unwrap_or_else(|why| {
+        panic!("no pinned release: {why}. Fetch it ({PINNED_TAG}) with `yalain world fetch`")
+    });
+    let mut files = release::unpacked(&dir).expect("the release's files");
+    files.remove("manifest.json").expect("its manifest");
+    let layout =
+        rows::read_layout(&files).unwrap_or_else(|p| panic!("{}", yalain_world_db::report(&p)));
+    let carried = release::release_files(&files, &layout);
+    assert_eq!(carried, files, "a release carries every file it holds");
+    let zip = release::archive(&carried, &release::manifest(PINNED_TAG, &layout));
+    assert_eq!(release::sha256_hex(&zip), PINNED_ZIP_SHA256);
+    let full = rows::read(&files).unwrap_or_else(|p| panic!("{}", yalain_world_db::report(&p)));
+    assert_eq!(full.layout(), layout);
+
+    let under_test = load(&database());
+    let full =
+        rows::read(&under_test).unwrap_or_else(|p| panic!("{}", yalain_world_db::report(&p)));
+    assert_eq!(
+        rows::read_layout(&under_test).map_err(|p| yalain_world_db::report(&p)),
+        Ok(full.layout())
+    );
+}
+
+/// **The ways into the mapped dungeons go both ways**: each of the four portals the players' maps and
+/// the list of destinations place leads into its dungeon, a way out stands within 4 m of its landing
+/// and leads back near the portal, and every creature spot those maps give stands in one of its
+/// dungeon's own cells, where each kind its camp makes moves at its own size.
+/// Behaviour: server.world.mapped-dungeon-ways-in
+#[test]
+fn the_mapped_dungeons_ways_in_and_out_lead_both_ways() {
+    use dereth_primitives::num::math;
+    use yalain_store::StoredPosition;
+    use yalain_world::usable::doors;
+    use yalain_world::usable::maps::ground_distance;
+    use yalain_world_db::rows::Row;
+    const PACK: &str = "acmaps-camps";
+    // Each dungeon a way in is placed for, and how near its portal the way out leads back: the
+    // lair's leads to the surface end the list of destinations gives, 27 m from the portal recorded
+    // there.
+    const DUNGEONS: [(u32, f32); 4] = [
+        (0x04B0, 30.0),
+        (0x07BA, 10.0),
+        (0x07C1, 10.0),
+        (0x06FC, 10.0),
+    ];
+    let c = compiled();
+    let t = &c.tables;
+    let at = |cell: u32, origin: [f32; 3], rotation: [f32; 4]| StoredPosition {
+        cell,
+        origin,
+        rotation,
+    };
+    for (block, back_within) in DUNGEONS {
+        let way_in = t
+            .content
+            .objects
+            .iter()
+            .find(|o| {
+                o.cell >> 16 != block
+                    && o.destination
+                        .as_ref()
+                        .is_some_and(|d| d.cell >> 16 == block)
+            })
+            .unwrap_or_else(|| panic!("a way into {block:04X}"));
+        let landing = way_in.destination.as_ref().expect("its landing");
+        let out = t
+            .content
+            .objects
+            .iter()
+            .find(|o| {
+                o.cell >> 16 == block
+                    && o.destination
+                        .as_ref()
+                        .is_some_and(|d| d.cell >> 16 != block)
+            })
+            .unwrap_or_else(|| panic!("a way out of {block:04X}"));
+        let near_landing = ground_distance(
+            &at(out.cell, out.origin, out.rotation),
+            &at(landing.cell, landing.origin, landing.rotation),
+        );
+        assert!(near_landing < 4.0, "{block:04X}: {near_landing}");
+        let back = out.destination.as_ref().expect("its destination");
+        assert_eq!(back.cell >> 16, way_in.cell >> 16, "{block:04X}");
+        let near_portal = ground_distance(
+            &at(back.cell, back.origin, back.rotation),
+            &at(way_in.cell, way_in.origin, way_in.rotation),
+        );
+        assert!(near_portal < back_within, "{block:04X}: {near_portal}");
+    }
+    // The maps' camps, as the world plays them.
+    let keys: std::collections::BTreeSet<&str> = c
+        .merged
+        .rows
+        .iter()
+        .filter(|l| l.pack == PACK)
+        .filter_map(|l| match &l.row {
+            Row::Camp(camp) => Some(camp.key.as_str()),
+            _ => None,
+        })
+        .collect();
+    let camps: Vec<_> = t
+        .spawns
+        .camps
+        .iter()
+        .filter(|camp| keys.contains(camp.id.split('@').next().unwrap_or_default()))
+        .collect();
+    let blocks: std::collections::BTreeSet<u32> = camps.iter().map(|c| c.cell >> 16).collect();
+    assert_eq!(
+        blocks.iter().copied().collect::<Vec<_>>(),
+        [0x06FC, 0x4592, 0x76AE, 0x99C4],
+        "the maps' camps are in their four dungeons"
+    );
+    // The walls as the world stands them in those dungeons, with each camp's creatures' bodies.
+    let portal = yalain_testkit::authored::Portal::open();
+    let mut h = Harness::new();
+    let lib = portal.library();
+    let door = lib.package_id(doors::PACKAGE).expect("the doors' package");
+    h.server.content.objects = t
+        .content
+        .objects
+        .iter()
+        .filter(|o| blocks.contains(&(o.cell >> 16)))
+        .cloned()
+        .collect();
+    for o in &h.server.content.objects {
+        h.server.catalog.insert(portal.template(o.template));
+        let p = o.description.package;
+        if lib.derives_from(p, door) {
+            let kind = doors::Kind::of_package(&lib.package_name(p));
+            h.server.doors.packages.insert(p, kind);
+        }
+    }
+    let records = super::invariants::world_records();
+    let region = records.region().expect("the region");
+    let mut world = auberean_physics::world::World::new();
+    if let Some(list) = records.get::<auberean_assets::property::PropertyList>(0x3400_0000) {
+        world.set_property_list(list);
+    }
+    let mut bodies = std::collections::HashMap::new();
+    for (template, _) in camps.iter().flat_map(|c| c.templates.iter()) {
+        let made = as_installed(&portal, *template);
+        let walker = yalain_world::walls::walker(&records, &made.description)
+            .unwrap_or_else(|| panic!("{template:08X} has a body"));
+        let stats = yalain_content::CreatureStats::from_props(&made.props)
+            .unwrap_or_else(|| panic!("{template:08X} is a creature"));
+        bodies.insert(*template, (walker, stats.scale));
+    }
+    let mut walls = yalain_world::walls::Walls::new(
+        std::sync::Arc::new(auberean_physics::land::Land::new()),
+        world,
+        Box::new(yalain_world::walls::RecordBlocks::new(records, region)),
+    );
+    walls.walkers = bodies.iter().map(|(t, (w, _))| (*t, w.clone())).collect();
+    walls.set_standing(yalain_world::walls_standing(&h.server));
+    let ways: Vec<[f32; 2]> = (0..8u8)
+        .map(|k| {
+            let a = f32::from(k) * std::f32::consts::TAU / 8.0;
+            [math::sinf(a), math::cosf(a)]
+        })
+        .collect();
+    for camp in camps {
+        assert!(!camp.spots.is_empty(), "{} has its spots", camp.id);
+        for &(cell, origin) in &camp.spots {
+            let here = at(cell, origin, [1.0, 0.0, 0.0, 0.0]);
+            assert_eq!(cell >> 16, camp.cell >> 16, "{}: {cell:08X}", camp.id);
+            assert!(cell & 0xFFFF >= 0x100, "{}: {cell:08X} is a room", camp.id);
+            walls.read_place(cell);
+            let room = walls
+                .land()
+                .cell(dereth_primitives::CellId(cell))
+                .unwrap_or_else(|| panic!("{}: {cell:08X} reads", camp.id));
+            let point = dereth_primitives::Vec3::new(origin[0], origin[1], origin[2] + 0.5);
+            let local = auberean_physics::geom::point_to_local(&room.frame, point);
+            assert!(
+                room.cell_bsp
+                    .as_ref()
+                    .is_some_and(|b| b.point_inside_cell_bsp(local)),
+                "{}: {origin:?} is inside {cell:08X}",
+                camp.id
+            );
+            for (template, _) in &camp.templates {
+                let scale = bodies[template].1;
+                let moved = ways
+                    .iter()
+                    .filter_map(|d| walls.step(*template, scale, &here, *d))
+                    .map(|s| s.moved)
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    moved >= 0.5,
+                    "{}: {template:08X} at {cell:08X} {origin:?} moves {moved}",
+                    camp.id
+                );
+            }
+        }
+    }
+}
+
+/// **The hero initiation's recipes in silence**: the world keeps the effects of two rows quiet,
+/// the Hero Shrine's step and Elysa's Initiation give, each a recipe whose own table holds its
+/// line; run as the world serves it, the shrine's step teaches its three recipes and tells none of
+/// their lines (2017: 15 grants at 5 uses, none told).
+/// Behaviour: server.effects.a-quiet-rows-effects-tell-no-line
+#[test]
+fn the_hero_initiations_recipes_are_taught_without_their_lines() {
+    use yalain_world::effect_defs::Kind as EffectKind;
+    use yalain_world::effects::learned::LINE;
+    let t = &compiled().tables;
+    let mut quiet: Vec<(u32, &[u32])> = t
+        .quests
+        .steps
+        .iter()
+        .filter(|s| s.effects_quiet)
+        .map(|s| (s.quest, s.effects.as_slice()))
+        .collect();
+    quiet.sort_unstable();
+    let shrine: &[u32] = &[0x6F00_1C60, 0x6F00_1C62, 0x6F00_1C5E];
+    assert_eq!(
+        quiet,
+        [(0x4000_024A, &[0x6F00_1C5D][..]), (0x4000_0268, shrine)],
+        "the two rows"
+    );
+    assert!(t.quests.gives.iter().all(|g| !g.effects_quiet));
+    let step = t
+        .quests
+        .steps
+        .iter()
+        .find(|s| s.quest == 0x4000_0268)
+        .expect("the shrine's step")
+        .clone();
+
+    let (mut h, b, me) = served(t);
+    h.server.effect_table = effects_read(shrine, &t.effect_rules);
+    let mut recipes = Vec::new();
+    for e in shrine {
+        let d = h.server.effect_table.get(*e).expect("read");
+        let (EffectKind::GrantRecipe(recipe), Some((_, table))) = (&d.kind, d.name) else {
+            panic!("{e:08X} grants a named recipe");
+        };
+        recipes.push(*recipe);
+        // Its own table holds its line, as the start reads it.
+        h.server.effect_table.lines.insert(*e, (LINE, table));
+    }
+    let world = *h
+        .server
+        .players
+        .iter()
+        .find(|(_, p)| p.character == me)
+        .expect("in the world")
+        .0;
+    // Used, as the shrine's: it names who gave the recipes.
+    let i = t
+        .content
+        .objects
+        .iter()
+        .position(|o| o.template == 0x4700_3049)
+        .expect("the shrine placed");
+    let shrine_id = yalain_world::presence::content_id(&t.content.objects, i);
+    let by = Some((shrine_id, t.content.objects[i].description.name));
+    let from = h.bots[b].inbox.len();
+    let clock = h.clock();
+    yalain_world::quests::run(&mut h.server, &mut h.net, world, &step, by, clock);
+    h.run(2);
+    let calls = h.calls(b, from);
+    let taught: Vec<u32> = calls
+        .iter()
+        .filter(|(f, _)| *f == yalain_world::craft::function::ADD_RECIPE)
+        .filter_map(|(_, v)| {
+            v.iter().find_map(|x| match x {
+                yalain_world::calls::Value::Int(r) => Some(*r),
+                _ => None,
+            })
+        })
+        .collect();
+    for r in &recipes {
+        assert!(taught.contains(r), "{r:08X} taught: {taught:08X?}");
+    }
+    // What it does tell is the quest's own completion (2017's too, at each use).
+    let lines: Vec<(u32, u32)> = calls
+        .iter()
+        .filter(|(f, _)| *f == yalain_world::session::function::SHOW_TEXT)
+        .flat_map(|(_, v)| v.iter())
+        .filter_map(|x| match x.root() {
+            Some(yalain_world::calls::Node::TextInfo(t)) => Some((t.string_id, t.table)),
+            _ => None,
+        })
+        .filter(|(string, _)| *string == LINE)
+        .collect();
+    assert_eq!(lines, [], "no effect's line told");
 }

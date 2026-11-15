@@ -6,9 +6,9 @@
 //! (`auberean-pack`); the world database (`yalain-world-db`), whose rows, checks, merge over a
 //! base and compile a world uses as the server does, and the server's tables it compiles into
 //! (`yalain-content`); the data files (`auberean-dat`, `auberean-assets`) and the script library
-//! (`auberean-script`) a world is built against; what the land grows (`auberean-world`) and the
-//! overlay containers and shared helpers (`dereth-dat`, `dereth-primitives`) its client's records
-//! are built with; `toml_edit`, to change a pack's rows in place; and logging (`tracing`).
+//! (`auberean-script`) a world is built against, and the shared helpers (`dereth-primitives`);
+//! `toml_edit`, to change a pack's rows in place; and logging (`tracing`). Its overlay is built
+//! by the world database's own builder, as the server's compile builds it.
 //! **Used by** the `athenaeum` command (`athenaeum-cli`) and the editor
 //! (`athenaeum-editor`).
 //!
@@ -23,6 +23,8 @@
 //! - [`build`]: a world compiled against an install into the server's tables.
 //! - [`overlay`]: the client's records a world changes, built into a folder of their own.
 //! - [`facts`]: what a world changes, counted.
+//! - [`fields`]: the fields of a row as the editor shows them, each with the kind of value it
+//!   holds.
 //! - [`edit`]: a world held open for editing: rows placed, moved, turned, changed, removed and put
 //!   back, every change a step undone and redone as text, saved only where the text changed.
 //! - [`toml`]: rows written as the database writes them.
@@ -33,6 +35,7 @@
 pub mod build;
 pub mod edit;
 pub mod facts;
+pub mod fields;
 pub mod new;
 pub mod overlay;
 pub mod toml;

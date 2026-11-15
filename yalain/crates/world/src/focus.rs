@@ -3,7 +3,8 @@
 //! **Heroes.** Only a hero (its hero quality true) earns focus (2017: the focus quality was in
 //! exactly the 434 character descriptions of heroes). Becoming one sets its focus to its greatest
 //! (2017: the one character seen becoming a hero was sent its hero quality and 100 focus at once).
-//! Nothing in play makes a hero here: the operator's console, or a test, does.
+//! Nothing in play makes a hero here: the operator's console, or a test, does. A world's step or
+//! give may be for heroes alone: it runs for no one else.
 //!
 //! **Its greatest** is 100 and the character's own focus quality above it (with what its effects
 //! add); an award past it stops there (2017: 12 of 12 sent 100), and an award at it sends nothing
@@ -20,6 +21,10 @@
 //! **Resurrected**, a player with more than ten focus comes back with ten, sent after its health
 //! and vigor (2017: 18 of 20 resurrections from above ten; 19 of 19 in that order); ten or less is
 //! kept (2 of 2).
+//!
+//! **Spent** by a skill whose definition costs focus (the heroes' skills): its cost at the user's
+//! rating ([`crate::skill_use::focus_cost`]), paid as the use is carried out, after its vigor; a
+//! use the player hasn't the focus for is refused, and the client says so.
 
 use yalain_net::{ConnId, ServerNet};
 use yalain_store::Store;
@@ -45,6 +50,33 @@ pub fn is_hero(qualities: &[u8]) -> bool {
     quals::bool(qualities, HERO).unwrap_or(false)
 }
 
+/// May a step run for a player, by whether it is for heroes alone?
+#[must_use]
+pub fn allows_step<S: Store>(
+    s: &Server<S>,
+    world: ConnId,
+    step: &yalain_content::quests::Step,
+) -> bool {
+    let gates = &s.content.hero_gates;
+    gates.is_empty() || !gates.of_step(step) || hero_in_world(s, world)
+}
+
+/// May a give take its item from a player, by whether it is for heroes alone?
+#[must_use]
+pub fn allows_give<S: Store>(
+    s: &Server<S>,
+    world: ConnId,
+    give: &yalain_content::quests::Give,
+) -> bool {
+    let gates = &s.content.hero_gates;
+    gates.is_empty() || !gates.of_give(give) || hero_in_world(s, world)
+}
+
+/// Is a player in the world a hero?
+fn hero_in_world<S: Store>(s: &Server<S>, world: ConnId) -> bool {
+    s.players.get(&world).is_some_and(|p| is_hero(&p.qualities))
+}
+
 /// A player's greatest focus.
 #[must_use]
 pub fn greatest<S: Store>(s: &Server<S>, p: &crate::world::Player) -> i32 {
@@ -55,6 +87,17 @@ pub fn greatest<S: Store>(s: &Server<S>, p: &crate::world::Player) -> i32 {
 #[must_use]
 pub fn current<S: Store>(s: &Server<S>, p: &crate::world::Player) -> i32 {
     quals::int(&p.qualities, quality::FOCUS).unwrap_or_else(|| greatest(s, p))
+}
+
+/// A player's focus to spend: a hero's focus now; none for one who is no hero (2017: no character
+/// that was no hero held any).
+#[must_use]
+pub fn spendable<S: Store>(s: &Server<S>, p: &crate::world::Player) -> i32 {
+    if is_hero(&p.qualities) {
+        current(s, p)
+    } else {
+        0
+    }
 }
 
 /// A hero gains focus, up to its greatest: the new focus is sent, nothing when it was already at

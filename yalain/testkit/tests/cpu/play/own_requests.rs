@@ -1,8 +1,8 @@
 //! A player's own small requests: using another player (refused, the other told nothing), using an
 //! item of the pack that has no use (a mote refused, a dye plant and a lodestone only answered),
 //! setting and removing an alias (kept with the options, nothing answered), inscribing an item (a
-//! weapon takes it, anything else is refused with a text), listing the skills it trained, and
-//! cancelling a quest. Fixture: new players in the test world, made-up item templates and a made-up quest.
+//! weapon takes it, anything else is refused with a text) and taking it off, listing the skills it
+//! trained, and cancelling a quest. Fixture: new players in the test world, made-up item templates and a made-up quest.
 
 use std::collections::HashMap;
 
@@ -332,6 +332,91 @@ fn an_item_the_player_does_not_hold_takes_no_inscription() {
     }
 }
 
+/// Whoever wrote an inscription may take it off again, and is told so; another player holding the
+/// item is refused permission and the words stay, an item with none is "not inscribed", and one that
+/// takes no inscription, or isn't held, "cannot" be uninscribed.
+/// Behaviour: server.inventory.uninscribing-an-item
+#[test]
+fn only_the_inscriber_takes_an_inscription_off_and_others_are_told_why_not() {
+    let mut h = world_of_items();
+    let (a, _, one) = player(&mut h, "one");
+    let (b, _, two) = player(&mut h, "two");
+    let sword = give(&mut h, one, SWORD);
+    let mote = give(&mut h, one, MOTE);
+    let words = |s: &str| yalain_world::chat::text_arg(yalain_world::profile::literal(s));
+    let inscribed = |h: &Harness| {
+        h.server
+            .things
+            .get(sword)
+            .and_then(|t| t.inscription.clone())
+            .map(|(t, _)| t)
+    };
+    let uninscribe = |h: &mut Harness, bot: usize, item: u64| {
+        let from = h.bots[bot].inbox.len();
+        h.ask(bot, function::UNINSCRIBE, &[Arg::LongInt(item)], 3);
+        h.texts(bot, from)
+    };
+    h.ask(
+        a,
+        function::INSCRIBE,
+        &[words("Sharp"), Arg::LongInt(sword)],
+        3,
+    );
+    // Handed to another, who may not take the words off.
+    let pack = &mut h.server.players.get_mut(&one).expect("in").play.items;
+    let i = pack.iter().position(|x| x.id == sword).expect("held");
+    let item = pack.remove(i);
+    h.server
+        .players
+        .get_mut(&two)
+        .expect("in")
+        .play
+        .items
+        .push(item);
+    assert_eq!(
+        uninscribe(&mut h, b, sword),
+        [(text::SHOWN_AS, text::NOT_YOURS_TO_UNINSCRIBE.0)]
+    );
+    assert_eq!(inscribed(&h).as_deref(), Some("Sharp"));
+    // Not held, then held again by whoever wrote them.
+    assert_eq!(
+        uninscribe(&mut h, a, sword),
+        [(text::SHOWN_AS, text::CANNOT_UNINSCRIBE.0)]
+    );
+    let item = h
+        .server
+        .players
+        .get_mut(&two)
+        .expect("in")
+        .play
+        .items
+        .pop()
+        .expect("held");
+    h.server
+        .players
+        .get_mut(&one)
+        .expect("in")
+        .play
+        .items
+        .push(item);
+    assert_eq!(
+        uninscribe(&mut h, a, sword),
+        [(text::SHOWN_AS, text::UNINSCRIBED.0)]
+    );
+    assert_eq!(inscribed(&h), None);
+    assert_eq!(
+        uninscribe(&mut h, a, sword),
+        [(text::SHOWN_AS, text::NOT_INSCRIBED.0)]
+    );
+    assert_eq!(
+        uninscribe(&mut h, a, mote),
+        [(text::SHOWN_AS, text::CANNOT_UNINSCRIBE.0)]
+    );
+    // The install's words.
+    assert_eq!(text::UNINSCRIBED, (0xB5C5_682B, 0x2500_000B));
+    assert_eq!(text::NOT_YOURS_TO_UNINSCRIBE, (0xB503_AD3C, 0x2500_000B));
+}
+
 /// An inscription stays with its item across a logout, with who wrote it.
 /// Behaviour: server.inventory.inscription-kept-across-sessions
 #[test]
@@ -441,7 +526,7 @@ fn a_quest_cancelled_is_updated_as_cancelled_and_no_longer_under_way() {
     let quest = 0x8000_02E5;
     h.server.quests.quests.push(QuestDef {
         id: quest,
-        name: (1, 0x2500_14B4),
+        name: yalain_content::Words::Ref(1, 0x2500_14B4),
         description: (2, 0x2500_14B4),
         icon: 0x4100_034B,
         play_fx: false,
@@ -458,9 +543,11 @@ fn a_quest_cancelled_is_updated_as_cancelled_and_no_longer_under_way() {
         subquests: Vec::new(),
         min_level: 0,
         fails_on_death: false,
+        fails_on_logout: false,
+        fails_on_teleport: false,
         once: false,
         fellows: yalain_content::quests::Fellows::default(),
-        last_waits: false,
+        ranges: Vec::new(),
         hero_only: false,
         pay: yalain_content::quests::CompletionPay::default(),
         required: None,
@@ -508,19 +595,18 @@ fn a_quest_cancelled_is_updated_as_cancelled_and_no_longer_under_way() {
 }
 
 /// A cancelled quest's record names the wait its world's row gives it before it may be taken again,
-/// and five minutes where its row names none; a world whose rows name no cancel wait at all waits
-/// 2017's five hours for the eleven quests that named it, and one that names any, its rows' alone.
+/// and five minutes where its row names none.
 /// Behaviour: server.quests.cancel-waits-as-rows-say
 #[test]
-fn a_cancelled_quest_waits_what_its_row_says_and_without_rows_2017s() {
+fn a_cancelled_quest_waits_what_its_row_says_and_without_one_five_minutes() {
     use auberean_script::native_object::QuestInfo;
     use auberean_script::wire::In;
-    use yalain_world::quests::{self, cancel_waits_or_2017, status, CANCEL_WAIT};
+    use yalain_world::quests::{self, status, CANCEL_WAIT};
     const LONG: u32 = 0x8000_02D3;
     const SHORT: u32 = 0x8000_02E5;
     let def = |id: u32, cancel_wait: Option<f64>| QuestDef {
         id,
-        name: (1, 0x2500_14B4),
+        name: yalain_content::Words::Ref(1, 0x2500_14B4),
         description: (2, 0x2500_14B4),
         icon: 0x4100_034B,
         play_fx: false,
@@ -537,28 +623,16 @@ fn a_cancelled_quest_waits_what_its_row_says_and_without_rows_2017s() {
         subquests: Vec::new(),
         min_level: 0,
         fails_on_death: false,
+        fails_on_logout: false,
+        fails_on_teleport: false,
         once: false,
         fellows: yalain_content::quests::Fellows::default(),
-        last_waits: false,
+        ranges: Vec::new(),
         hero_only: false,
         pay: yalain_content::quests::CompletionPay::default(),
         required: None,
         cancel_wait,
     };
-    // Without rows naming any, 2017's.
-    let mut none = yalain_content::QuestTable {
-        quests: vec![def(LONG, None), def(SHORT, None)],
-        ..Default::default()
-    };
-    assert!(cancel_waits_or_2017(&mut none));
-    assert_eq!(none.quests[0].cancel_wait, Some(18_000.0));
-    assert_eq!(none.quests[1].cancel_wait, None);
-    let mut own = yalain_content::QuestTable {
-        quests: vec![def(LONG, None), def(SHORT, Some(60.0))],
-        ..Default::default()
-    };
-    assert!(!cancel_waits_or_2017(&mut own));
-    assert_eq!(own.quests[0].cancel_wait, None, "its rows alone");
     // Cancelled, each record names its wait.
     let mut h = world_of_items();
     h.server.quests.quests.push(def(LONG, Some(18_000.0)));

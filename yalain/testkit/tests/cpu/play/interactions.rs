@@ -112,6 +112,8 @@ fn hall() -> Harness {
             behavior: None,
             message: Some(UNLOCKED),
             uses_up: true,
+            uses_up_target: false,
+            gate: None,
         }],
     );
     h.server.interactions.tables.insert(
@@ -122,11 +124,13 @@ fn hall() -> Harness {
             behavior: None,
             message: None,
             uses_up: false,
+            uses_up_target: false,
+            gate: None,
         }],
     );
     h.server.quests.quests.push(QuestDef {
         id: ENTER_QUEST,
-        name: (0x6EE1_B009, 0x2500_1446),
+        name: yalain_content::Words::Ref(0x6EE1_B009, 0x2500_1446),
         description: (0x0121_67D6, 0x2500_1446),
         icon: 0x4100_034B,
         play_fx: false,
@@ -143,15 +147,18 @@ fn hall() -> Harness {
         subquests: Vec::new(),
         min_level: 0,
         fails_on_death: false,
+        fails_on_logout: false,
+        fails_on_teleport: false,
         once: false,
         fellows: yalain_content::quests::Fellows::default(),
-        last_waits: false,
+        ranges: Vec::new(),
         hero_only: false,
         pay: yalain_content::quests::CompletionPay::default(),
         required: None,
         cancel_wait: None,
     });
     h.server.quests.steps.push(Step {
+        key: String::new(),
         quest: ENTER_QUEST,
         needs: 0,
         trigger: Trigger::UseOn(KEY_TEMPLATE, STOCKPILE_TEMPLATE),
@@ -162,17 +169,21 @@ fn hall() -> Harness {
         counts: Vec::new(),
         effects: Vec::new(),
         text: None,
+        recipes: Vec::new(),
         placed: "authored for a test".into(),
         requires: Vec::new(),
         takes: Vec::new(),
         to: None,
         races: Vec::new(),
         effects_last: false,
+        effects_quiet: false,
         wants: None,
         fellows: true,
         levels: None,
         xp_share: 0.0,
         transforms: None,
+        chance: None,
+        to_fellows: false,
     });
     h
 }
@@ -370,6 +381,7 @@ fn an_item_used_on_an_object_while_its_step_waits_for_another_phase_is_answered_
         Props::default(),
     ));
     h.server.quests.steps.push(Step {
+        key: String::new(),
         quest: HALL_QUEST,
         needs: 6,
         trigger: Trigger::UseOn(GLYPH_TEMPLATE, STOCKPILE_TEMPLATE),
@@ -380,6 +392,7 @@ fn an_item_used_on_an_object_while_its_step_waits_for_another_phase_is_answered_
         counts: Vec::new(),
         effects: Vec::new(),
         text: None,
+        recipes: Vec::new(),
         placed: "authored for a test".into(),
         requires: Vec::new(),
         takes: vec![GLYPH_TEMPLATE],
@@ -390,11 +403,14 @@ fn an_item_used_on_an_object_while_its_step_waits_for_another_phase_is_answered_
         }),
         races: Vec::new(),
         effects_last: false,
+        effects_quiet: false,
         wants: None,
         fellows: false,
         levels: None,
         xp_share: 0.0,
         transforms: None,
+        chance: None,
+        to_fellows: false,
     });
     let (a, me, world, glyph) = holding(&mut h, "one", GLYPH_TEMPLATE);
     h.server
@@ -524,6 +540,8 @@ fn garden() -> Harness {
                 behavior: None,
                 message: None,
                 uses_up,
+                uses_up_target: false,
+                gate: None,
             }],
         );
     }
@@ -684,4 +702,440 @@ fn an_item_put_down_while_its_use_plays_does_nothing() {
     run_for(&mut h, 3.0);
     assert!(answers(&h, a, fa).is_empty(), "no answer of it done");
     assert!(h.server.things.get(pollen).is_some(), "still in the world");
+}
+
+const BLANK_TEMPLATE: u32 = 0x4700_15BC;
+const BLANK_TABLE: u32 = 0x6F00_125E;
+const SWORD_TEMPLATE: u32 = 0x4700_0846;
+const DAGGER_TEMPLATE: u32 = 0x4700_0847;
+const BOW_TEMPLATE: u32 = 0x4700_0848;
+const SWORD_EMBLEM: u32 = 0x4700_15D1;
+const DAGGER_EMBLEM: u32 = 0x4700_15B8;
+const SWORDS: u32 = 4441;
+const BOWS: u32 = 4205;
+const IMPRINTED: (u32, u32) = (0x0E50_4022, 0x2500_1FE8);
+
+/// The hall with a blank emblem whose table names the swords' class (two weapons count in it) and
+/// the bows' (one), each used up with its own text, held 3 m from its target; rows make the swords'
+/// emblem of the swords' class, and another emblem of the dagger itself.
+fn forge() -> Harness {
+    use yalain_content::item_rows::{Interaction as Made, On};
+    let mut h = hall();
+    let mut blank = Props::default();
+    blank.set(interactions::TABLE, Prop::Word(BLANK_TABLE));
+    for (t, p) in [
+        (BLANK_TEMPLATE, blank),
+        (SWORD_TEMPLATE, Props::default()),
+        (DAGGER_TEMPLATE, Props::default()),
+        (BOW_TEMPLATE, Props::default()),
+        (SWORD_EMBLEM, Props::default()),
+        (DAGGER_EMBLEM, Props::default()),
+    ] {
+        h.server
+            .catalog
+            .insert(yalain_testkit::test_template(t, 0x1B34, p));
+    }
+    let entry = |targets: Vec<u32>| Interaction {
+        targets,
+        reach: 3.0,
+        behavior: None,
+        message: Some(IMPRINTED),
+        uses_up: true,
+        uses_up_target: false,
+        gate: None,
+    };
+    h.server.interactions.tables.insert(
+        BLANK_TABLE,
+        vec![
+            entry(vec![SWORD_TEMPLATE, DAGGER_TEMPLATE]),
+            entry(vec![BOW_TEMPLATE]),
+        ],
+    );
+    h.server
+        .interactions
+        .members
+        .insert(SWORDS, vec![SWORD_TEMPLATE, DAGGER_TEMPLATE]);
+    h.server
+        .interactions
+        .members
+        .insert(BOWS, vec![BOW_TEMPLATE]);
+    h.server.item_rows.interactions = vec![
+        Made {
+            item: BLANK_TEMPLATE,
+            on: On::Class(SWORDS),
+            gives: vec![(SWORD_EMBLEM, 1)],
+            count: 1,
+            gated_gives: Vec::new(),
+            places: Vec::new(),
+        },
+        Made {
+            item: BLANK_TEMPLATE,
+            on: On::Template(DAGGER_TEMPLATE),
+            gives: vec![(DAGGER_EMBLEM, 1)],
+            count: 1,
+            gated_gives: Vec::new(),
+            places: Vec::new(),
+        },
+    ];
+    h
+}
+
+/// An emblem used on a sword in its user's pack is imprinted from it: the world's row for the
+/// sword's class gives its user the swords' emblem, the blank is used up, the sword kept, and the
+/// use is answered with the table's own text; on the dagger, of the same class, the row naming the
+/// dagger itself comes first; on a bow, whose class no row names, the blank is used up as its table
+/// says and nothing is made.
+/// Behaviour: server.interactions.an-item-used-on-another-makes-what-its-row-gives
+#[test]
+fn an_emblem_used_on_a_held_weapon_makes_what_the_row_for_the_weapon_or_its_class_gives() {
+    let mut h = forge();
+    let (a, me, world, blank) = holding(&mut h, "one", BLANK_TEMPLATE);
+    for t in [SWORD_TEMPLATE, DAGGER_TEMPLATE, BOW_TEMPLATE] {
+        yalain_world::inventory::give(&mut h.server, &mut h.net, world, t, 1);
+    }
+    h.run(3);
+    let sword = held(&h, world, SWORD_TEMPLATE).expect("given");
+    let from = h.bots[a].inbox.len();
+    send_use(&mut h, a, me, blank, sword);
+    assert_eq!(
+        answers(&h, a, from),
+        [(0, interactions::FLAGS_USED_UP, IMPRINTED.0)]
+    );
+    assert!(
+        held(&h, world, SWORD_EMBLEM).is_some(),
+        "the swords' emblem"
+    );
+    assert_eq!(held(&h, world, BLANK_TEMPLATE), None, "the blank used up");
+    assert_eq!(
+        held(&h, world, SWORD_TEMPLATE),
+        Some(sword),
+        "the sword kept"
+    );
+
+    yalain_world::inventory::give(&mut h.server, &mut h.net, world, BLANK_TEMPLATE, 1);
+    h.run(3);
+    let blank = held(&h, world, BLANK_TEMPLATE).expect("given");
+    let dagger = held(&h, world, DAGGER_TEMPLATE).expect("given");
+    send_use(&mut h, a, me, blank, dagger);
+    assert!(
+        held(&h, world, DAGGER_EMBLEM).is_some(),
+        "the dagger's own row"
+    );
+    let swords = h.server.players[&world]
+        .play
+        .items
+        .iter()
+        .filter(|i| i.template == SWORD_EMBLEM)
+        .count();
+    assert_eq!(swords, 1, "not its class's as well");
+
+    yalain_world::inventory::give(&mut h.server, &mut h.net, world, BLANK_TEMPLATE, 1);
+    h.run(3);
+    let blank = held(&h, world, BLANK_TEMPLATE).expect("given");
+    let bow = held(&h, world, BOW_TEMPLATE).expect("given");
+    let before = h.server.players[&world].play.items.len();
+    let from = h.bots[a].inbox.len();
+    send_use(&mut h, a, me, blank, bow);
+    assert_eq!(
+        answers(&h, a, from),
+        [(0, interactions::FLAGS_USED_UP, IMPRINTED.0)]
+    );
+    assert_eq!(
+        h.server.players[&world].play.items.len(),
+        before - 1,
+        "the blank gone, nothing made"
+    );
+}
+
+const SIGNIFICATOR_TEMPLATE: u32 = 0x4700_13D7;
+const GATEWAY_TEMPLATE: u32 = 0x4700_13A9;
+const SIGNIFICATOR_TABLE: u32 = 0x6F00_123E;
+/// "Your significator passes through the gateway!"
+const PASSES: (u32, u32) = (0xBA0F_3786, 0x2500_1F24);
+
+/// An item used on another the user holds, where the table's outcome destroys its target (a
+/// significator on a gateway), keeps the item and takes the target, one off its stack, and is
+/// answered kept with the table's own text; where the outcome keeps its target, it stays.
+/// Behaviour: server.interactions.an-outcome-that-destroys-its-target-takes-a-held-one
+#[test]
+fn a_significator_passed_through_a_held_gateway_is_kept_and_the_gateway_is_taken() {
+    for destroys in [true, false] {
+        let mut h = hall();
+        let mut significator = Props::default();
+        significator.set(interactions::TABLE, Prop::Word(SIGNIFICATOR_TABLE));
+        for (t, p) in [
+            (SIGNIFICATOR_TEMPLATE, significator),
+            (GATEWAY_TEMPLATE, Props::default()),
+        ] {
+            h.server
+                .catalog
+                .insert(yalain_testkit::test_template(t, 0x1B34, p));
+        }
+        h.server.interactions.tables.insert(
+            SIGNIFICATOR_TABLE,
+            vec![Interaction {
+                targets: vec![GATEWAY_TEMPLATE],
+                reach: 3.0,
+                behavior: None,
+                message: Some(PASSES),
+                uses_up: false,
+                uses_up_target: destroys,
+                gate: None,
+            }],
+        );
+        let (a, me, world, significator) = holding(&mut h, "one", SIGNIFICATOR_TEMPLATE);
+        yalain_world::inventory::give(&mut h.server, &mut h.net, world, GATEWAY_TEMPLATE, 2);
+        h.run(3);
+        let gateway = held(&h, world, GATEWAY_TEMPLATE).expect("given");
+        let from = h.bots[a].inbox.len();
+        send_use(&mut h, a, me, significator, gateway);
+        assert_eq!(
+            answers(&h, a, from),
+            [(0, interactions::FLAGS_KEPT, PASSES.0)],
+            "destroys {destroys}"
+        );
+        assert_eq!(
+            held(&h, world, SIGNIFICATOR_TEMPLATE),
+            Some(significator),
+            "the significator kept"
+        );
+        let gateways: u32 = h.server.players[&world]
+            .play
+            .items
+            .iter()
+            .filter(|i| i.template == GATEWAY_TEMPLATE)
+            .map(|i| i.quantity.max(1))
+            .sum();
+        assert_eq!(
+            gateways,
+            if destroys { 1 } else { 2 },
+            "destroys {destroys}"
+        );
+    }
+}
+
+const MELD_TEMPLATE: u32 = 0x4700_13B2;
+const MELD_TABLE: u32 = 0x6F00_1230;
+/// The fourteen drums, Ace to King.
+const ACE_OF_DRUMS: u32 = 0x4700_134B;
+const DRUMS: u32 = 10259;
+const LESSER_FATE_CARD: u32 = 0x4700_13A6;
+const FATE_CARD: u32 = 0x4700_13A4;
+/// "You transform the lesser trump into an optimal fate card!" and "... into a fate card!"
+const OPTIMAL: (u32, u32) = (0x3EBB_8F3B, 0x2500_1F24);
+const PLAIN: (u32, u32) = (0xAF1E_F93B, 0x2500_1F24);
+
+/// The hall with a card meld whose table names each of the fourteen drums for the characters whose
+/// number leaves its rank divided by 14, with the optimal text, then the drums' class for anyone,
+/// with the plain one, each keeping the meld and taking the drum; the world's row for the class
+/// gives the lesser fate card, and the fate card where the interaction met was for some characters
+/// only.
+fn parlor() -> Harness {
+    use yalain_content::item_rows::{Interaction as Made, On};
+    let mut h = hall();
+    let mut meld = Props::default();
+    meld.set(interactions::TABLE, Prop::Word(MELD_TABLE));
+    let drums: Vec<u32> = (0..14).map(|r| ACE_OF_DRUMS + r).collect();
+    h.server
+        .catalog
+        .insert(yalain_testkit::test_template(MELD_TEMPLATE, 0x1B34, meld));
+    for &t in drums.iter().chain(&[LESSER_FATE_CARD, FATE_CARD]) {
+        h.server
+            .catalog
+            .insert(yalain_testkit::test_template(t, 0x1B34, Props::default()));
+    }
+    let entry = |targets: Vec<u32>, message, gate| Interaction {
+        targets,
+        reach: 3.0,
+        behavior: None,
+        message: Some(message),
+        uses_up: false,
+        uses_up_target: true,
+        gate,
+    };
+    let mut table: Vec<Interaction> = (0..14)
+        .map(|r| {
+            entry(
+                vec![drums[r]],
+                OPTIMAL,
+                interactions::Gate::of(14, i32::try_from(r).expect("a rank")),
+            )
+        })
+        .collect();
+    table.push(entry(drums.clone(), PLAIN, None));
+    h.server.interactions.tables.insert(MELD_TABLE, table);
+    h.server.interactions.members.insert(DRUMS, drums);
+    h.server.item_rows.interactions = vec![Made {
+        item: MELD_TEMPLATE,
+        on: On::Class(DRUMS),
+        gives: vec![(LESSER_FATE_CARD, 1)],
+        count: 1,
+        gated_gives: vec![(FATE_CARD, 1)],
+        places: Vec::new(),
+    }];
+    h
+}
+
+fn count_of(h: &Harness, world: ConnId, template: u32) -> u32 {
+    h.server.players[&world]
+        .play
+        .items
+        .iter()
+        .filter(|i| i.template == template)
+        .map(|i| i.quantity.max(1))
+        .sum()
+}
+
+/// A card meld used on each of the fourteen drums, twice over, by three characters: each character
+/// meets the interaction for its own rank alone (its number divided by 14 leaves the rank), and
+/// the same one both times; there it is answered with the optimal text and made the fate card, on
+/// every other drum the plain text and the lesser fate card; the meld is kept and each drum taken.
+/// The three characters, numbered one after another, have three different ranks.
+/// Behaviour: server.interactions.an-interaction-for-some-characters-only
+#[test]
+fn a_card_meld_on_a_drum_makes_the_fate_card_only_for_the_characters_whose_rank_it_is() {
+    let mut h = parlor();
+    let mut ranks = Vec::new();
+    for name in ["one", "two", "three"] {
+        let (a, me, world, meld) = holding(&mut h, name, MELD_TEMPLATE);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let own = (me as u32 as i32 % 14).unsigned_abs();
+        for round in 0..2 {
+            let mut optimal = Vec::new();
+            for r in 0..14 {
+                yalain_world::inventory::give(
+                    &mut h.server,
+                    &mut h.net,
+                    world,
+                    ACE_OF_DRUMS + r,
+                    1,
+                );
+                h.run(3);
+                let drum = held(&h, world, ACE_OF_DRUMS + r).expect("given");
+                let from = h.bots[a].inbox.len();
+                send_use(&mut h, a, me, meld, drum);
+                let said = answers(&h, a, from);
+                assert_eq!(said.len(), 1, "{name} rank {r}: {said:?}");
+                let (status, flags, text) = said[0];
+                assert_eq!((status, flags), (0, interactions::FLAGS_KEPT));
+                if text == OPTIMAL.0 {
+                    optimal.push(r);
+                } else {
+                    assert_eq!(text, PLAIN.0, "{name} rank {r}");
+                }
+                assert_eq!(held(&h, world, ACE_OF_DRUMS + r), None, "the drum taken");
+            }
+            assert_eq!(optimal, [own], "{name}, round {round}");
+            assert_eq!(count_of(&h, world, FATE_CARD), round + 1, "{name}");
+            assert_eq!(
+                count_of(&h, world, LESSER_FATE_CARD),
+                13 * (round + 1),
+                "{name}"
+            );
+        }
+        assert_eq!(held(&h, world, MELD_TEMPLATE), Some(meld), "the meld kept");
+        ranks.push(own);
+    }
+    ranks.sort_unstable();
+    ranks.dedup();
+    assert_eq!(ranks.len(), 3, "three ranks");
+}
+
+/// A row naming several things a use makes makes one of them each use, picked by their weights,
+/// and never anything else: a card meld whose row makes either fortune's lesser card, three to
+/// one, on drums of ranks other than its user's makes both over many uses, the likelier more
+/// often; where the interaction met is the user's own rank it picks among the row's gated ones.
+/// Behaviour: server.interactions.a-use-makes-one-of-several
+#[test]
+fn a_meld_whose_row_names_two_cards_makes_one_of_them_each_use_by_their_weights() {
+    const BONA: u32 = 0x4700_1385;
+    const MALA: u32 = 0x4700_1395;
+    const BONA_CARD: u32 = 0x4700_1383;
+    const MALA_CARD: u32 = 0x4700_1393;
+    let mut h = parlor();
+    for t in [BONA, MALA, BONA_CARD, MALA_CARD] {
+        h.server
+            .catalog
+            .insert(yalain_testkit::test_template(t, 0x1B34, Props::default()));
+    }
+    let row = &mut h.server.item_rows.interactions[0];
+    row.gives = vec![(BONA, 3), (MALA, 1)];
+    row.gated_gives = vec![(BONA_CARD, 1), (MALA_CARD, 1)];
+    let (a, me, world, meld) = holding(&mut h, "one", MELD_TEMPLATE);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let own = (me as u32 as i32 % 14).unsigned_abs();
+    let other = (own + 1) % 14;
+    let uses = |h: &mut Harness, rank: u32, n: u32| {
+        for _ in 0..n {
+            yalain_world::inventory::give(&mut h.server, &mut h.net, world, ACE_OF_DRUMS + rank, 1);
+            h.run(3);
+            let drum = held(h, world, ACE_OF_DRUMS + rank).expect("given");
+            send_use(h, a, me, meld, drum);
+        }
+    };
+    uses(&mut h, other, 80);
+    let (bona, mala) = (count_of(&h, world, BONA), count_of(&h, world, MALA));
+    assert_eq!(bona + mala, 80, "one card a use");
+    assert!(mala > 0 && bona > 2 * mala, "{bona} to {mala}");
+    assert_eq!(count_of(&h, world, LESSER_FATE_CARD), 0, "nothing else");
+    uses(&mut h, own, 40);
+    let (bona, mala) = (
+        count_of(&h, world, BONA_CARD),
+        count_of(&h, world, MALA_CARD),
+    );
+    assert_eq!(bona + mala, 40, "the gated ones on its own rank");
+    assert!(bona > 0 && mala > 0, "{bona} and {mala}");
+    assert_eq!(count_of(&h, world, FATE_CARD), 0);
+}
+
+/// An item whose table names an object only for characters of another number is refused (10053),
+/// the item and the object kept, nothing made; the character the interaction is for is answered.
+/// Behaviour: server.interactions.an-interaction-for-some-characters-only
+#[test]
+fn an_item_whose_table_names_the_object_only_for_other_characters_is_refused_and_kept() {
+    let mut h = parlor();
+    let (a, me, world, meld) = holding(&mut h, "one", MELD_TEMPLATE);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let own = me as u32 as i32 % 14;
+    for (leaves, answered) in [((own + 1) % 14, false), (own, true)] {
+        h.server.interactions.tables.insert(
+            MELD_TABLE,
+            vec![Interaction {
+                targets: vec![ACE_OF_DRUMS],
+                reach: 3.0,
+                behavior: None,
+                message: Some(OPTIMAL),
+                uses_up: false,
+                uses_up_target: true,
+                gate: interactions::Gate::of(14, leaves),
+            }],
+        );
+        yalain_world::inventory::give(&mut h.server, &mut h.net, world, ACE_OF_DRUMS, 1);
+        h.run(3);
+        let drum = held(&h, world, ACE_OF_DRUMS).expect("given");
+        let drums = count_of(&h, world, ACE_OF_DRUMS);
+        let from = h.bots[a].inbox.len();
+        send_use(&mut h, a, me, meld, drum);
+        if answered {
+            assert_eq!(
+                answers(&h, a, from),
+                [(0, interactions::FLAGS_KEPT, OPTIMAL.0)]
+            );
+            assert_eq!(count_of(&h, world, ACE_OF_DRUMS), drums - 1, "a drum taken");
+            assert_eq!(count_of(&h, world, FATE_CARD), 1, "the fate card made");
+        } else {
+            let said = answers(&h, a, from);
+            assert_eq!(said.len(), 1, "{said:?}");
+            assert_eq!(
+                (said[0].0, said[0].1),
+                (
+                    interactions::NOT_FOR_THIS_CHARACTER,
+                    interactions::FLAGS_KEPT
+                )
+            );
+            assert_eq!(held(&h, world, ACE_OF_DRUMS), Some(drum), "the drum kept");
+            assert_eq!(count_of(&h, world, FATE_CARD), 0, "nothing made");
+        }
+        assert_eq!(held(&h, world, MELD_TEMPLATE), Some(meld), "the meld kept");
+    }
 }

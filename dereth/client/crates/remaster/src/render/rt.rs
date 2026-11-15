@@ -14,7 +14,11 @@
 //! **What it holds.**
 //! - A bottom-level structure per distinct mesh run: a mesh's first vertex and the subsets the
 //!   G-buffer draws opaque or alpha-tested (blended and additive ones left out), one geometry
-//!   each, opaque unless alpha-tested.
+//!   each, opaque unless alpha-tested. A skinned body's mesh is posed every frame, so its
+//!   structure is refitted to it every frame, in place ([`RtPass::set_posed`]): made once, as
+//!   the body comes, and fitted again each frame once that frame's posing is recorded, before the
+//!   top-level structure is built ([`RtPlan::record`]), so it holds the body as the G-buffer
+//!   draws it that frame.
 //! - The statics' entries and rows, made again only when what is resident changes.
 //! - The objects' entries and rows, every frame.
 
@@ -25,7 +29,7 @@ use dereth_gfx::{
     Pipeline, Recorder, Tlas, Touch, Use,
 };
 
-use super::scene::{Bucket, GpuScene, PartItems};
+use super::scene::{Bucket, GpuScene, ItemDraw, PartItems};
 use super::{push_words, shader, PerFrame};
 use crate::scene::{BlockId, ObjectKey};
 use crate::shaders::Entry;
@@ -37,6 +41,8 @@ pub mod mask {
     pub const GROUND: u8 = 4;
     pub const OBJECT: u8 = 8;
     pub const BODY: u8 = 16;
+    /// An art pack's ground cover: the sun's traced shadows take it near the eye alone.
+    pub const COVER: u8 = 32;
 }
 
 /// A geometry row's flags, as `rt.slang` names them.
@@ -44,6 +50,8 @@ pub mod row_flag {
     pub const ALPHA_TESTED: u32 = 1;
     pub const TWO_SIDED: u32 = 2;
     pub const GROUND: u32 = 4;
+    /// The wind sways it: a query tests a candidate on it against the triangle as it is drawn.
+    pub const SWAYS: u32 = 8;
 }
 
 /// The bit of an instance's index of the user's that names the objects' table.
@@ -60,12 +68,27 @@ const KEEP_FRAMES: u64 = 300;
 /// index count and whether it is opaque.
 type BlasKey = (u32, Vec<(u32, u32, bool)>);
 
+/// What the structures take of each mesh, by its first vertex: its vertex count, and how far the
+/// wind bends its farthest-bent vertex when it sways (meters at a wind of a meter a second).
+#[derive(Debug, Default)]
+struct MeshFacts {
+    counts: BTreeMap<u32, u32>,
+    sways: BTreeMap<u32, f32>,
+}
+
 #[derive(Debug)]
 struct Held {
     blas: Blas,
     address: u64,
     /// The last frame an object placed it.
     seen: u64,
+    /// The frame it was last made or refitted.
+    made_at: u64,
+    /// Whether it is refitted as its mesh is posed, and the vertices' and indices' buffers it
+    /// reads: a pool that grew has moved to a new buffer, and what was made over the old one is
+    /// made again.
+    refitted: bool,
+    buffers: (Buffer, Buffer),
 }
 
 #[derive(Debug)]
@@ -92,13 +115,61 @@ pub struct RtCounts {
     pub rows: u32,
     /// Bytes the device holds for the structures.
     pub bytes: u64,
-    /// Bottom-level structures made since the pass was: it stops rising once the scene settles.
+    /// Bottom-level structures made since the pass was: it stops rising once the scene settles,
+    /// and a skinned body's is made once, as it comes.
     pub made: u64,
+    /// Refits of the skinned bodies' structures since the pass was: one a body a frame.
+    pub refits: u64,
 }
 
 /// One entry of the instances' pass, and its geometry rows.
+#[derive(Debug, Clone, Copy)]
 struct Entry32 {
     words: [u32; 8],
+}
+
+/// One block's statics as the top-level structure places them, kept while the block is held as it
+/// was: a block changing makes only its own again, not every block's.
+#[derive(Debug)]
+struct BlockStatics {
+    /// The block as it was held: its build, its first instance and item, and its parts and rooms,
+    /// and of its parts those drawn as ground cover.
+    held: (u32, u32, u32, usize, usize, usize),
+    /// Each placed part's entry, as its bytes, its index of the user's counted from the block's
+    /// own first geometry row.
+    entries: Vec<u8>,
+    rows: Vec<u32>,
+    /// The structures its parts place, each once.
+    keys: BTreeSet<BlasKey>,
+}
+
+/// What a part places among the statics: its geometry rows, whether it is alpha-tested, and its
+/// structure's address.
+type Placed = (Vec<u32>, bool, u64);
+
+/// What `block` holds, as [`BlockStatics::held`] keeps it.
+fn held(block: &super::scene::BlockGpu) -> (u32, u32, u32, usize, usize, usize) {
+    (
+        block.generation,
+        block.instances.start,
+        block.items.start,
+        block.parts.len(),
+        block.rooms.len(),
+        block.cover_parts,
+    )
+}
+
+/// What the objects' parts place in the structures, worked out once for the objects and meshes
+/// held: the structures, each with its vertex count, in the order the parts first place them;
+/// and each part placing one, in the objects' order, with its instance, its mask, the structure it
+/// places and where its rows start in `rows`.
+#[derive(Debug, Default)]
+struct ObjectsPlaced {
+    /// The scene's objects' and meshes' generations they were worked out at.
+    of: (u64, u64),
+    keys: Vec<(BlasKey, u32)>,
+    parts: Vec<(u32, u8, u32, u32)>,
+    rows: Vec<u32>,
 }
 
 /// The scene's acceleration structures.
@@ -114,9 +185,22 @@ pub struct RtPass {
     grounds: BTreeMap<BlockId, GroundHeld>,
     /// The statics' entries and rows, and the scene's generation they were made at.
     generation: Option<u64>,
-    /// Bottom-level structures made since the pass was.
+    /// What the objects' parts place, kept while the objects and meshes held stand.
+    objects_placed: ObjectsPlaced,
+    /// Bottom-level structures made since the pass was, and refits of them.
     made: u64,
-    static_keys: BTreeSet<BlasKey>,
+    refits: u64,
+    /// The structures the statics place, each with how many held blocks place it.
+    static_keys: BTreeMap<BlasKey, u32>,
+    /// Each held block's statics, as they were last placed.
+    block_statics: BTreeMap<BlockId, BlockStatics>,
+    /// What the structures take of each mesh, and the meshes' generation it was made at.
+    vertex_counts: (Option<u64>, MeshFacts),
+    /// The first vertex of each mesh posed this frame, whose structure is refitted.
+    posed: BTreeSet<u32>,
+    /// The structures of the meshes posed this frame, refitted once the frame's posing is
+    /// recorded.
+    refitting: Vec<Blas>,
     static_count: u32,
     static_rows: u32,
     statics: Option<(PerFrame, PerFrame)>,
@@ -176,7 +260,13 @@ impl RtPass {
             grounds: BTreeMap::new(),
             generation: None,
             made: 0,
-            static_keys: BTreeSet::new(),
+            refits: 0,
+            objects_placed: ObjectsPlaced::default(),
+            static_keys: BTreeMap::new(),
+            block_statics: BTreeMap::new(),
+            vertex_counts: (None, MeshFacts::default()),
+            posed: BTreeSet::new(),
+            refitting: Vec::new(),
             static_count: 0,
             static_rows: 0,
             statics: None,
@@ -223,13 +313,31 @@ impl RtPass {
         }
         self.generation = None;
         self.static_keys.clear();
+        self.block_statics.clear();
+        self.vertex_counts = (None, MeshFacts::default());
         self.counts = RtCounts::default();
         self.last = None;
+        self.refitting.clear();
+    }
+
+    /// The meshes posed this frame, by their first vertex: their structures are refitted to them
+    /// rather than kept as they stand.
+    pub fn set_posed(&mut self, first_vertices: BTreeSet<u32>) {
+        self.posed = first_vertices;
+    }
+
+    /// The structures of the meshes posed this frame, which [`RtPlan::record`] refits once the
+    /// frame's posing is recorded.
+    #[must_use]
+    pub fn refitting(&self) -> &[Blas] {
+        &self.refitting
     }
 
     /// The frame's structures, when `wanted` and the device traces rays: the bottom-level ones
     /// the scene's resident meshes and grounds need made (built at the recording's head), the
     /// statics' entries made again when what is resident changed, the objects' every frame.
+    /// `cover_reach` says how far from the eye a ground cover whose finest level is a GfxObj is
+    /// drawn at all, at its own size: past it, the structures leave it out, as the frame does.
     ///
     /// # Errors
     /// What the device refuses.
@@ -238,6 +346,7 @@ impl RtPass {
         gfx: &mut Device,
         scene: &GpuScene,
         wanted: bool,
+        cover_reach: &dyn Fn(u32) -> Option<f32>,
     ) -> Result<Option<RtPlan>, dereth_gfx::Error> {
         let Some(pipeline) = self.pipeline else {
             return Ok(None);
@@ -249,16 +358,30 @@ impl RtPass {
             return Ok(None);
         }
         self.frame += 1;
-        let vertex_counts: BTreeMap<u32, u32> = scene
-            .meshes
-            .values()
-            .map(|m| (m.vertices.start, m.vertices.end - m.vertices.start))
-            .collect();
-        if self.generation != Some(scene.static_generation) {
-            self.make_statics(gfx, scene, &vertex_counts)?;
-            self.generation = Some(scene.static_generation);
+        self.refitting.clear();
+        // What the structures take of each mesh, made again only when the meshes change.
+        if self.vertex_counts.0 != Some(scene.mesh_generation) {
+            self.vertex_counts = (
+                Some(scene.mesh_generation),
+                MeshFacts {
+                    counts: scene
+                        .meshes
+                        .values()
+                        .map(|m| (m.vertices.start, m.vertices.end - m.vertices.start))
+                        .collect(),
+                    sways: scene
+                        .meshes
+                        .values()
+                        .filter(|m| m.sway > 0.0)
+                        .map(|m| (m.vertices.start, m.sway))
+                        .collect(),
+                },
+            );
         }
-        let (object_entries, object_rows) = self.make_objects(gfx, scene, &vertex_counts)?;
+        let vertex_counts = std::mem::take(&mut self.vertex_counts.1);
+        let made = self.make_frame(gfx, scene, &vertex_counts, cover_reach);
+        self.vertex_counts.1 = vertex_counts;
+        let (object_entries, object_rows) = made?;
         let objects = u32::try_from(object_entries.len()).unwrap_or(u32::MAX);
         let object_bytes = entries_bytes(&object_entries);
         let object_row_bytes = push_words(&object_rows);
@@ -289,7 +412,7 @@ impl RtPass {
         let stale: Vec<BlasKey> = self
             .blas
             .iter()
-            .filter(|(k, h)| !keys.contains(*k) && frame.saturating_sub(h.seen) > KEEP_FRAMES)
+            .filter(|(k, h)| !keys.contains_key(*k) && frame.saturating_sub(h.seen) > KEEP_FRAMES)
             .map(|(k, _)| k.clone())
             .collect();
         for k in stale {
@@ -339,6 +462,7 @@ impl RtPass {
             rows: self.static_rows + u32::try_from(object_rows.len() / 4).unwrap_or(u32::MAX),
             bytes: gfx.stats().acceleration_bytes,
             made: self.made,
+            refits: self.refits,
         };
         let plan = RtPlan {
             pipeline,
@@ -451,9 +575,28 @@ impl RtPass {
         key: &BlasKey,
         vertex_count: u32,
     ) -> Result<u64, dereth_gfx::Error> {
+        let posed = self.posed.contains(&key.0);
+        let buffers = (scene.vertices.buffer, scene.indices.buffer);
         if let Some(h) = self.blas.get_mut(key) {
-            h.seen = self.frame;
-            return Ok(h.address);
+            let stale = posed && h.made_at != self.frame;
+            if stale && h.refitted && h.buffers != buffers {
+                // Its pools moved: made again over their new buffers.
+                h.refitted = false;
+            } else if stale && h.refitted {
+                // Refitted once the frame's posing is recorded.
+                self.refitting.push(h.blas);
+                self.refits += 1;
+                h.made_at = self.frame;
+            }
+            if !stale || h.refitted {
+                h.seen = self.frame;
+                return Ok(h.address);
+            }
+            // A mesh first held as it stands and now posed, or whose pools moved: made again, to
+            // be refitted.
+            if let Some(h) = self.blas.remove(key) {
+                gfx.destroy_blas(h.blas);
+            }
         }
         let geometries: Vec<BlasGeometry> = key
             .1
@@ -470,7 +613,16 @@ impl RtPass {
                 opaque: *opaque,
             })
             .collect();
-        let blas = gfx.create_blas("remaster mesh", &geometries)?;
+        let blas = if posed {
+            // Built at the recording's head from the pose the pool holds, then fitted to the
+            // frame's own once it is posed.
+            let blas = gfx.create_blas_refitted("remaster posed mesh", &geometries)?;
+            self.refitting.push(blas);
+            self.refits += 1;
+            blas
+        } else {
+            gfx.create_blas("remaster mesh", &geometries)?
+        };
         self.made += 1;
         let address = gfx.blas_address(blas)?;
         self.blas.insert(
@@ -479,14 +631,23 @@ impl RtPass {
                 blas,
                 address,
                 seen: self.frame,
+                made_at: self.frame,
+                refitted: posed,
+                buffers,
             },
         );
         Ok(address)
     }
 
     /// A part's finest level as a structure's key and its geometry rows, when it draws anything
-    /// opaque or alpha-tested.
-    fn part_key(scene: &GpuScene, part: &PartItems) -> Option<(BlasKey, Vec<u32>, bool)> {
+    /// opaque or alpha-tested. `sways` holds the meshes the wind sways, by their first vertex:
+    /// such a mesh's geometries are handed to the queries as alpha-tested ones are, so each hit on
+    /// one is tested again against the triangle as it is drawn this frame.
+    fn part_key(
+        scene: &GpuScene,
+        part: &PartItems,
+        sways: &BTreeMap<u32, f32>,
+    ) -> Option<(BlasKey, Vec<u32>, bool)> {
         let items = part.levels.first()?;
         let mut geometries = Vec::new();
         let mut rows = Vec::new();
@@ -503,16 +664,34 @@ impl RtPass {
                 continue;
             }
             base.get_or_insert(d.vertex_base);
-            geometries.push((d.first_index, d.index_count, !d.alpha_test));
+            let sways = sways.contains_key(&d.vertex_base);
+            geometries.push((d.first_index, d.index_count, !d.alpha_test && !sways));
             alpha |= d.alpha_test;
             let flags = if d.alpha_test {
                 row_flag::ALPHA_TESTED
             } else {
                 0
-            } | if d.two_sided { row_flag::TWO_SIDED } else { 0 };
+            } | if d.two_sided { row_flag::TWO_SIDED } else { 0 }
+                | if sways { row_flag::SWAYS } else { 0 };
             rows.extend([d.first_index, d.vertex_base, d.material, flags]);
         }
         Some(((base?, geometries), rows, alpha))
+    }
+
+    /// The statics' entries and rows made again when what is resident changed, and the objects'
+    /// entries and rows for this frame.
+    fn make_frame(
+        &mut self,
+        gfx: &mut Device,
+        scene: &GpuScene,
+        facts: &MeshFacts,
+        cover_reach: &dyn Fn(u32) -> Option<f32>,
+    ) -> Result<(Vec<Entry32>, Vec<u32>), dereth_gfx::Error> {
+        if self.generation != Some(scene.static_generation) {
+            self.make_statics(gfx, scene, facts, cover_reach)?;
+            self.generation = Some(scene.static_generation);
+        }
+        self.make_objects(gfx, scene, facts)
     }
 
     /// Every static's, wall's and ground's entry and rows, made again.
@@ -520,34 +699,104 @@ impl RtPass {
         &mut self,
         gfx: &mut Device,
         scene: &GpuScene,
-        vertex_counts: &BTreeMap<u32, u32>,
+        facts: &MeshFacts,
+        cover_reach: &dyn Fn(u32) -> Option<f32>,
     ) -> Result<(), dereth_gfx::Error> {
-        let mut entries = Vec::new();
+        let mut entries: Vec<u8> = Vec::new();
+        let mut static_count = 0u32;
         let mut rows: Vec<u32> = Vec::new();
-        let mut keys = BTreeSet::new();
+        let gone: Vec<BlockId> = self
+            .block_statics
+            .keys()
+            .filter(|id| !scene.blocks.contains_key(id))
+            .copied()
+            .collect();
+        for id in gone {
+            if let Some(own) = self.block_statics.remove(&id) {
+                forget_keys(&mut self.static_keys, &own.keys);
+            }
+        }
         for (id, block) in &scene.blocks {
-            let parts = block
-                .parts
-                .iter()
-                .chain(block.rooms.iter().flat_map(|r| r.statics.iter()))
-                .chain(block.rooms.iter().map(|r| &r.walls));
-            for part in parts {
-                let Some((key, part_rows, alpha)) = Self::part_key(scene, part) else {
-                    continue;
+            let fresh = self
+                .block_statics
+                .get(id)
+                .is_some_and(|b| b.held == held(block));
+            if !fresh {
+                if let Some(own) = self.block_statics.remove(id) {
+                    forget_keys(&mut self.static_keys, &own.keys);
+                }
+                let mut own = BlockStatics {
+                    held: held(block),
+                    entries: Vec::new(),
+                    rows: Vec::new(),
+                    keys: BTreeSet::new(),
                 };
-                let Some(count) = vertex_counts.get(&key.0).copied() else {
-                    continue;
-                };
-                let address = self.blas_for(gfx, scene, &key, count)?;
-                let custom = u32::try_from(rows.len() / 4).unwrap_or(0);
-                rows.extend(part_rows);
-                let m = if alpha {
-                    mask::STATIC_ALPHA
-                } else {
-                    mask::STATIC
-                };
-                entries.push(entry(part.instance, custom, m, 0, address));
-                keys.insert(key);
+                let parts = block
+                    .parts
+                    .iter()
+                    .chain(block.rooms.iter().flat_map(|r| r.statics.iter()))
+                    .chain(block.rooms.iter().map(|r| &r.walls));
+                // The part before, and what it placed: a block's ground cover is thousands of
+                // parts drawing one model alike, each placing what the one before it did.
+                let mut last: Option<(&PartItems, Option<Placed>)> = None;
+                for part in parts {
+                    let placed = match last {
+                        Some((before, ref placed))
+                            if same_draws((&scene.item_draws, &scene.buckets), before, part) =>
+                        {
+                            placed.clone()
+                        }
+                        _ => match Self::part_key(scene, part, &facts.sways) {
+                            Some((key, part_rows, alpha)) => {
+                                match facts.counts.get(&key.0).copied() {
+                                    Some(count) => {
+                                        let address = self.blas_for(gfx, scene, &key, count)?;
+                                        own.keys.insert(key);
+                                        Some((part_rows, alpha, address))
+                                    }
+                                    None => None,
+                                }
+                            }
+                            None => None,
+                        },
+                    };
+                    last = Some((part, placed.clone()));
+                    let Some((part_rows, alpha, address)) = placed else {
+                        continue;
+                    };
+                    let custom = u32::try_from(own.rows.len() / 4).unwrap_or(0);
+                    own.rows.extend(part_rows);
+                    let m = if part.cover {
+                        mask::COVER
+                    } else if alpha {
+                        mask::STATIC_ALPHA
+                    } else {
+                        mask::STATIC
+                    };
+                    // Ground cover is drawn only so far from the eye, its size's share of its
+                    // reach; past it, it is left out of the structures as the frame leaves it out.
+                    let reach = if part.cover {
+                        cover_reach(part.mesh).map_or(0.0, |r| r * part.scale.max_element())
+                    } else {
+                        0.0
+                    };
+                    for w in entry(part.instance, custom, m, 0, address)
+                        .reaching(reach)
+                        .words
+                    {
+                        own.entries.extend_from_slice(&w.to_le_bytes());
+                    }
+                }
+                for k in &own.keys {
+                    *self.static_keys.entry(k.clone()).or_insert(0) += 1;
+                }
+                self.block_statics.insert(*id, own);
+            }
+            if let Some(own) = self.block_statics.get(id) {
+                let base = u32::try_from(rows.len() / 4).unwrap_or(0);
+                rows.extend_from_slice(&own.rows);
+                append_entries(&mut entries, &own.entries, base);
+                static_count += u32::try_from(own.entries.len() / ENTRY_BYTES).unwrap_or(u32::MAX);
             }
             // The block's ground.
             if let (Some(g), true) = (scene.ground.get(id), block.slot != super::scene::NONE) {
@@ -559,7 +808,10 @@ impl RtPass {
                     g.cells.start,
                     row_flag::GROUND | (g.side << 8),
                 ]);
-                entries.push(entry(block.slot, custom, mask::GROUND, 1, address));
+                for w in entry(block.slot, custom, mask::GROUND, 1, address).words {
+                    entries.extend_from_slice(&w.to_le_bytes());
+                }
+                static_count += 1;
             }
         }
         // Grounds of blocks no longer held go.
@@ -575,8 +827,7 @@ impl RtPass {
                 gfx.destroy_buffer(g.indices);
             }
         }
-        self.static_keys = keys;
-        self.static_count = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+        self.static_count = static_count;
         self.static_rows = u32::try_from(rows.len() / 4).unwrap_or(u32::MAX);
         let (e, r) = match self.statics.as_mut() {
             Some(s) => s,
@@ -596,7 +847,7 @@ impl RtPass {
                 self.statics.insert((e, r))
             }
         };
-        e.write(gfx, &entries_bytes(&entries))?;
+        e.write(gfx, &entries)?;
         r.write(gfx, &push_words(&rows))?;
         Ok(())
     }
@@ -662,46 +913,85 @@ impl RtPass {
         &mut self,
         gfx: &mut Device,
         scene: &GpuScene,
-        vertex_counts: &BTreeMap<u32, u32>,
+        facts: &MeshFacts,
     ) -> Result<(Vec<Entry32>, Vec<u32>), dereth_gfx::Error> {
-        let mut entries = Vec::new();
-        let mut rows = Vec::new();
-        for (key, object) in &scene.objects {
-            let m = if *key == ObjectKey::Body {
-                mask::BODY
-            } else {
-                mask::OBJECT
+        // Which structure each part places, and its rows, change only with the objects and the
+        // meshes held; each structure is still asked for every frame, so a posed one is refitted
+        // and every one is kept.
+        let of = (scene.objects_generation, scene.mesh_generation);
+        if self.objects_placed.of != of || self.objects_placed.keys.is_empty() {
+            let mut placed = ObjectsPlaced {
+                of,
+                ..ObjectsPlaced::default()
             };
-            for part in &object.parts {
-                let Some((k, part_rows, _)) = Self::part_key(scene, part) else {
-                    continue;
+            let mut index: BTreeMap<BlasKey, u32> = BTreeMap::new();
+            for (key, object) in &scene.objects {
+                let m = if *key == ObjectKey::Body {
+                    mask::BODY
+                } else {
+                    mask::OBJECT
                 };
-                let Some(count) = vertex_counts.get(&k.0).copied() else {
-                    continue;
-                };
-                let address = self.blas_for(gfx, scene, &k, count)?;
-                let custom = u32::try_from(rows.len() / 4).unwrap_or(0) | OBJECT_ROWS;
-                rows.extend(part_rows);
-                entries.push(entry(part.instance, custom, m, 0, address));
+                for part in &object.parts {
+                    let Some((k, part_rows, _)) = Self::part_key(scene, part, &facts.sways) else {
+                        continue;
+                    };
+                    let Some(count) = facts.counts.get(&k.0).copied() else {
+                        continue;
+                    };
+                    let next = u32::try_from(placed.keys.len()).unwrap_or(u32::MAX);
+                    let at = *index.entry(k.clone()).or_insert_with(|| {
+                        placed.keys.push((k, count));
+                        next
+                    });
+                    let start = u32::try_from(placed.rows.len()).unwrap_or(u32::MAX);
+                    placed.rows.extend(part_rows);
+                    placed.parts.push((part.instance, m, at, start));
+                }
+            }
+            self.objects_placed = placed;
+        }
+        let placed = std::mem::take(&mut self.objects_placed);
+        let mut addresses = Vec::with_capacity(placed.keys.len());
+        for (k, count) in &placed.keys {
+            match self.blas_for(gfx, scene, k, *count) {
+                Ok(a) => addresses.push(a),
+                Err(e) => {
+                    self.objects_placed = placed;
+                    return Err(e);
+                }
             }
         }
+        let entries = placed
+            .parts
+            .iter()
+            .map(|&(instance, m, at, start)| {
+                let custom = (start / 4) | OBJECT_ROWS;
+                entry(instance, custom, m, 0, addresses[at as usize])
+            })
+            .collect();
+        let rows = placed.rows.clone();
+        self.objects_placed = placed;
         Ok((entries, rows))
     }
 }
 
 impl RtPlan {
-    /// Write each instance's record from its rows, then build the top-level structure from them.
+    /// Fit the structures of the meshes posed this frame (`refitting`, [`RtPass::refitting`]) to
+    /// them, which must be recorded after the posing; write each instance's record from its rows;
+    /// then build the top-level structure from them.
     ///
     /// # Errors
     /// What the device refuses.
     pub fn record(
         &self,
         r: &mut Recorder<'_>,
+        refitting: &[Blas],
         frame: u32,
         instances: u32,
         blocks: u32,
     ) -> Result<(), dereth_gfx::Error> {
         r.timestamp("acceleration");
+        r.refit_blas(refitting)?;
         let total = self.statics + self.objects;
         if total > 0 {
             r.compute(&[Touch::Buffer(self.instances, Use::StorageWrite)], |c| {
@@ -735,7 +1025,8 @@ impl RtPlan {
 }
 
 /// One entry: the instance (or block slot for a ground), its index of the user's, its mask and
-/// kind, and its bottom-level structure's address.
+/// kind, and its bottom-level structure's address; and how far from the eye it is held at all
+/// (0: however far), which [`Entry32::reaching`] sets.
 fn entry(instance: u32, custom: u32, mask: u8, kind: u32, address: u64) -> Entry32 {
     #[allow(clippy::cast_possible_truncation)] // the address's two halves
     Entry32 {
@@ -752,11 +1043,65 @@ fn entry(instance: u32, custom: u32, mask: u8, kind: u32, address: u64) -> Entry
     }
 }
 
+impl Entry32 {
+    /// The entry held only while it stands within `reach` meters of the eye (0: however far):
+    /// past it, its instance is in the top-level structure with no mask, which no ray meets.
+    fn reaching(mut self, reach: f32) -> Self {
+        self.words[3] = reach.to_bits();
+        self
+    }
+}
+
+/// The bytes of an entry.
+const ENTRY_BYTES: usize = 32;
+
 fn entries_bytes(entries: &[Entry32]) -> Vec<u8> {
-    entries
-        .iter()
-        .flat_map(|e| e.words.iter().flat_map(|w| w.to_le_bytes()))
-        .collect()
+    let mut out = Vec::with_capacity(entries.len() * ENTRY_BYTES);
+    for w in entries.iter().flat_map(|e| e.words) {
+        out.extend_from_slice(&w.to_le_bytes());
+    }
+    out
+}
+
+/// A block's entries, as [`BlockStatics::entries`] keeps them, added to `out`: each one's index
+/// of the user's moved from the block's own rows to the table's, which hold the block's from
+/// `base` on.
+fn append_entries(out: &mut Vec<u8>, own: &[u8], base: u32) {
+    let at = out.len();
+    out.extend_from_slice(own);
+    for e in out[at..].as_chunks_mut::<ENTRY_BYTES>().0 {
+        let custom = u32::from_le_bytes([e[4], e[5], e[6], e[7]]) + base;
+        e[4..8].copy_from_slice(&custom.to_le_bytes());
+    }
+}
+
+/// Whether parts `a` and `b` draw their finest levels alike: the same items, as the structures
+/// and their rows take them, in the same buckets.
+fn same_draws((draws, buckets): (&[ItemDraw], &[Bucket]), a: &PartItems, b: &PartItems) -> bool {
+    match (a.levels.first(), b.levels.first()) {
+        (Some(x), Some(y)) => {
+            x.len() == y.len()
+                && x.clone().zip(y.clone()).all(|(i, j)| {
+                    let (i, j) = (i as usize, j as usize);
+                    draws.get(i) == draws.get(j) && buckets.get(i) == buckets.get(j)
+                })
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// `keys` no longer placed by a block that placed them: each one's count down, and gone at
+/// none.
+fn forget_keys(counts: &mut BTreeMap<BlasKey, u32>, keys: &BTreeSet<BlasKey>) {
+    for k in keys {
+        if let Some(n) = counts.get_mut(k) {
+            *n -= 1;
+            if *n == 0 {
+                counts.remove(k);
+            }
+        }
+    }
 }
 
 /// A block's ground as triangles over its `(side + 1)²` vertices, two a cell in the cells' order,
@@ -842,11 +1187,128 @@ mod tests {
         assert!(t.iter().all(|v| *v < 9));
     }
 
+    /// A part drawing one level.
+    fn one(level: std::ops::Range<u32>) -> PartItems {
+        part(std::slice::from_ref(&level))
+    }
+
+    fn part(levels: &[std::ops::Range<u32>]) -> PartItems {
+        PartItems {
+            instance: 0,
+            degrade: None,
+            levels: levels.to_vec(),
+            sphere: ([0.0; 3], 0.0),
+            transform: glam::Mat4::IDENTITY,
+            scale: glam::Vec3::ONE,
+            turned: None,
+            lifts: [0.0; 2],
+            mesh: 0,
+            cover: false,
+        }
+    }
+
+    /// **Parts drawn alike are known alike, and only they**: two parts whose finest levels draw
+    /// the same items in the same buckets (a ground cover's placements of one model) place the
+    /// same structure and rows; one whose item differs in anything, or whose bucket does, or that
+    /// has more items, does not.
+    #[test]
+    fn parts_drawn_alike_are_known_alike_and_only_they() {
+        let draw = |first_index| ItemDraw {
+            index_count: 6,
+            first_index,
+            vertex_base: 40,
+            material: 3,
+            ..ItemDraw::default()
+        };
+        let draws = [
+            draw(0),
+            draw(6),
+            draw(0),
+            draw(6),
+            draw(12),
+            draw(0),
+            draw(6),
+        ];
+        let buckets = [
+            Bucket::Opaque,
+            Bucket::OpaqueTwoSided,
+            Bucket::Opaque,
+            Bucket::OpaqueTwoSided,
+            Bucket::Opaque,
+            Bucket::Opaque,
+            Bucket::Opaque,
+        ];
+        let pools = (&draws[..], &buckets[..]);
+        let first = part(&[0..2, 4..5]);
+        assert!(
+            same_draws(pools, &first, &one(2..4)),
+            "alike, coarser levels aside"
+        );
+        assert!(!same_draws(pools, &first, &one(4..6)), "another item");
+        assert!(!same_draws(pools, &first, &one(5..7)), "another bucket");
+        assert!(!same_draws(pools, &first, &one(2..5)), "more items");
+        assert!(!same_draws(pools, &first, &part(&[])), "nothing drawn");
+        assert!(same_draws(pools, &part(&[]), &part(&[])));
+    }
+
+    /// **A structure stays placed while any block places it**: two blocks placing one structure,
+    /// and one of them another; once the second lets go, the shared one is still placed and its
+    /// own is not.
+    #[test]
+    fn a_structure_stays_placed_while_any_block_places_it() {
+        let key = |v: u32| -> BlasKey { (v, vec![(0, 3, true)]) };
+        let mut counts: BTreeMap<BlasKey, u32> = BTreeMap::new();
+        let a: BTreeSet<BlasKey> = [key(1)].into();
+        let b: BTreeSet<BlasKey> = [key(1), key(2)].into();
+        for k in a.iter().chain(&b) {
+            *counts.entry(k.clone()).or_insert(0) += 1;
+        }
+        forget_keys(&mut counts, &b);
+        assert!(counts.contains_key(&key(1)));
+        assert!(!counts.contains_key(&key(2)));
+        forget_keys(&mut counts, &a);
+        assert!(counts.is_empty());
+    }
+
+    /// **A block's entries join the table's with their rows'**: added after what is there, each
+    /// one's index of the user's moves by where the block's rows begin, and nothing else of it
+    /// changes.
+    #[test]
+    fn a_blocks_entries_join_the_tables_with_their_rows() {
+        let own = entries_bytes(&[
+            entry(5, 0, mask::COVER, 0, 0x1_0000_0040),
+            entry(6, 2, mask::STATIC, 0, 0x80),
+        ]);
+        let mut out = entries_bytes(&[entry(1, 0, mask::GROUND, 1, 0x40)]);
+        append_entries(&mut out, &own, 10);
+        assert_eq!(
+            out,
+            entries_bytes(&[
+                entry(1, 0, mask::GROUND, 1, 0x40),
+                entry(5, 10, mask::COVER, 0, 0x1_0000_0040),
+                entry(6, 12, mask::STATIC, 0, 0x80),
+            ])
+        );
+    }
+
     /// An entry's words: the instance, its index of the user's, its mask and kind, and the
     /// address's halves.
     #[test]
     fn an_entry_carries_its_instance_index_mask_kind_and_address() {
         let e = entry(7, 9, mask::GROUND, 1, 0x1_2345_6789);
         assert_eq!(e.words, [7, 9, 4 | (1 << 8), 0, 0x2345_6789, 1, 0, 0]);
+    }
+
+    /// **A ground cover's entry carries how far from the eye it is held**: its reach in its
+    /// fourth word, as a float's bits, and nothing else of it changed; an entry with no reach
+    /// holds 0 there, which is held however far.
+    #[test]
+    fn a_ground_covers_entry_carries_how_far_from_the_eye_it_is_held() {
+        let e = entry(7, 9, mask::COVER, 0, 0x40);
+        let held = e.reaching(48.0);
+        assert_eq!(f32::from_bits(held.words[3]), 48.0);
+        assert_eq!(held.words[..3], e.words[..3]);
+        assert_eq!(held.words[4..], e.words[4..]);
+        assert_eq!(e.words[3], 0);
     }
 }

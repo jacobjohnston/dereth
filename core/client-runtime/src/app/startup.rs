@@ -256,20 +256,7 @@ impl<S: Shell> App<S> {
         // is moved into it.
         // Every patch goes into the world's overlay, never into the locked files.
         let ddd = crate::world_overlay::patcher(&store, &cfg);
-        // The travel's store: in `--nav-store`'s folder, or beside the preferences file.
-        let travel = crate::travel::Travel::new(match cfg.nav_store.clone() {
-            Some(dir) => crate::travel::StoreFiles {
-                dir: Some(dir),
-                prefix: String::new(),
-            },
-            None => crate::travel::StoreFiles {
-                dir: cfg
-                    .preferences_file
-                    .parent()
-                    .map(std::path::Path::to_path_buf),
-                prefix: String::from("navigation-"),
-            },
-        });
+        let travel = crate::travel::Travel::new(crate::travel::StoreFiles::of(&cfg));
         // The object identity verdicts start now, whatever look is chosen, so a later switch to
         // the other era's look is instant.
         let scene_cfg = cfg.scene_config();
@@ -278,6 +265,7 @@ impl<S: Shell> App<S> {
         });
         #[cfg(feature = "fidelity")]
         let horizon_interface = cfg.render.fidelity.interface;
+        let explore = cfg.explore.then(crate::explore::Explore::default);
         let mut app = Self {
             cfg,
             state: AppState::Startup,
@@ -323,10 +311,11 @@ impl<S: Shell> App<S> {
             nav_spells: None,
             nav_academies: None,
             travel_fizzles: 0,
-            published_portals: std::sync::Arc::default(),
+            published: std::sync::Arc::default(),
             player_moves: 0,
             hook_player_moves: 0,
             travel_player_moves: 0,
+            places_house_notices: 0,
             last_link_status: None,
             last_rejected: 0,
             last_net_error: None,
@@ -351,6 +340,7 @@ impl<S: Shell> App<S> {
             perf_font: false,
             window_has_no_extent: false,
             perf_capture: None,
+            explore,
             build_commit: "unknown",
             playable_at: None,
             // The reporter seeds `last_sent_position_time` with the clock start, not zero.
@@ -372,6 +362,7 @@ impl<S: Shell> App<S> {
             base_store,
             pending_auto_layout: false,
             duties: FrameDuties::default(),
+            interface_world: None,
             applied_full_screen: started_full_screen,
             applied_resolution: (client_w, client_h),
             applied_sync_to_refresh: started_sync_to_refresh,
@@ -430,6 +421,12 @@ impl<S: Shell> App<S> {
             })?;
         if let Some(mut world) = self.present.scene_mut(self.world.as_mut()) {
             world.set_environment_override_state(self.environment_override.clone());
+        }
+        // `--explore`'s camera starts where its location says.
+        if let (Some(start), Some(ws)) = (self.cfg.explore_start, self.world.as_mut()) {
+            if let Some(block) = ws.viewer_block() {
+                ws.camera = start.to_render(block);
+            }
         }
         Ok(())
     }
@@ -647,13 +644,51 @@ impl<S: Shell> App<S> {
         if let (Some(start), false) = (render_scale, in_profile) {
             dereth_client_contract::options::render_scale::register(start);
         }
-        if let Some(first) = self.cfg.new_player_interface {
+        let start = interface::world_start(
+            ini.as_ref(),
+            self.cfg.world_slug.as_deref(),
+            self.cfg.interface,
+            self.store.classic_files().is_some(),
+        );
+        if let Some(start) = start.interface {
+            store::set_value(
+                interface::INTERFACE,
+                dereth_client_contract::PrefValue::Int(start.value()),
+            );
+        } else if let Some(first) = self.cfg.new_player_interface {
             if interface::start_new_player(ini.as_ref(), first) {
                 tracing::info!(
                     "the preferences name no interface: starting in the {} interface",
                     first.label()
                 );
             }
+        }
+        let started = interface::Interface::chosen();
+        if start.classic_missing {
+            let notice = interface::classic_missing_notice(started);
+            tracing::info!("{notice}");
+            self.objects.world.scroll.add_text_to_scroll(
+                &notice,
+                dereth_client_model::scroll::LOCAL_ERROR_TYPE,
+                true,
+                0,
+            );
+        }
+        self.interface_world = self
+            .cfg
+            .world_slug
+            .as_deref()
+            .map(|world| interface::WorldChoice::new(world, started));
+    }
+
+    /// The interface shown is now `shown`: kept for the world the launcher named once it is a
+    /// switch the player made ([`dereth_client_contract::options::interface::WorldChoice`]).
+    pub fn note_interface_shown(
+        &mut self,
+        shown: dereth_client_contract::options::interface::Interface,
+    ) {
+        if let Some(world) = self.interface_world.as_mut() {
+            world.shown(shown);
         }
     }
 

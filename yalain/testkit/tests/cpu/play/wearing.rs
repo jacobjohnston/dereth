@@ -466,7 +466,7 @@ fn a_chest_piece_whose_race_skill_level_or_quest_the_wearer_lacks_is_refused_in_
     h.server.quests = QuestTable {
         quests: vec![QuestDef {
             id: QUEST,
-            name: (0xA860_7CEC, 0x2500_17EE),
+            name: yalain_content::Words::Ref(0xA860_7CEC, 0x2500_17EE),
             description: (0x6C45_9364, 0x2500_17EE),
             icon: 0,
             play_fx: false,
@@ -483,9 +483,11 @@ fn a_chest_piece_whose_race_skill_level_or_quest_the_wearer_lacks_is_refused_in_
             subquests: Vec::new(),
             min_level: 0,
             fails_on_death: false,
+            fails_on_logout: false,
+            fails_on_teleport: false,
             once: false,
             fellows: yalain_content::quests::Fellows::default(),
-            last_waits: false,
+            ranges: Vec::new(),
             hero_only: false,
             pay: yalain_content::quests::CompletionPay::default(),
             required: None,
@@ -579,6 +581,44 @@ fn a_chest_piece_whose_race_skill_level_or_quest_the_wearer_lacks_is_refused_in_
     let fa = h.bots[a].inbox.len();
     use_it(&mut h, a, me, item);
     assert!(use_answers(&h, a, fa).is_empty(), "met: no refusal");
+    assert_eq!(answers(&h, a, fa).len(), 1, "worn");
+    assert_eq!(held(&h, me, item).0, 2, "on the chest");
+}
+
+/// A chest piece for heroes alone is refused to anyone else (10049), answered alone and left in
+/// the pack; a hero wears it.
+/// Behaviour: server.equip.hero-only
+#[test]
+fn a_chest_piece_for_heroes_alone_is_refused_to_anyone_else_and_worn_by_a_hero() {
+    const HEROES: u32 = 0x4700_7107;
+    let (mut h, a, me, _) = two_players();
+    let world = *h
+        .server
+        .players
+        .iter()
+        .find(|(_, p)| p.character == me)
+        .unwrap()
+        .0;
+    let (race, sex) = {
+        let p = &h.server.players[&world];
+        (p.race, p.sex)
+    };
+    let mut t = garment(HEROES, (2, 2, 0), CHEST_LOOK, race, sex);
+    t.props.set("Usage_HeroOnly", Prop::Bool(true));
+    h.server.catalog.insert(t);
+    let fa = h.bots[a].inbox.len();
+    let item = h.arm(a, me, HEROES);
+    assert_eq!(
+        use_answers(&h, a, fa),
+        [(yalain_world::item_use::refusal::HERO_ONLY, 316, 0)]
+    );
+    assert!(answers(&h, a, fa).is_empty(), "not worn");
+    assert_eq!(held(&h, me, item).0, 0, "still in the pack");
+    let p = h.server.players.get_mut(&world).unwrap();
+    yalain_world::focus::set_hero_kept(&mut p.qualities, true);
+    let fa = h.bots[a].inbox.len();
+    use_it(&mut h, a, me, item);
+    assert!(use_answers(&h, a, fa).is_empty(), "a hero: no refusal");
     assert_eq!(answers(&h, a, fa).len(), 1, "worn");
     assert_eq!(held(&h, me, item).0, 2, "on the chest");
 }
@@ -746,30 +786,29 @@ fn a_garment_with_no_look_of_its_own_is_worn_with_its_worn_rows_look_for_the_wea
     assert!(!tables(&last).contains(&0x2000_7F01), "not the row's");
 }
 
-/// A world with no `[[worn]]` rows has the server's own worn looks, 147 of 75 templates, and says
-/// it fell back; a world with any has its rows alone, never merged with the server's: a template
-/// only the server's own names gets no look.
+/// A world with no `[[worn]]` rows gives a template whose data names no worn look none; a world
+/// with rows gives it its rows' looks alone, and a template no row names none.
 /// Behaviour: server.inventory.worn-looks-without-rows
 #[test]
-fn a_world_without_worn_rows_has_the_servers_own_and_with_some_its_rows_alone() {
-    use yalain_content::worn_table::{world_worn, Worn, WornLooks};
-    let (own, fell_back) = world_worn(&WornLooks::default());
-    assert!(fell_back, "said");
-    assert_eq!(own, WornLooks::servers_own());
-    assert_eq!(own.iter().count(), 147);
-    assert_eq!(own.by_template.len(), 75);
+fn a_world_without_worn_rows_gives_no_worn_look_and_with_some_its_rows_alone() {
+    use yalain_content::worn_table::{Worn, WornLooks};
     let row = Worn {
         template: 0x4700_7105,
         races: 1,
         sexes: 0x1000,
         appearance: 0x2000_7105,
     };
-    let (theirs, fell_back) = world_worn(&WornLooks::of_rows([row]));
-    assert!(!fell_back);
-    assert_eq!(theirs.iter().copied().collect::<Vec<_>>(), [row]);
-    let servers = own.by_template.keys().next().copied().unwrap();
-    assert!(
-        theirs.of(servers).is_empty(),
-        "{servers:08X}: none merged in"
+    let other = 0x4700_7106;
+    let none = Props::default().with_worn_of(row.template, &WornLooks::default());
+    assert_eq!(none.word("Item_WornAppearanceFile1"), None, "no rows");
+    let theirs = WornLooks::of_rows([row]);
+    let worn = Props::default().with_worn_of(row.template, &theirs);
+    assert_eq!(worn.word("Item_WornAppearanceFile1"), Some(row.appearance));
+    assert_eq!(worn.word("Item_WornAppearanceFile2"), None);
+    let unnamed = Props::default().with_worn_of(other, &theirs);
+    assert_eq!(
+        unnamed.word("Item_WornAppearanceFile1"),
+        None,
+        "no row of it"
     );
 }

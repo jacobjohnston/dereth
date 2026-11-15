@@ -44,10 +44,14 @@
 //! - [`kingdoms`]: a player's kingdom, joined at a faction shrine, and the kind of player conflict
 //!   each place allows, which the client is told of as its player comes and goes.
 //! - [`plants`]: dye plants: planted from seeds, cared for, pollinated and harvested.
+//! - [`puzzles`]: objects whose state the items given them change, and uses in an order judged
+//!   against those states.
+//! - [`offerings`]: objects that take a set of items from players and then open the way for a
+//!   while.
 //! - [`mounts`]: saddles and mount eggs put their user on a beast; riding, dismounting and the
 //!   ride's end.
-//! - [`usable`]: doors, chests, their locks and keys, surveyor's maps, items used on the objects
-//!   their interaction tables name (a hoard's key on its stockpile).
+//! - [`usable`]: doors, chests, their locks and keys, levers, surveyor's maps, items used on the
+//!   objects their interaction tables name (a hoard's key on its stockpile).
 //! - [`made`]: what a recipe's item level makes a product carry of its own.
 //! - [`treasure`]: what a treasure item carries of its own, chosen as it drops.
 //! - [`walkers`]: placed people walking their routes.
@@ -64,6 +68,7 @@
 //! - [`guard`]: a panic in the world stops it, whole.
 //! - [`step_timer`]: how long the world works from one step to the next, by stage, and a warning
 //!   when that passes the step.
+//! - [`rates`]: the operator's experience, loot and respawn rates.
 
 pub mod admin;
 pub mod admin_calls;
@@ -86,19 +91,24 @@ pub mod craft;
 pub mod creature_rows;
 pub mod death;
 pub mod death_spawn;
+pub mod defenses;
 pub mod download;
 pub mod drops;
 pub mod effect_defs;
 pub mod effects;
 pub mod equip;
+pub mod escorts;
 pub mod events;
 pub mod examine;
 pub mod fellowship;
 pub mod focus;
 pub mod follow;
+pub mod fought;
 pub mod gives;
 pub mod graph;
 pub mod guard;
+pub mod guards;
+pub mod holding;
 pub mod inventory;
 pub mod item_use;
 pub mod kingdom_skills;
@@ -113,21 +123,27 @@ pub mod mining;
 pub mod missiles;
 pub mod mounts;
 pub mod names;
+pub mod offerings;
 pub mod options;
 pub mod pack;
 pub mod personal;
 pub mod pets;
 pub mod places;
+pub mod placing;
 pub mod plants;
 pub mod player;
 pub mod popups;
 pub mod presence;
 pub mod profile;
 pub mod progress;
+pub mod puzzles;
 pub mod quals;
 pub mod quests;
+pub mod rates;
 pub mod ratings;
 pub mod reach;
+pub mod recipe_download;
+pub mod recipe_rows;
 pub mod regen;
 pub mod reload;
 pub mod reported;
@@ -138,6 +154,7 @@ pub mod rules;
 pub mod saves;
 pub mod scenes;
 pub mod session;
+pub mod shifting;
 pub mod shutdown;
 pub mod skill_use;
 pub mod skills;
@@ -149,6 +166,7 @@ pub mod step_timer;
 pub mod store;
 pub mod storms;
 pub mod talk;
+pub mod tallies;
 pub mod things;
 pub mod timings;
 pub mod trade;
@@ -196,7 +214,7 @@ pub enum AccountPolicy {
 }
 
 /// The server's settings.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ServerConfig {
     /// The world's name, shown at login.
     pub world_name: String,
@@ -243,6 +261,10 @@ pub struct ServerConfig {
     /// The operator's message of the day, shown to each player as its character enters the
     /// world, in one notice (empty: none).
     pub motd: String,
+    /// The portal storms' threshold and the fewest a storm sends away, as the world starts.
+    pub storms: storms::Settings,
+    /// The operator's experience, loot and respawn rates (1 each unless given).
+    pub rates: rates::Rates,
 }
 
 impl Default for ServerConfig {
@@ -267,6 +289,8 @@ impl Default for ServerConfig {
             max_sessions_per_address: None,
             unlimited_addresses: Vec::new(),
             motd: String::new(),
+            storms: storms::Settings::default(),
+            rates: rates::Rates::default(),
         }
     }
 }
@@ -315,6 +339,9 @@ pub struct Server<S: Store> {
     /// and the logins waiting for it to be stored before they see their characters.
     pub admin_library: Option<admin_library::AdminLibrary>,
     pub storing_library: std::collections::HashSet<ConnId>,
+    /// The logins sent the world's recipes, waiting for them to be stored: what each told of its
+    /// data, with their iteration ([`recipe_download`]).
+    pub storing_recipes: HashMap<ConnId, auberean_protocol::login::DataHeld>,
     /// The world's overlay as clients are patched to it, when it has one; the clients that said
     /// they keep overlays, and those being patched.
     pub world_patch: Option<std::sync::Arc<world_patch::WorldPatch>>,
@@ -393,6 +420,9 @@ pub struct Server<S: Store> {
     pub levels: levels::LevelTable,
     /// The world's calendar, which says when it is night; none, never.
     pub calendar: Option<auberean_world::calendar::GameClock>,
+    /// The parts of the game's day, by the calendar: where each begins (a share of the day) and
+    /// whether it is night.
+    pub day_parts: Vec<(f32, bool)>,
     /// The skills' definitions and advancement tables.
     pub skill_table: skills::SkillTable,
     /// The effects' definitions, and the recipes' and craft skills'.
@@ -401,6 +431,18 @@ pub struct Server<S: Store> {
     pub creature_effects: effects::CreatureRecords,
     /// Which of the world's scheduled events are on.
     pub events: events::Events,
+    /// The world's tallies' counts.
+    pub tallies: tallies::Tallies,
+    /// What the world's offerings hold, and which stand open.
+    pub offerings: offerings::Offerings,
+    /// The lever pulls waiting on a row's other levers.
+    pub levers: usable::levers::Levers,
+    /// The guarded objects' rows as the world keeps them.
+    pub guards: guards::Guards,
+    /// The shifting objects' rows as the world keeps them.
+    pub shifts: shifting::Shifts,
+    /// The defended devices standing, and what each keeps about it.
+    pub defenses: defenses::Defenses,
     pub crafting: craft::Crafting,
     /// The vitae cost table: the experience to raise vitae by one at full vitae, by level from 1.
     pub vitae_costs: Vec<u64>,
@@ -416,6 +458,8 @@ pub struct Server<S: Store> {
     pub item_uses: item_use::ItemUses,
     /// The effects each item template puts on whoever wears or wields it.
     pub worn_effects: item_use::ItemUses,
+    /// The effects each weapon template puts on what its wielder's blows land on.
+    pub hit_effects: item_use::ItemUses,
     /// The world database's item rows: what items' uses do where their templates name nothing,
     /// what books, cards and people show, and what every new character is given.
     pub item_rows: yalain_content::item_rows::ItemRows,
@@ -427,6 +471,8 @@ pub struct Server<S: Store> {
     pub examine_waits: HashSet<ConnId>,
     /// The packages of the objects a player uses by walking into them (portals).
     pub walk_in_packages: std::collections::HashSet<u32>,
+    /// Which script packages derive from which, for the gives that take any item of a class.
+    pub item_classes: gives::ItemClasses,
     /// The packages of the world's people and objects that answer a use as a person does (those
     /// derived from the script library's person), and of its faction shrines.
     pub person_packages: std::collections::HashSet<u32>,
@@ -460,6 +506,9 @@ pub struct Server<S: Store> {
     pub held_answers: std::collections::HashMap<u32, (u32, u32)>,
     /// The vaults' trips.
     pub vault_trips: usable::vaults::VaultTrips,
+    /// The packages of the world's portal doors: portals that stand as doors, which a locked one's
+    /// key carries its user through.
+    pub portal_door_packages: std::collections::HashSet<u32>,
     /// The templates of creatures' weapons, by the names creatures' templates give them.
     pub creature_weapons: HashMap<String, u32>,
     /// What the world database says of those weapons beyond their templates, by the same names.
@@ -494,8 +543,12 @@ pub struct Server<S: Store> {
     pub lying: drops::Lying,
     /// The pets players have summoned.
     pub pets: pets::Pets,
+    /// The creatures following their players for quests.
+    pub escorts: escorts::Escorts,
     /// The dye plants players have planted, and the species' ripe looks.
     pub plants: plants::Plants,
+    /// The states of the world's objects that hold one, where they have changed.
+    pub object_states: puzzles::States,
     /// The locked doors and their keys, and the doors' states.
     pub locks: yalain_content::LockTable,
     /// The places templates name: where a person who sends players by their maps sends the
@@ -538,8 +591,8 @@ pub trait Ground: std::fmt::Debug {
 pub enum Timer {
     /// The next step of a player's trip through portal space.
     Trip { world: ConnId, step: places::Step },
-    /// A player's taking of an item is through.
-    Take { world: ConnId, item: u64 },
+    /// A player's taking of an item out of a corpse or a chest (`from`) is through.
+    Take { world: ConnId, item: u64, from: u64 },
     /// A player's taking of everything in a container is through.
     TakeAll { world: ConnId, container: u64 },
     /// A dead creature's corpse appears.
@@ -624,6 +677,8 @@ pub enum Timer {
     AurasPulseAgain { world: ConnId },
     /// A player another raised may move.
     RaisedMoves { world: ConnId },
+    /// A player back at its lifestone from a resurrection may move again.
+    MovesAgain { world: ConnId },
     /// The next step of a player's craft.
     Craft { world: ConnId, step: craft::Step },
     /// A player's day of craft experience may be over.
@@ -761,6 +816,7 @@ impl<S: Store> Server<S> {
     /// The store will not set them aside: a world without them could give an id a kept item holds.
     pub fn new(cfg: ServerConfig, mut store: S, rules: CharGenRules) -> StoreResult<Self> {
         let cfg_seed = cfg.seed;
+        let storms = storms::Storms::with(cfg.storms);
         let mut things = things::Things::default();
         let first = store.reserve_thing_numbers(things::ID_BLOCK)?;
         things.add_block(first, things::ID_BLOCK);
@@ -778,6 +834,7 @@ impl<S: Store> Server<S> {
             admin_rooms: admin_calls::Rooms::default(),
             admin_library: None,
             storing_library: std::collections::HashSet::new(),
+            storing_recipes: HashMap::new(),
             world_patch: None,
             overlay_clients: HashMap::new(),
             patches: world_patch::Patches::default(),
@@ -819,9 +876,16 @@ impl<S: Store> Server<S> {
             levels: levels::LevelTable::default(),
             skill_table: skills::SkillTable::default(),
             calendar: None,
+            day_parts: Vec::new(),
             effect_table: effect_defs::EffectTable::default(),
             creature_effects: effects::CreatureRecords::default(),
             events: events::Events::default(),
+            tallies: tallies::Tallies::default(),
+            offerings: offerings::Offerings::default(),
+            levers: usable::levers::Levers::default(),
+            guards: guards::Guards::default(),
+            shifts: shifting::Shifts::default(),
+            defenses: defenses::Defenses::default(),
             crafting: craft::Crafting::default(),
             vitae_costs: Vec::new(),
             last_step: None,
@@ -830,6 +894,7 @@ impl<S: Store> Server<S> {
             item_effects: HashMap::new(),
             item_uses: HashMap::new(),
             worn_effects: HashMap::new(),
+            hit_effects: HashMap::new(),
             item_rows: yalain_content::item_rows::ItemRows::default(),
             quest_ids: HashMap::new(),
             examining: HashMap::new(),
@@ -838,7 +903,7 @@ impl<S: Store> Server<S> {
             person_packages: std::collections::HashSet::new(),
             lifestone_packages: std::collections::HashSet::new(),
             knife_packages: std::collections::HashSet::new(),
-            storms: storms::Storms::default(),
+            storms,
             shrine_packages: std::collections::HashSet::new(),
             shrine_kingdoms: HashMap::new(),
             kingdom_skills: kingdom_skills::KingdomSkills::default(),
@@ -850,6 +915,7 @@ impl<S: Store> Server<S> {
             inscribable_packages: std::collections::HashSet::new(),
             held_answers: std::collections::HashMap::new(),
             vault_trips: usable::vaults::VaultTrips::new(),
+            portal_door_packages: std::collections::HashSet::new(),
             creature_weapons: HashMap::new(),
             creature_weapon_rules: HashMap::new(),
             death_spawns: HashMap::new(),
@@ -868,7 +934,10 @@ impl<S: Store> Server<S> {
             market: market::Market::default(),
             lying: drops::Lying::default(),
             pets: pets::Pets::default(),
+            escorts: escorts::Escorts::default(),
+            item_classes: gives::ItemClasses::default(),
             plants: plants::Plants::default(),
+            object_states: puzzles::States::default(),
             locks: yalain_content::LockTable::default(),
             places_named: std::collections::BTreeMap::new(),
             places_by_name: std::collections::BTreeMap::new(),
@@ -920,11 +989,24 @@ impl<S: Store> Server<S> {
         self
     }
 
-    /// Stand what the world database places among the walls creatures meet.
+    /// Stand what the world database places among the walls creatures meet, and its doors among
+    /// those players' bodies meet, open as they stand now.
     pub fn stand_placed(&mut self) {
         let rows = walls_standing(self);
+        let doors = usable::doors::places(self);
+        let open: Vec<u64> = self
+            .doors
+            .by_id
+            .iter()
+            .filter(|(_, d)| usable::doors::passable(d.phase))
+            .map(|(id, _)| *id)
+            .collect();
         if let Some(w) = self.walls.as_mut() {
             w.set_standing(rows);
+            w.set_doors(doors);
+            for id in open {
+                w.set_door_open(id, true);
+            }
         }
     }
 
@@ -952,7 +1034,9 @@ impl<S: Store> Server<S> {
             self.saves.piece_begins();
             match t {
                 Timer::Trip { world, step } => places::step(self, net, world, step, clock),
-                Timer::Take { world, item } => inventory::taken(self, net, world, item, clock),
+                Timer::Take { world, item, from } => {
+                    inventory::taken(self, net, world, item, from, clock);
+                }
                 Timer::TakeAll { world, container } => {
                     pack::took_all(self, net, world, container, clock);
                 }
@@ -1042,6 +1126,7 @@ impl<S: Store> Server<S> {
                     pets::aura_pulses(self, net, (pet, aura, second), clock);
                 }
                 Timer::RaisedMoves { world } => resurrections::raised_moves(self, net, world),
+                Timer::MovesAgain { world } => death::moves_again(self, net, world),
                 Timer::AurasPulseAgain { world } => {
                     effects::auras_pulse_again(self, net, world, clock);
                 }
@@ -1126,12 +1211,17 @@ impl<S: Store> Server<S> {
             .is_none_or(|t| clock.local.0 - t.0 >= spawn::STEP_SECONDS);
         self.saves.piece_begins();
         login::checks_due(self, net, clock);
+        login::purge_due(self, net, clock);
         self.step_timer.lap(Stage::Other);
         self.saves.piece_begins();
         if due {
             self.last_step = Some(clock.local);
             events::step(self, net, clock);
+            offerings::step(self, net, clock);
             spawn::step(self, net, clock);
+            guards::step(self, net, clock);
+            shifting::step(self, net, clock);
+            defenses::step(self, net, clock);
         }
         self.saves.piece_begins();
         // A swing comes when it is due, not at the world's next step (2017: 1,880 of 2,881 sword

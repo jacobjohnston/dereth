@@ -15,6 +15,12 @@ pre-release leaves it for the final release, and its notes show it as it is);
 ## Unreleased
 - A world can publish its places for a map at /places on its status endpoint (`publish_places`), and `--write-places` writes them to a file.
 
+## 0.3.14 (2026-11-14)
+- Fixed attacks, spells and items failing for seconds after jumping in place.
+- Federation links now tell a proxy's refusal from the hub's.
+- Worlds that publish their portals now also publish lifestones, shops and people.
+- Launch worlds now accept players on the retail CD's 1999 data files.
+
 ## 0.3.13 (2026-11-10)
 - Dereth players download a world's own data much faster.
 

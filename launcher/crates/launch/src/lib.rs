@@ -12,7 +12,8 @@
 //! (`dereth-plugin-api`), for the client's plugin API version and plugins' versions, the
 //! plugin template (`dereth-plugin-template`), for which folders of a plugin repository hold its
 //! plugins, and Asheron's Call 2's friends stream (`auberean-friends`), for the greeting that asks
-//! a world whether it serves its friends service and for the friends ticket. **Used by** the launcher's window, the Tauri app in `launcher` (a
+//! a world whether it serves its friends service and for the friends ticket, and the community
+//! archive's fetching crate (`dereth-datfetch`), for the data sets the Library downloads. **Used by** the launcher's window, the Tauri app in `launcher` (a
 //! workspace of its own), and the web client's front page (`dereth-web-front`).
 //!
 //! **Must never** reach for a window, a web view, a GPU or the network, or name a platform API:
@@ -42,9 +43,10 @@
 //! | [`launch`] | the command line per client and server, a form of it that is safe to log, and what the client is told about the world |
 //! | [`copy`] | a private dat set, copied from the shared one |
 //! | [`discord`] | what Discord shows while a game the launcher started is running, and the frames that say it to the Discord app |
+//! | [`downloads`] | the data sets the Library downloads from the community's archive, and the last check of one |
 //! | [`state`] | `launcher-state.json`: the retail client, sets, accounts, favourites, per-world choices |
 //! | [`folders`] | where the state and the private sets live on each system, and the one-time move there |
-//! | [`interface`] | the interface the Dereth client starts in, asked for once and written where the client reads it |
+//! | [`interface`] | the interface every world starts in until the player changes it there in game, asked for once |
 //! | [`pad`] | a pad on the launcher's page: what each button does there, and which control a move reaches |
 //! | [`releases`] | which of the repository's GitHub releases the launcher updates from, on its channel, never to an older launcher |
 //! | [`defaults`] | what a package tells its launcher: the realm a first run opens in, and the channel it updates from |
@@ -60,6 +62,7 @@
 //! | [`outside`] | asking the Dereth Network's hub to try a hosted world from outside, and its answer |
 //! | [`plugins`] | the plugins it installs for the Dereth client: the sources it reads them from, what each lists, installing and updating them |
 //! | [`art`] | the art packs it installs for the Dereth client: their sources, installing and updating them, and the order they are drawn in |
+//! | [`ac2_look`] | the AC2 look, an art pack it builds from the player's own Asheron's Call 2 files: its parts, where it is kept, and when it is built again |
 //! | [`join`] | a join link (`dereth://join?...`, or the site's page for it): a world to add, and the scheme's registration |
 //!
 //! The launcher's window is one front end over this. The web client's front page is another: it
@@ -68,6 +71,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod ac2_look;
 pub mod art;
 pub mod auberean;
 pub mod built_in;
@@ -81,6 +85,7 @@ pub mod defaults;
 pub mod desktop;
 pub mod direct;
 pub mod discord;
+pub mod downloads;
 pub mod eras;
 pub mod folders;
 pub mod hubstatus;

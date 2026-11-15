@@ -243,6 +243,85 @@ fn a_lifestone_binds_and_the_recall_takes_the_player_back_where_it_bound() {
     );
 }
 
+/// An object of the world made again for a player coming back into its view carries the latest
+/// visual stamp the object took, counting those it took while the player was away, so the
+/// object's next visual message follows it for a client that had let the object go.
+/// Behaviour: server.presence.made-again-at-its-latest-visual-stamp
+#[test]
+fn an_object_made_again_after_the_player_was_away_carries_its_latest_visual_stamp() {
+    use auberean_primitives::Vec3;
+    let mut h = Harness::new();
+    h.server.lifestone_packages.insert(0x1A00);
+    h.server.content = ContentPack {
+        objects: vec![object(STONE, 0x4700_113A, [60.0, 241.0, -44.6], None)],
+        ..ContentPack::default()
+    };
+    let (a, _) = h.player_in_world("one", "Elara");
+    let (b, idb) = h.player_in_world("two", "Babyfare");
+    h.run(10);
+    let bind = |h: &mut Harness| {
+        h.bots[b].send(
+            true,
+            queue::WEENIE,
+            &server_call(function::USE, &[use_of(STONE, idb)]),
+        );
+        h.run(40);
+    };
+    let walk = |h: &mut Harness, cell: u32, at: Vec3| {
+        h.bots[a].send(
+            true,
+            queue::WEENIE,
+            &yalain_testkit::play::report(cell, at, 0, yalain_world::world::IDLE_MOTION, 0),
+        );
+        h.run(10);
+    };
+    let stone_stamps = |h: &Harness, bot: usize, from: usize| -> Vec<u16> {
+        h.world_messages(bot, from)
+            .iter()
+            .filter_map(|m| match m {
+                ServerMessage::PlayBehavior(e) if e.sender.id == STONE => {
+                    Some(e.sender.other_stamp)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let fb = h.bots[b].inbox.len();
+    bind(&mut h);
+    // Out of the stone's view, far away; the stone binds again while the player is gone.
+    walk(&mut h, 0x7000_0001, Vec3::new(10.0, 10.0, 50.0));
+    let away = h.bots[a].inbox.len();
+    bind(&mut h);
+    assert!(stone_stamps(&h, a, away).is_empty(), "not told while away");
+    assert_eq!(stone_stamps(&h, b, fb), [2, 3], "the stone took two stamps");
+    // Back: the stone is made again, and binds once more.
+    let back = h.bots[a].inbox.len();
+    walk(&mut h, 0x0299_0109, Vec3::new(59.0, 240.0, -44.6));
+    let made = h.world_messages(a, back).iter().find_map(|m| match m {
+        ServerMessage::CreateObject(c) if c.id == STONE => Some(c.physics.visual_ordering_stamp),
+        _ => None,
+    });
+    assert_eq!(made, Some(3), "made at the stamp it last took");
+    bind(&mut h);
+    assert_eq!(stone_stamps(&h, a, back), [4], "the next one follows it");
+    // A client that let the stone go takes it in turn.
+    let mut order = yalain_testkit::invariants::VisualOrder::new();
+    for r in h.bots[a].inbox[back..].iter().filter(|r| r.world) {
+        order.see(r.blob_id, &r.bytes);
+    }
+    assert_eq!(order.held(), Vec::new(), "nothing waits for a stamp");
+    // Nor is it made behind the stamp the client was told before it left.
+    let mut order = yalain_testkit::invariants::VisualOrder::new();
+    for r in h.bots[a].inbox.iter().filter(|r| r.world) {
+        order.see(r.blob_id, &r.bytes);
+    }
+    assert_eq!(
+        order.behind(),
+        Vec::new(),
+        "made at or after what it was told"
+    );
+}
+
 /// A use asked for while the player's earlier action is still carried out (here, in portal space)
 /// is refused at once: its answer alone, with the status that actions are locked.
 /// Behaviour: server.places.actions-locked
@@ -672,7 +751,7 @@ fn use_answers(h: &Harness, b: usize, from: usize) -> Vec<(u32, u32, f32)> {
 fn portal_quest(id: u32) -> yalain_content::quests::QuestDef {
     yalain_content::quests::QuestDef {
         id,
-        name: (0xA860_7CEC, 0x2500_17EE),
+        name: yalain_content::Words::Ref(0xA860_7CEC, 0x2500_17EE),
         description: (0x6C45_9364, 0x2500_17EE),
         icon: 0,
         play_fx: false,
@@ -689,9 +768,11 @@ fn portal_quest(id: u32) -> yalain_content::quests::QuestDef {
         subquests: Vec::new(),
         min_level: 0,
         fails_on_death: false,
+        fails_on_logout: false,
+        fails_on_teleport: false,
         once: false,
         fellows: yalain_content::quests::Fellows::default(),
-        last_waits: false,
+        ranges: Vec::new(),
         hero_only: false,
         pay: yalain_content::quests::CompletionPay::default(),
         required: None,
@@ -821,6 +902,7 @@ fn a_portals_effects_are_put_on_as_the_player_comes_out() {
             external_flags: 0,
             internal_flags: 0,
             ends_at_logout: false,
+            ends_at_teleport: false,
             enum_value: 0,
             eq_class: 0,
             name: None,
@@ -910,6 +992,73 @@ fn a_placed_portal_for_heroes_alone_refuses_anyone_else_at_a_use_and_a_walk_in()
     assert_eq!(answers.len(), 1, "a walk-in is answered once");
     assert_eq!((answers[0].0, answers[0].1), (10_049, 820));
     assert!(!calls(&h, a, from).contains(&trip::ENTER_PORTAL_SPACE));
+    h.run(100);
+    for p in h.server.players.values_mut() {
+        yalain_world::focus::set_hero_kept(&mut p.qualities, true);
+    }
+    let from = h.bots[a].inbox.len();
+    h.bots[a].send(true, queue::WEENIE, &asks);
+    h.run(40);
+    assert!(
+        calls(&h, a, from).contains(&trip::ENTER_PORTAL_SPACE),
+        "a hero is taken"
+    );
+}
+
+/// A placed portal whose template is for heroes alone, its row saying nothing of heroes, refuses
+/// anyone else 10049 with flags 820 and no trip, and so does such an object that leads nowhere; a
+/// hero beside the portal it takes.
+/// Behaviour: server.places.template-hero-only
+#[test]
+fn a_placed_portal_whose_template_is_for_heroes_alone_refuses_anyone_else() {
+    use auberean_primitives::Vec3;
+    use yalain_testkit::play::report;
+    use yalain_world::world::IDLE_MOTION;
+    const GATEWAY: u32 = 0x4700_1B5B;
+    let mut h = Harness::new();
+    let mut props = yalain_content::Props::default();
+    props.set("Usage_HeroOnly", yalain_content::Prop::Bool(true));
+    h.server
+        .catalog
+        .insert(yalain_testkit::test_template(GATEWAY, 0x1A01, props));
+    let to = Place {
+        cell: 0x7000_0001,
+        origin: [10.0, 10.0, 50.0],
+        rotation: [1.0, 0.0, 0.0, 0.0],
+    };
+    let gated = object(PORTAL, GATEWAY, [61.0, 259.2, -44.6], Some(to));
+    assert!(!gated.facts.hero, "its row says nothing of heroes");
+    h.server.content = ContentPack {
+        objects: vec![gated, object(STONE, GATEWAY, [61.0, 262.0, -44.6], None)],
+        ..ContentPack::default()
+    };
+    let (a, me) = h.player_in_world("one", "Elara");
+    h.run(10);
+    let asks = server_call(function::USE, &[use_of(PORTAL, me)]);
+    let from = h.bots[a].inbox.len();
+    h.bots[a].send(true, queue::WEENIE, &asks);
+    h.run(10);
+    let answers = use_answers(&h, a, from);
+    assert_eq!(answers.len(), 1, "answered once");
+    assert_eq!((answers[0].0, answers[0].1), (10_049, 820));
+    assert!(!calls(&h, a, from).contains(&trip::ENTER_PORTAL_SPACE));
+    let from = h.bots[a].inbox.len();
+    h.bots[a].send(
+        true,
+        queue::WEENIE,
+        &server_call(function::USE, &[use_of(STONE, me)]),
+    );
+    h.run(10);
+    let answers = use_answers(&h, a, from);
+    assert_eq!(
+        answers.len(),
+        1,
+        "the object leading nowhere: answered once"
+    );
+    assert_eq!((answers[0].0, answers[0].1), (10_049, 820));
+    let cell = h.server.players.values().next().expect("in").position.cell;
+    let by_it = report(cell, Vec3::new(61.0, 258.2, -44.6), 0, IDLE_MOTION, 0);
+    h.bots[a].send(true, queue::WEENIE, &by_it);
     h.run(100);
     for p in h.server.players.values_mut() {
         yalain_world::focus::set_hero_kept(&mut p.qualities, true);
@@ -1351,6 +1500,80 @@ fn a_person_kind_object_with_nothing_to_say_answers_as_a_person() {
         _ => None,
     });
     assert_eq!(walk, Some(5.0));
+}
+
+/// The Tumerok's lifestone and its body's radius and height (its look's setup, at scale 1).
+const TUMEROK_STONE: u32 = 0x4700_1143;
+const TUMEROK_BODY: [f32; 2] = [4.46, 2.3];
+
+/// A player walked to a lifestone that has come to rest `off` meters from its center, along the
+/// ground (its own report, the walk's stamp); the use's answers since the use (the stone's body
+/// known when `wide`).
+fn rests_by_a_lifestone(off: f32, wide: bool) -> Vec<(u32, u32, f32)> {
+    let mut h = Harness::new();
+    h.server.lifestone_packages.insert(0x1A00);
+    if wide {
+        h.server.catalog.bodies.insert(TUMEROK_STONE, TUMEROK_BODY);
+    }
+    let (a, ida) = h.player_in_world("one", "Elara");
+    h.run(10);
+    let world = *h
+        .server
+        .players
+        .iter()
+        .find(|(_, p)| p.character == ida)
+        .expect("in the world")
+        .0;
+    let at = h.server.players[&world].position;
+    let mut stone = object(STONE, TUMEROK_STONE, at.origin, None);
+    stone.cell = at.cell;
+    stone.origin[0] += off;
+    h.server.content = ContentPack {
+        objects: vec![stone],
+        ..ContentPack::default()
+    };
+    let from = h.bots[a].inbox.len();
+    h.bots[a].send(
+        true,
+        queue::WEENIE,
+        &server_call(function::USE, &[use_of(STONE, ida)]),
+    );
+    h.run(10);
+    let walk = h
+        .world_messages(a, from)
+        .iter()
+        .find_map(|m| match m {
+            ServerMessage::MoveTo(o) if o.sender.id == ida && o.action.params.flags == 0x63 => {
+                Some((o.action.stamp, o.action.params.desired_distance))
+            }
+            _ => None,
+        })
+        .expect("walked toward the stone");
+    assert_eq!(walk.1, 2.0, "to within 2 m");
+    h.bots[a].send(true, queue::WEENIE, &hand_report(at, 0.0, false, walk.0));
+    h.run(4);
+    use_answers(&h, a, from)
+}
+
+/// A walk to a placed object ends at the walk's range from the object's body, not its center: a
+/// player at rest 6.4 m from the Tumerok's lifestone's center (its body 4.46 m wide, so 1.9 m from
+/// its side) has arrived and binds, as 2017's players did from 3.0 to 12.2 m off its center (61 of
+/// 105 walked uses farther than 6 m); one at rest 11 m off has not; and with the body not known,
+/// the walk measures to the center, so 6.4 m off has not arrived.
+/// Behaviour: server.places.walk-ends-at-the-objects-side
+#[test]
+fn a_walk_to_a_wide_lifestone_ends_at_its_side_not_its_center() {
+    let bound = rests_by_a_lifestone(6.4, true);
+    assert_eq!(bound.len(), 1, "answered: {bound:?}");
+    assert_eq!(bound[0].0, 0, "bound");
+    assert!(
+        rests_by_a_lifestone(11.0, true).is_empty(),
+        "farther off: still walking"
+    );
+    assert!(
+        rests_by_a_lifestone(6.4, false).is_empty(),
+        "no body known: measured to the center, still walking"
+    );
 }
 
 /// A faction shrine: the player is walked to within 3 m of it, the walk stopped, the shrine and the

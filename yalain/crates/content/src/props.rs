@@ -350,6 +350,9 @@ pub struct CreatureStats {
     pub natural_damage: f32,
     pub natural_variance: f32,
     pub armor: i32,
+    /// The most of its hit a target's armor leaves it when armor takes nearly all of it, if its
+    /// template sets one (else the usual quarter).
+    pub armor_threshold: Option<f32>,
     /// Health and vigor regained a second at rest.
     pub health_regen: f32,
     pub vigor_regen: f32,
@@ -376,8 +379,9 @@ pub struct CreatureStats {
     pub loot_quality: Option<i64>,
     /// Fixed drops: the item template and the chance of it.
     pub trophies: Vec<(u32, f32)>,
-    /// The effects its death applies to its killer, by name.
-    pub death_effects: Vec<String>,
+    /// The effects its death applies to its killer, by name, each with the stat its template names
+    /// for it (1 where none): for an effect on a quest, the range of the quest's phases it moves.
+    pub death_effects: Vec<(String, u32)>,
     /// The weapon it wields (a template's name), how many of it, and the item it holds beside it
     /// (a shield, a second weapon).
     pub weapon: Option<String>,
@@ -420,6 +424,7 @@ pub mod creature_property {
     pub const NATURAL_DAMAGE: &str = "AICombat_NaturalDamage";
     pub const NATURAL_VARIANCE: &str = "AICombat_NaturalVariance";
     pub const ARMOR: &str = "NPC_ArmorLevel";
+    pub const ARMOR_THRESHOLD: &str = "NPC_ArmorThreshold";
     pub const PERCEPTION: &str = "AI_PerceptionRadius";
     pub const HOMESICK: &str = "AI_HomesickRadius";
     pub const WANDER_RANGE: &str = "AI_WanderingRange";
@@ -560,7 +565,14 @@ impl CreatureStats {
             }
         }
         let death_effects = (1..=6)
-            .filter_map(|n| p.text(&format!("NPC_DeathEffect{n}")).map(str::to_string))
+            .filter_map(|n| {
+                let name = p.text(&format!("NPC_DeathEffect{n}"))?.to_string();
+                let stat = p
+                    .int(&format!("NPC_DeathEffect{n}Stat"))
+                    .and_then(|v| u32::try_from(v).ok())
+                    .unwrap_or(1);
+                Some((name, stat))
+            })
             .collect();
         let mut stats = Self {
             level,
@@ -572,6 +584,7 @@ impl CreatureStats {
             natural_damage: p.float(k::NATURAL_DAMAGE).unwrap_or(0.0),
             natural_variance: p.float(k::NATURAL_VARIANCE).unwrap_or(0.0),
             armor: i32_of(k::ARMOR).unwrap_or(0),
+            armor_threshold: p.float(k::ARMOR_THRESHOLD).filter(|t| *t > 0.0),
             health_regen: p.float(k::HEALTH_REGEN).unwrap_or(0.0),
             vigor_regen: p.float(k::VIGOR_REGEN).unwrap_or(0.0),
             attacks_first: match p.get(k::FREE_ATTACKING) {

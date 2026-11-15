@@ -6,17 +6,21 @@
 //!
 //! The text form is tab-separated, one row per line, the first column saying which kind of row:
 //!
-//! - `quest`: id, name `string:table`, description `string:table`, icon, play-effect flag (0/1),
+//! - `quest`: id, name `string:table` (or `=` and literal text, where the install can't write the
+//!   definition's own), description `string:table`, icon, play-effect flag (0/1),
 //!   journal entries `string:table` by phase joined by `,`, challenge, duration in seconds (0 for
 //!   none), retry wait in seconds, completion experience, can-be-cancelled flag, provenance; then,
 //!   optionally, the hidden flag (0/1), the update effects (`KIND:STATE`, the update's kind and
-//!   the effect's saved state, joined by `,`), the phases' subquests (`PHASE:ANY:QUEST/QUEST...`,
+//!   the effect's saved state, `@SPELLCRAFT` after it where its record's spellcraft isn't 1, joined
+//!   by `,`), the phases' subquests (`PHASE:ANY:QUEST/QUEST...`,
 //!   ANY 1 when one of them is enough, joined by `,`), the least level it is given at (0 for any),
 //!   whether it fails when its player dies (0/1), whether it is given only once (0/1), how a kill's
 //!   move on it reaches the killer's fellows (added up: 1 it does, 2 only those near the killer's
-//!   level, 4 only those near the killer), whether its last phase waits for something other than
-//!   a kill to end it (0/1), the one phase its duration runs in (0 or left out: all of them), and
-//!   the wait after a cancel in seconds (empty: the rule's);
+//!   level, 4 only those near the killer), the range each phase is counted in from the first
+//!   (joined by `,`; empty: every phase's is 1), the one phase its duration runs in (0 or left out:
+//!   all of them), the wait after a cancel in seconds (empty: the rule's), whether it fails when its
+//!   player leaves the world (0/1) and whether it fails when its player is taken through portal
+//!   space (0/1);
 //! - `step`: quest, the phase it needs (0: the quest not under way), the trigger (`use:TEMPLATE`,
 //!   `useon:ITEM:TARGET`, `give:ITEM:TARGET`, `arrive:TEMPLATE`, `take:TEMPLATE`, `kill:TEMPLATE`, `done:QUEST`, `given:QUEST`), the giver's line
 //!   (`string:table`, `=` and literal text, or empty), the update (`bestow`, `advance:N`, `complete`), experience, items
@@ -26,9 +30,10 @@
 //!   use on an object makes the update on arrival), its effects (saved states joined by `,`), the text shown after them
 //!   (`string:table`), whether its update is made for the player's fellows too (0/1), and for a
 //!   give how many of the item it wants (empty for whatever is given), the levels it is for
-//!   (`LEAST:MOST`), the share of a level it pays, and for a give that makes its player a hero, the
+//!   (`LEAST:MOST`), the share of a level it pays, for a give that makes its player a hero, the
 //!   transformation (`SECONDS:FX/FX...:BEHAVIOR:STRING:TABLE:NAME`, hex but the seconds, empty
-//!   parts for none);
+//!   parts for none), the chance it runs when it may (empty: always), whether its effects tell no
+//!   line (0/1), the recipes it teaches (joined by `,`) and its key among its quest's steps;
 //! - `give`: what a person or an object does with an item given it that moves no quest: the template
 //!   given to, the item's template (empty: any item), how many of it it wants (empty: whatever is
 //!   given), the items given back (templates joined by `,`, a count after `x`), its effects (saved
@@ -43,7 +48,9 @@ use crate::talk::Words;
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuestDef {
     pub id: u32,
-    pub name: (u32, u32),
+    /// Its name: the definition's string reference, or literal text standing in for one the
+    /// install's text can't write.
+    pub name: Words,
     pub description: (u32, u32),
     pub icon: u32,
     pub play_fx: bool,
@@ -63,23 +70,31 @@ pub struct QuestDef {
     /// Kept for the player but never shown: in no journal, no update told.
     pub hidden: bool,
     /// The effects an update puts on the player, by the update's kind (bestow, a phase's advance,
-    /// complete, fail): the kind and the effect's saved state, in order.
-    pub effects: Vec<(u32, u32)>,
+    /// complete, fail): the kind, the effect's saved state and the spellcraft its record puts it
+    /// on at, in order.
+    pub effects: Vec<(u32, u32, f32)>,
     /// The phases that are done by doing other quests (subquests), each phase's in its order.
     pub subquests: Vec<Subquests>,
     /// The least level a player is given it at (0: any).
     pub min_level: i32,
     /// Whether it fails when its player dies.
     pub fails_on_death: bool,
+    /// Whether it fails when its player leaves the world (logs off, its client goes away).
+    pub fails_on_logout: bool,
+    /// Whether it fails when its player is taken through portal space (a portal, a recall, a
+    /// door, a shard, a trip a use or an effect sends it on).
+    pub fails_on_teleport: bool,
     /// Whether it is given only once: done, it is never given again (else it is given again once
     /// its wait is over, at once when it has none). The install's setup of the quest says so; a
     /// world's row may say otherwise.
     pub once: bool,
     /// How a kill's move on it reaches the killer's fellows.
     pub fellows: Fellows,
-    /// Its last phase waits for something other than a kill to end it (a phase that reads "return
-    /// to" someone).
-    pub last_waits: bool,
+    /// The range each phase is counted in, from the first (empty, or a phase past its end: 1). A
+    /// kill moves only a phase of the range its creature's death names, and ends the quest from a
+    /// last phase of that range; a phase of another range waits for something else (a phase that
+    /// reads "return to" someone, or one that is given an item).
+    pub ranges: Vec<u32>,
     /// Given only to heroes.
     pub hero_only: bool,
     /// How its completion's experience is worked out, beyond its own amount.
@@ -87,6 +102,25 @@ pub struct QuestDef {
     /// A quest a player is to have at a status to be given it: the status as its update names it (a
     /// status, or under way at a phase).
     pub required: Option<(u32, u32)>,
+}
+
+impl QuestDef {
+    /// The range a phase is counted in (1 where the definition names none).
+    #[must_use]
+    pub fn range(&self, phase: u32) -> u32 {
+        phase
+            .checked_sub(1)
+            .and_then(|i| self.ranges.get(usize::try_from(i).ok()?))
+            .copied()
+            .unwrap_or(1)
+    }
+
+    /// Its last phase waits for something other than a move on to end it: its range isn't 1.
+    #[must_use]
+    pub fn last_waits(&self) -> bool {
+        let last = u32::try_from(self.journals.len()).unwrap_or(u32::MAX);
+        self.range(last) != 1
+    }
 }
 
 /// A status a required quest is to be in when its setup names none: completed.
@@ -144,7 +178,7 @@ impl CompletionPay {
     }
 }
 
-/// How a kill's move on a quest reaches the killer's fellows.
+/// How a kill's or a take's move on a quest reaches the killer's or the taker's fellows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Fellows {
     /// It reaches them.
@@ -187,6 +221,9 @@ pub enum Trigger {
     UseOn(u32, u32),
     /// Giving an item of a template to a person or an object of another (an item dragged onto it).
     Give(u32, u32),
+    /// Giving an item of any template of a class (a script package, by number: the template's own
+    /// or one it derives from) to a person or an object of a template; the item is handed back.
+    GiveClass(u32, u32),
     /// Arriving through a portal of a template.
     Arrive(u32),
     /// Arriving through one placed portal: its template, and the object's own id.
@@ -198,6 +235,9 @@ pub enum Trigger {
     /// Killing a creature of a template that one camp made: its template, and the camp's row in the
     /// spawn table (from 0).
     KillIn(u32, u32),
+    /// A creature of a template dying within some meters of the player, whoever kills it: its
+    /// template, and the meters.
+    KillNear(u32, u32),
     /// Completing a quest.
     Done(u32),
     /// Being given a quest, shown or hidden.
@@ -225,6 +265,11 @@ pub enum Need {
     Done,
     /// Free to be given: never had, or its wait to be taken again over.
     Free,
+    /// Failed (a step failed it, or its time ran out), not given again since; for a step of a quest
+    /// under way, given since that quest was.
+    Failed,
+    /// Never completed: not done now, nor done before it was given again.
+    NeverDone,
 }
 
 /// A place a step takes the player to: a cell, a point in its landblock, a heading (degrees
@@ -246,6 +291,8 @@ pub struct Room {
 /// One step of a quest.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Step {
+    /// Its name among its quest's steps (empty for one no row makes).
+    pub key: String,
     pub quest: u32,
     /// The phase the quest must be at (0: not under way).
     pub needs: u32,
@@ -260,18 +307,23 @@ pub struct Step {
     /// The effects it puts on the player (their saved states), and a text shown after them.
     pub effects: Vec<u32>,
     pub text: Option<(u32, u32)>,
+    /// The recipes it teaches the player.
+    pub recipes: Vec<u32>,
     pub placed: String,
     /// Other quests it requires, at a phase or done.
     pub requires: Vec<(u32, Need)>,
     /// The items it takes from the pack.
     pub takes: Vec<u32>,
-    /// Where it takes the player: an item's use on an object makes its update on arrival, a use of
-    /// a person or an object before the trip.
+    /// Where it takes the player: an item's use on an object makes its update on arrival; a use of a
+    /// person or an object, a give to one and a take before the trip.
     pub to: Option<Place>,
     /// The races it is for (none: every race).
     pub races: Vec<u32>,
     /// Its effects come after its update, not before it.
     pub effects_last: bool,
+    /// Its effects tell no line of their own (a recipe or a skill they grant is granted in silence);
+    /// its text is still told.
+    pub effects_quiet: bool,
     /// Its update is made for each of the player's fellows as well (a hoard's key opens the hoard
     /// to the whole fellowship).
     pub fellows: bool,
@@ -284,6 +336,10 @@ pub struct Step {
     pub xp_share: f32,
     /// For a give, it makes its player a hero, after this transformation.
     pub transforms: Option<Transformation>,
+    /// The chance it runs each time it may, above 0 and at most 1 (none: every time).
+    pub chance: Option<f32>,
+    /// Where it takes the player, the player's fellows in the world go too, wherever they are.
+    pub to_fellows: bool,
 }
 
 /// A give's step that makes its player a hero: the gift kept at once and these appearances and
@@ -361,6 +417,8 @@ pub struct Give {
     /// The effects it puts on the player (their saved states), and a text shown after them.
     pub effects: Vec<u32>,
     pub text: Option<(u32, u32)>,
+    /// Its effects tell no line of their own; its text is still told.
+    pub effects_quiet: bool,
     /// What the person or the object plays as it takes the item.
     pub fx: Option<u32>,
     /// The quests it requires, at a phase or done.
@@ -391,7 +449,8 @@ fn optional<T>(s: &str, read: impl Fn(&str) -> Result<T, String>) -> Result<Opti
     }
 }
 
-/// What a row requires of other quests: `QUEST:N`, `QUEST:done` or `QUEST:free`, joined by `,`.
+/// What a row requires of other quests: `QUEST:N`, `QUEST:done`, `QUEST:free`, `QUEST:failed` or
+/// `QUEST:never`, joined by `,`.
 fn requirements(s: &str) -> Result<Vec<(u32, Need)>, String> {
     s.split(',')
         .filter(|x| !x.is_empty())
@@ -402,6 +461,8 @@ fn requirements(s: &str) -> Result<Vec<(u32, Need)>, String> {
             let need = match n {
                 "done" => Need::Done,
                 "free" => Need::Free,
+                "failed" => Need::Failed,
+                "never" => Need::NeverDone,
                 _ => Need::Phase(num(n)?),
             };
             Ok((hex(q)?, need))
@@ -432,6 +493,16 @@ fn pair(s: &str) -> Result<(u32, u32), String> {
         .split_once(':')
         .ok_or_else(|| format!("a string reference is string:table, not {s}"))?;
     Ok((hex(a)?, hex(b)?))
+}
+
+/// An update's effect, `KIND:STATE`, with `@SPELLCRAFT` after it where that isn't 1.
+fn update_effect(s: &str) -> Result<(u32, u32, f32), String> {
+    let (effect, at) = match s.split_once('@') {
+        Some((e, a)) => (e, num(a)?),
+        None => (s, 1.0),
+    };
+    let (kind, state) = pair(effect)?;
+    Ok((kind, state, at))
 }
 
 fn num<T: std::str::FromStr>(s: &str) -> Result<T, String>
@@ -466,9 +537,14 @@ impl QuestTable {
             .chain(
                 self.quests
                     .iter()
-                    .flat_map(|q| q.effects.iter().map(|(_, e)| *e)),
+                    .flat_map(|q| q.effects.iter().map(|(_, e, _)| *e)),
             )
             .chain(self.gives.iter().flat_map(|g| g.effects.iter().copied()))
+    }
+
+    /// Every recipe the table's steps teach by name.
+    pub fn recipes_taught(&self) -> impl Iterator<Item = u32> + '_ {
+        self.steps.iter().flat_map(|s| s.recipes.iter().copied())
     }
 
     /// The quests and phases a quest is a subquest of.
@@ -496,7 +572,13 @@ impl QuestTable {
             let effects = q
                 .effects
                 .iter()
-                .map(|(k, e)| format!("{k:08X}:{e:08X}"))
+                .map(|(k, e, at)| {
+                    if (*at - 1.0).abs() < f32::EPSILON {
+                        format!("{k:08X}:{e:08X}")
+                    } else {
+                        format!("{k:08X}:{e:08X}@{at}")
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(",");
             let subs = q
@@ -515,9 +597,9 @@ impl QuestTable {
                 .join(",");
             let _ = writeln!(
                 out,
-                "quest\t{:08X}\t{}\t{}\t{:08X}\t{}\t{j}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{effects}\t{subs}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "quest\t{:08X}\t{}\t{}\t{:08X}\t{}\t{j}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{effects}\t{subs}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 q.id,
-                r(q.name),
+                q.name.to_text(),
                 r(q.description),
                 q.icon,
                 u8::from(q.play_fx),
@@ -532,13 +614,19 @@ impl QuestTable {
                 u8::from(q.fails_on_death),
                 u8::from(q.once),
                 q.fellows.word(),
-                u8::from(q.last_waits),
+                q.ranges
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
                 u8::from(q.hero_only),
                 q.required
                     .map_or_else(String::new, |(q, st)| format!("{q:08X}:{st:08X}")),
                 q.pay.word(),
                 q.timed_phase,
                 q.cancel_wait.map_or_else(String::new, |w| w.to_string()),
+                u8::from(q.fails_on_logout),
+                u8::from(q.fails_on_teleport),
             );
         }
         for s in &self.steps {
@@ -546,11 +634,13 @@ impl QuestTable {
                 Trigger::Use(t) => format!("use:{t:08X}"),
                 Trigger::UseOn(i, t) => format!("useon:{i:08X}:{t:08X}"),
                 Trigger::Give(i, t) => format!("give:{i:08X}:{t:08X}"),
+                Trigger::GiveClass(c, t) => format!("giveclass:{c:08X}:{t:08X}"),
                 Trigger::Arrive(t) => format!("arrive:{t:08X}"),
                 Trigger::ArriveFrom(t, o) => format!("arrivefrom:{t:08X}:{o:016X}"),
                 Trigger::Take(t) => format!("take:{t:08X}"),
                 Trigger::Kill(t) => format!("kill:{t:08X}"),
                 Trigger::KillIn(t, c) => format!("killin:{t:08X}:{c}"),
+                Trigger::KillNear(t, m) => format!("killnear:{t:08X}:{m}"),
                 Trigger::Done(q) => format!("done:{q:08X}"),
                 Trigger::Given(q) => format!("given:{q:08X}"),
             };
@@ -578,6 +668,12 @@ impl QuestTable {
                 .collect::<Vec<_>>()
                 .join(",");
             let text = s.text.map_or_else(String::new, r);
+            let recipes = s
+                .recipes
+                .iter()
+                .map(|g| format!("{g:08X}"))
+                .collect::<Vec<_>>()
+                .join(",");
             let requires = s
                 .requires
                 .iter()
@@ -585,6 +681,8 @@ impl QuestTable {
                     Need::Phase(p) => format!("{q:08X}:{p}"),
                     Need::Done => format!("{q:08X}:done"),
                     Need::Free => format!("{q:08X}:free"),
+                    Need::Failed => format!("{q:08X}:failed"),
+                    Need::NeverDone => format!("{q:08X}:never"),
                 })
                 .collect::<Vec<_>>()
                 .join(",");
@@ -602,7 +700,7 @@ impl QuestTable {
             });
             let _ = writeln!(
                 out,
-                "step\t{:08X}\t{}\t{trigger}\t{}\t{update}\t{}\t{gives}\t{}\t{requires}\t{takes}\t{to}\t{effects}\t{text}\t{}\t{}\t{}\t{}\t{}",
+                "step\t{:08X}\t{}\t{trigger}\t{}\t{update}\t{}\t{gives}\t{}\t{requires}\t{takes}\t{to}\t{effects}\t{text}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{recipes}\t{}\t{}",
                 s.quest,
                 s.needs,
                 s.tell.as_ref().map(Words::to_text).unwrap_or_default(),
@@ -616,6 +714,10 @@ impl QuestTable {
                 s.transforms
                     .as_ref()
                     .map_or_else(String::new, Transformation::word),
+                s.chance.map_or_else(String::new, |c| c.to_string()),
+                u8::from(s.effects_quiet),
+                s.key,
+                u8::from(s.to_fellows),
             );
         }
         for g in &self.gives {
@@ -642,18 +744,21 @@ impl QuestTable {
                     Need::Phase(p) => format!("{q:08X}:{p}"),
                     Need::Done => format!("{q:08X}:done"),
                     Need::Free => format!("{q:08X}:free"),
+                    Need::Failed => format!("{q:08X}:failed"),
+                    Need::NeverDone => format!("{q:08X}:never"),
                 })
                 .collect::<Vec<_>>()
                 .join(",");
             let _ = writeln!(
                 out,
-                "give\t{:08X}\t{}\t{}\t{gives}\t{effects}\t{}\t{}\t{requires}\t{}",
+                "give\t{:08X}\t{}\t{}\t{gives}\t{effects}\t{}\t{}\t{requires}\t{}\t{}",
                 g.to,
                 g.item.map_or_else(String::new, |i| format!("{i:08X}")),
                 g.wants.map_or_else(String::new, |n| n.to_string()),
                 g.text.map_or_else(String::new, r),
                 g.fx.map_or_else(String::new, |f| format!("{f:08X}")),
                 g.placed,
+                u8::from(g.effects_quiet),
             );
         }
         for row in &self.rooms {
@@ -707,9 +812,9 @@ impl QuestTable {
                         .map_err(at)?;
                     t.rooms.push(row);
                 }
-                "quest" if (13..=26).contains(&c.len()) => t.quests.push(QuestDef {
+                "quest" if (13..=28).contains(&c.len()) => t.quests.push(QuestDef {
                     id: hex(c[1]).map_err(at)?,
-                    name: pair(c[2]).map_err(at)?,
+                    name: Words::from_text(c[2]).map_err(at)?,
                     description: pair(c[3]).map_err(at)?,
                     icon: hex(c[4]).map_err(at)?,
                     play_fx: c[5] == "1",
@@ -732,7 +837,7 @@ impl QuestTable {
                         .unwrap_or("")
                         .split(',')
                         .filter(|x| !x.is_empty())
-                        .map(pair)
+                        .map(update_effect)
                         .collect::<Result<_, _>>()
                         .map_err(at)?,
                     subquests: c
@@ -749,12 +854,22 @@ impl QuestTable {
                         _ => 0,
                     },
                     fails_on_death: c.get(17) == Some(&"1"),
+                    fails_on_logout: c.get(26) == Some(&"1"),
+                    fails_on_teleport: c.get(27) == Some(&"1"),
                     once: c.get(18) == Some(&"1"),
                     fellows: match c.get(19) {
                         Some(v) if !v.is_empty() => Fellows::of_word(num(v).map_err(at)?),
                         _ => Fellows::default(),
                     },
-                    last_waits: c.get(20) == Some(&"1"),
+                    ranges: c
+                        .get(20)
+                        .copied()
+                        .unwrap_or("")
+                        .split(',')
+                        .filter(|x| !x.is_empty())
+                        .map(num)
+                        .collect::<Result<_, _>>()
+                        .map_err(at)?,
                     hero_only: c.get(21) == Some(&"1"),
                     required: match c.get(22) {
                         Some(v) if !v.is_empty() => Some(pair(v).map_err(at)?),
@@ -773,20 +888,20 @@ impl QuestTable {
                         _ => None,
                     },
                 }),
-                "step" if (9..=19).contains(&c.len()) => {
+                "step" if (9..=24).contains(&c.len()) => {
                     let (kind, tpl) = c[3]
                         .split_once(':')
                         .ok_or_else(|| at(format!("a trigger is kind:template, not {}", c[3])))?;
                     let trigger = match kind {
-                        "useon" | "give" => {
+                        "useon" | "give" | "giveclass" => {
                             let (i, t) = tpl.split_once(':').ok_or_else(|| {
                                 at(format!("{kind} takes ITEM:TARGET, not {tpl}"))
                             })?;
                             let (i, t) = (hex(i).map_err(at)?, hex(t).map_err(at)?);
-                            if kind == "give" {
-                                Trigger::Give(i, t)
-                            } else {
-                                Trigger::UseOn(i, t)
+                            match kind {
+                                "give" => Trigger::Give(i, t),
+                                "giveclass" => Trigger::GiveClass(i, t),
+                                _ => Trigger::UseOn(i, t),
                             }
                         }
                         "use" => Trigger::Use(hex(tpl).map_err(at)?),
@@ -807,6 +922,13 @@ impl QuestTable {
                             })?;
                             let c = c.parse().map_err(|e| at(format!("a camp's row: {e}")))?;
                             Trigger::KillIn(hex(t).map_err(at)?, c)
+                        }
+                        "killnear" => {
+                            let (t, m) = tpl.split_once(':').ok_or_else(|| {
+                                at(format!("killnear takes TEMPLATE:METERS, not {tpl}"))
+                            })?;
+                            let m = m.parse().map_err(|e| at(format!("meters: {e}")))?;
+                            Trigger::KillNear(hex(t).map_err(at)?, m)
                         }
                         "done" => Trigger::Done(hex(tpl).map_err(at)?),
                         "given" => Trigger::Given(hex(tpl).map_err(at)?),
@@ -858,6 +980,7 @@ impl QuestTable {
                         _ => return Err(at(format!("an update {}", c[5]))),
                     };
                     t.steps.push(Step {
+                        key: col(22).to_string(),
                         quest: hex(c[1]).map_err(at)?,
                         needs: num(c[2]).map_err(at)?,
                         trigger,
@@ -885,12 +1008,19 @@ impl QuestTable {
                         } else {
                             Some(pair(col(13)).map_err(at)?)
                         },
+                        recipes: col(21)
+                            .split(',')
+                            .filter(|x| !x.is_empty())
+                            .map(hex)
+                            .collect::<Result<_, _>>()
+                            .map_err(at)?,
                         placed: c[8].to_string(),
                         requires,
                         takes,
                         to,
                         races: Vec::new(),
                         effects_last: false,
+                        effects_quiet: col(20) == "1",
                         fellows: col(14) == "1",
                         wants: if col(15).is_empty() {
                             None
@@ -912,9 +1042,19 @@ impl QuestTable {
                                 .map_err(|_| at(format!("a share {}", col(17))))?
                         },
                         transforms: optional(col(18), Transformation::of_word).map_err(at)?,
+                        chance: if col(19).is_empty() {
+                            None
+                        } else {
+                            Some(
+                                col(19)
+                                    .parse()
+                                    .map_err(|_| at(format!("a chance {}", col(19))))?,
+                            )
+                        },
+                        to_fellows: col(23) == "1",
                     });
                 }
-                "give" if c.len() == 10 => {
+                "give" if (10..=11).contains(&c.len()) => {
                     let gifts: Vec<(u32, u32)> = c[4]
                         .split(',')
                         .filter(|x| !x.is_empty())
@@ -941,6 +1081,7 @@ impl QuestTable {
                             .collect::<Result<_, _>>()
                             .map_err(at)?,
                         text: optional(c[6], pair).map_err(at)?,
+                        effects_quiet: c.get(10) == Some(&"1"),
                         fx: optional(c[7], hex).map_err(at)?,
                         requires: requirements(c[8]).map_err(at)?,
                         placed: c[9].to_string(),
@@ -973,6 +1114,7 @@ mod tests {
             counts: Vec::new(),
             effects: vec![0x6F00_1DEF],
             text: None,
+            effects_quiet: false,
             fx: None,
             requires: Vec::new(),
             placed: "authored for a test".into(),

@@ -7,6 +7,12 @@ not how it was done.
 
 ## Unreleased
 
+## 0.1.8 (2026-11-14)
+- Explore mode: fly a camera anywhere in the world with no server.
+- Fixed walking into and out of caves whose mouth opens on the land.
+- Shops with a title of their own now show it.
+- Launcher: a new first run, and the Library downloads the data files for you.
+
 ## 0.1.7 (2026-11-10)
 - Updates shared with Yalain; nothing changes in play.
 

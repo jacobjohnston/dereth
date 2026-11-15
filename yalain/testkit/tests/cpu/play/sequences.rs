@@ -63,6 +63,7 @@ fn lasting(state: u32, class: u32, kind: Kind, harmful: bool) -> EffectDef {
                 0
             },
         ends_at_logout: false,
+        ends_at_teleport: false,
         enum_value: 0,
         eq_class: class,
         name: None,
@@ -146,6 +147,7 @@ fn fixture(h: &mut Harness) {
                 against_a_player: 1.0,
                 shares: true,
                 watches: true,
+                effects: false,
             })),
             false,
         ),
@@ -821,6 +823,10 @@ fn gem_used(s: &mut Script, b: usize, me: u64, w: ConnId) -> String {
             chance: 1.0,
             offset: [0.0, 2.0],
             lasts: Some(3.0),
+            kingdom: None,
+            at: None,
+            to: None,
+            name: None,
         },
     );
     let Some(item) = inventory::give(&mut s.h.server, &mut s.h.net, w, MAKES_A_CREATURE, 1) else {

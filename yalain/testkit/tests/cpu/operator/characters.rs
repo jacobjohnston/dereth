@@ -74,7 +74,7 @@ fn levels() -> LevelTable {
 fn quest() -> QuestDef {
     QuestDef {
         id: QUEST,
-        name: (0xA860_7CEC, 0x2500_17EE),
+        name: yalain_content::Words::Ref(0xA860_7CEC, 0x2500_17EE),
         description: (0x6C45_9364, 0x2500_17EE),
         icon: 0x4100_034B,
         play_fx: true,
@@ -91,9 +91,11 @@ fn quest() -> QuestDef {
         subquests: Vec::new(),
         min_level: 0,
         fails_on_death: false,
+        fails_on_logout: false,
+        fails_on_teleport: false,
         once: false,
         fellows: yalain_content::quests::Fellows::default(),
-        last_waits: false,
+        ranges: Vec::new(),
         hero_only: false,
         pay: yalain_content::quests::CompletionPay::default(),
         required: None,
@@ -413,6 +415,39 @@ fn a_deleted_character_is_booted_and_grayed_out_for_the_hour_then_gone() {
         h.server.store.character(id).expect("reads"),
         None,
         "gone after the hour"
+    );
+}
+
+/// A deleted character whose account never comes back for it is gone once its hour is up, at the
+/// world's next look for them, and its name is free again; one deleted since waits out its hour.
+/// Behaviour: server.operator.deleted-characters-go-without-their-account
+#[test]
+fn a_deleted_character_whose_account_never_returns_is_gone_after_its_hour() {
+    let mut h = world();
+    let (_, kara) = h.player_in_world("one", "Sir Kara");
+    let (_, ivo) = h.player_in_world("two", "Ivo");
+    let clock = h.clock();
+    characters::delete(&mut h.server, &mut h.net, clock, "Sir Kara").expect("deleted");
+    h.run_to(yalain_net::LocalTime(h.now.0 + 25.0));
+    assert!(
+        h.server.store.name_taken("sir kara").expect("reads"),
+        "its hour"
+    );
+    h.advance(f64::from(h.server.cfg.delete_seconds) + 1.0);
+    h.advance(f64::from(
+        u32::try_from(yalain_world::login::PURGE_EVERY_SECONDS).expect("small"),
+    ));
+    let clock = h.clock();
+    characters::delete(&mut h.server, &mut h.net, clock, "Ivo").expect("deleted");
+    h.run_to(yalain_net::LocalTime(h.now.0 + 25.0));
+    assert_eq!(h.server.store.character(kara).expect("reads"), None, "gone");
+    assert!(
+        !h.server.store.name_taken("Sir Kara").expect("reads"),
+        "its name free"
+    );
+    assert!(
+        h.server.store.character(ivo).expect("reads").is_some(),
+        "still in its hour"
     );
 }
 
@@ -757,6 +792,75 @@ fn a_teleported_character_goes_through_portal_space_to_where_it_was_sent() {
             "{who} to {to:?}"
         );
     }
+}
+
+/// A character teleported or placed at the console beside another standing on the land near its
+/// landblock's south edge, from another landblock, comes out on the ground in the land cell its
+/// place lies in: across the edge, in the landblock to the south, not in the other's cell.
+/// Behaviour: server.places.beside-lies-in-its-own-cell
+#[test]
+fn a_character_sent_beside_another_lies_in_the_land_cell_under_its_place() {
+    let mut h = world();
+    h.server.ground = Some(Box::new(yalain_testkit::Slope));
+    let (_, me) = h.player_in_world("one", "Hand Of Doom");
+    let (_, other) = h.player_in_world("two", "Sir Kara");
+    h.run(5);
+    for p in h.server.players.values_mut() {
+        p.position = StoredPosition {
+            cell: if p.character == other {
+                0x3C73_0019
+            } else {
+                0x5050_0001
+            },
+            origin: [70.0, 2.0, 5.0],
+            rotation: [1.0, 0.0, 0.0, 0.0],
+        };
+    }
+    let south = |at: StoredPosition| {
+        assert_eq!(
+            at.cell, 0x3C72_0020,
+            "the land cell south of the edge: {at:?}"
+        );
+        assert!(
+            (at.origin[0] - 70.0).abs() < 1e-4 && (at.origin[1] - 157.5).abs() < 1e-4,
+            "in that landblock's own frame: {at:?}"
+        );
+        assert!((at.origin[2] - 14.0).abs() < 1e-4, "on the land: {at:?}");
+    };
+    let clock = h.clock();
+    characters::teleport(
+        &mut h.server,
+        &mut h.net,
+        clock,
+        "Hand Of Doom",
+        &Destination::Character("Sir Kara".into()),
+    )
+    .expect("sent");
+    h.run_to(yalain_net::LocalTime(h.now.0 + 3.0));
+    let p = h
+        .server
+        .players
+        .get(&world_of(&h, me))
+        .expect("in the world");
+    assert!(p.trip.is_none(), "arrived");
+    south(p.position);
+
+    let unix = h.unix;
+    characters::make(&mut h.server, &recipe("Freshly"), unix).expect("made");
+    characters::place(
+        &mut h.server,
+        "Freshly",
+        &Destination::Character("Sir Kara".into()),
+    )
+    .expect("placed beside");
+    let fresh = id_of(&mut h, "Freshly");
+    let st = h
+        .server
+        .store
+        .world_state(fresh)
+        .expect("reads")
+        .expect("kept");
+    south(st.position.expect("a place"));
 }
 
 /// A name with spaces, quoted or written as the rest of the line, reaches the character it names:

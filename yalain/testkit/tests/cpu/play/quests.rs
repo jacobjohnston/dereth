@@ -61,7 +61,7 @@ fn object(id: u64, template: u32, kind: Kind, origin: [f32; 3]) -> ContentObject
 fn quest(id: u32, xp: u64, challenge: i32) -> QuestDef {
     QuestDef {
         id,
-        name: (0xA860_7CEC, 0x2500_17EE),
+        name: yalain_content::Words::Ref(0xA860_7CEC, 0x2500_17EE),
         description: (0x6C45_9364, 0x2500_17EE),
         icon: 0x4100_034B,
         play_fx: true,
@@ -78,9 +78,11 @@ fn quest(id: u32, xp: u64, challenge: i32) -> QuestDef {
         subquests: Vec::new(),
         min_level: 0,
         fails_on_death: false,
+        fails_on_logout: false,
+        fails_on_teleport: false,
         once: false,
         fellows: yalain_content::quests::Fellows::default(),
-        last_waits: false,
+        ranges: Vec::new(),
         hero_only: false,
         pay: yalain_content::quests::CompletionPay::default(),
         required: None,
@@ -88,8 +90,9 @@ fn quest(id: u32, xp: u64, challenge: i32) -> QuestDef {
     }
 }
 
-fn step(quest: u32, needs: u32, trigger: Trigger, update: Update) -> Step {
+pub(super) fn step(quest: u32, needs: u32, trigger: Trigger, update: Update) -> Step {
     Step {
+        key: String::new(),
         quest,
         needs,
         trigger,
@@ -100,17 +103,21 @@ fn step(quest: u32, needs: u32, trigger: Trigger, update: Update) -> Step {
         counts: Vec::new(),
         effects: Vec::new(),
         text: None,
+        recipes: Vec::new(),
         placed: "authored for a test".into(),
         requires: Vec::new(),
         takes: Vec::new(),
         races: Vec::new(),
         effects_last: false,
+        effects_quiet: false,
         wants: None,
         fellows: false,
         levels: None,
         xp_share: 0.0,
         to: None,
         transforms: None,
+        chance: None,
+        to_fellows: false,
     }
 }
 
@@ -282,6 +289,109 @@ fn an_item_used_on_an_object_takes_the_player_and_moves_the_quest_on_arrival() {
     let p = h.server.players.values().next().expect("the player");
     assert_eq!(p.position.cell, 0x0299_014D, "at the step's place");
     assert!(p.play.items.iter().all(|i| i.id != glyph));
+}
+
+/// A held item used on an object, when its step takes the fellowship along: the user's fellow goes
+/// through portal space as the user does and comes out at the step's place; a player who is no
+/// fellow stays.
+/// Behaviour: server.quests.a-step-takes-the-fellowship-along
+#[test]
+fn an_item_used_on_an_object_whose_step_takes_the_fellowship_along_sends_the_fellow_too() {
+    use yalain_world::fellowship::{Fellow, Fellowship, Vitals};
+    let mut h = Harness::new();
+    h.server.catalog = test_catalog();
+    h.server.content = ContentPack {
+        objects: vec![object(
+            VAULT,
+            VAULT_TEMPLATE,
+            Kind::Static,
+            [61.0, 241.0, -44.6],
+        )],
+        ..ContentPack::default()
+    };
+    let to = Place {
+        cell: 0x0299_014D,
+        origin: [1.15, -7.59, 1.30],
+        heading: 0,
+    };
+    h.server.quests = QuestTable {
+        quests: vec![quest(HALL_QUEST, 0, -999)],
+        steps: vec![Step {
+            takes: vec![TEST_ITEM],
+            to: Some(to),
+            to_fellows: true,
+            ..step(
+                HALL_QUEST,
+                6,
+                Trigger::UseOn(TEST_ITEM, VAULT_TEMPLATE),
+                Update::Advance(7),
+            )
+        }],
+        gives: Vec::new(),
+        rooms: Vec::new(),
+    };
+    let (b, me) = h.player_in_world("one", "Elara");
+    let (c, you) = h.player_in_world("two", "Bran");
+    let (_, other) = h.player_in_world("three", "Cael");
+    h.bots[c].send(
+        true,
+        queue::WEENIE,
+        &auberean_protocol::ClientMessage::SceneRenderingComplete(auberean_protocol::login::Empty),
+    );
+    h.run(5);
+    h.server.fellowships.list.push(Fellowship {
+        name: "Hunters".into(),
+        leader: me,
+        flags: 0,
+        room: 1,
+        fellows: [me, you]
+            .iter()
+            .map(|&id| Fellow {
+                id,
+                joined: 0.0,
+                sent: Vitals::default(),
+                next_check: f64::INFINITY,
+            })
+            .collect(),
+        last_claimant: 0,
+    });
+    at_phase(&mut h, HALL_QUEST, 6);
+    let cell = |h: &Harness, who: u64| {
+        h.server
+            .players
+            .values()
+            .find(|p| p.character == who)
+            .expect("in the world")
+            .position
+            .cell
+    };
+    let stays = cell(&h, other);
+    let world = *h
+        .server
+        .players
+        .iter()
+        .find(|(_, p)| p.character == me)
+        .expect("in the world")
+        .0;
+    yalain_world::inventory::give(&mut h.server, &mut h.net, world, TEST_ITEM, 1);
+    let glyph = h.server.players[&world]
+        .play
+        .items
+        .iter()
+        .find(|i| i.template == TEST_ITEM)
+        .expect("held")
+        .id;
+    h.bots[b].send(
+        true,
+        queue::WEENIE,
+        &server_call(USE, &[use_on(glyph, VAULT, me)]),
+    );
+    h.run(20);
+    assert_ne!(cell(&h, you), to.cell, "not before the user goes");
+    h.run(100);
+    assert_eq!(cell(&h, me), to.cell, "the user went");
+    assert_eq!(cell(&h, you), to.cell, "the fellow went with it");
+    assert_eq!(cell(&h, other), stays, "no fellow stays");
 }
 
 /// One use runs every step it triggers, each quest at most once: an explorer completes the quest
@@ -508,9 +618,11 @@ fn a_completion_adds_its_points_to_the_rating_every_time_whatever_the_level() {
     let play = h.server.players[&world].play.clone();
     let back = yalain_world::state::PlayState::from_bytes(&play.to_bytes()).expect("reads");
     assert_eq!(back.quest_rating, 1200, "kept");
-    // Saved before there was a rating: none (the rating, and the words kept after it since).
+    // Saved before there was a rating: none (the rating, and the words kept after it since, the
+    // quests completed before among them, none here).
+    assert!(play.completed_before.is_empty());
     let mut old = play.to_bytes();
-    old.truncate(old.len() - 12);
+    old.truncate(old.len() - 16);
     old[..4].copy_from_slice(&14u32.to_le_bytes());
     let older = yalain_world::state::PlayState::from_bytes(&old).expect("reads");
     assert_eq!(older.quest_rating, 0, "an older save");
@@ -568,6 +680,63 @@ fn a_hidden_quests_completion_pays_with_no_text() {
     assert_eq!(paid, 800);
     assert_eq!(texts.len(), 1, "a shown quest's pay is named");
     assert!(calls.contains(&yalain_world::quests::UPDATE_QUEST));
+}
+
+/// A quest named by words, standing in for a name the install's text can't write, is told by those
+/// words: in its record as it is given, and in the text of what its completion pays.
+/// Behaviour: server.quests.a-name-in-words-is-told-as-written
+#[test]
+fn a_quest_named_by_words_is_told_by_them() {
+    use auberean_script::native_object::{TextInfo, VariableValue};
+    const NAMED: u32 = 0x4000_0035;
+    const WORDS: &str = "Marsh Terror Must Be Stopped";
+    let literal = |t: &TextInfo| t.literal.as_ref().map(|l| String::from_utf16_lossy(l));
+    let mut h = Harness::new();
+    h.server.quests = QuestTable {
+        quests: vec![QuestDef {
+            name: yalain_content::Words::Literal(WORDS.into()),
+            ..quest(NAMED, 800, -999)
+        }],
+        steps: Vec::new(),
+        gives: Vec::new(),
+        rooms: Vec::new(),
+    };
+    let (b, me) = h.player_in_world("one", "Elara");
+    let world = conn_of(&h, me);
+    let run = |h: &mut Harness, update: Update| {
+        let from = h.bots[b].inbox.len();
+        let clock = h.clock();
+        yalain_world::quests::apply(&mut h.server, &mut h.net, world, NAMED, update, 0, clock);
+        h.run(3);
+        from
+    };
+    let from = run(&mut h, Update::Bestow);
+    let given = records(&h, b, from);
+    assert_eq!(given.len(), 1, "its record");
+    assert_eq!(
+        literal(&given[0].name).as_deref(),
+        Some(WORDS),
+        "{:?}",
+        given[0].name
+    );
+    let from = run(&mut h, Update::Complete);
+    let paid: Vec<TextInfo> = h
+        .calls(b, from)
+        .into_iter()
+        .filter(|(f, _)| *f == yalain_world::session::function::SHOW_TEXT)
+        .filter_map(|(_, v)| {
+            v.iter().find_map(|x| match x.root() {
+                Some(yalain_world::calls::Node::TextInfo(t)) => Some(t.clone()),
+                _ => None,
+            })
+        })
+        .collect();
+    assert_eq!(paid.len(), 1, "its pay's text");
+    let named = paid[0].variables.iter().find_map(|v| match &v.value {
+        VariableValue::Nested(t) => literal(t),
+        _ => None,
+    });
+    assert_eq!(named.as_deref(), Some(WORDS), "{:?}", paid[0]);
 }
 
 /// A quest may pay a share of what its player's level takes to reach the next, rounded down: the
@@ -832,7 +1001,7 @@ fn an_update_puts_on_its_definitions_effects_before_it_is_told() {
     use yalain_world::effect_defs::{EffectDef, Kind as EffectKind, Scale};
     const GIVES_HALL: u32 = 0x6F00_4484;
     let rewarding = QuestDef {
-        effects: vec![(0x3000_0000, GIVES_HALL)],
+        effects: vec![(0x3000_0000, GIVES_HALL, 1.0)],
         ..quest(NEXT_QUEST, 0, -999)
     };
     let mut h = explorer_world(
@@ -858,6 +1027,7 @@ fn an_update_puts_on_its_definitions_effects_before_it_is_told() {
             external_flags: 0,
             internal_flags: 0,
             ends_at_logout: false,
+            ends_at_teleport: false,
             enum_value: 0,
             eq_class: 0,
             name: None,
@@ -872,6 +1042,69 @@ fn an_update_puts_on_its_definitions_effects_before_it_is_told() {
         "the effect's quest given, then the completion told"
     );
     assert_eq!(held(&h, HALL_QUEST), Some((status::UNDERWAY, 1)));
+}
+
+/// A craft experience reward a quest's completion puts on pays at the spellcraft its record names:
+/// 3877 points at 10 of a reward of 2500 at 1 and 10000 at 50, added to what the player's pool
+/// holds and its total, and told; at 1 it pays 2500.
+/// Behaviour: server.effects.craft-experience-at-its-spellcraft
+#[test]
+fn a_craft_experience_reward_pays_at_the_spellcraft_its_quests_record_names() {
+    use yalain_world::craft::pool;
+    use yalain_world::effect_defs::{EffectDef, Kind as EffectKind, Scale};
+    const REWARD: u32 = 0x6F00_0DCE;
+    for (spellcraft, pays) in [(10.0_f32, 3877_u64), (1.0, 2500)] {
+        let rewarding = QuestDef {
+            effects: vec![(0x3000_0000, REWARD, spellcraft)],
+            ..quest(NEXT_QUEST, 0, -999)
+        };
+        let mut h = explorer_world(
+            vec![rewarding],
+            vec![step(
+                NEXT_QUEST,
+                1,
+                Trigger::Use(EXPLORER_TEMPLATE),
+                Update::Complete,
+            )],
+        );
+        h.server.effect_table.effects.insert(
+            REWARD,
+            EffectDef {
+                state: REWARD,
+                kind: EffectKind::CraftExperience(Scale(vec![(1.0, 2500.0), (50.0, 10000.0)])),
+                duration: Scale::default(),
+                priority: Scale::default(),
+                fx: 0,
+                external_flags: 6,
+                internal_flags: 0,
+                ends_at_logout: false,
+                ends_at_teleport: false,
+                enum_value: 0,
+                eq_class: 0,
+                name: None,
+            },
+        );
+        let (b, me) = h.player_in_world("one", "Elara");
+        let world = *h
+            .server
+            .players
+            .iter()
+            .find(|(_, p)| p.character == me)
+            .expect("in the world")
+            .0;
+        let before = |h: &Harness, k| {
+            yalain_world::quals::long(&h.server.players[&world].qualities, k).unwrap_or(0)
+        };
+        let (left, total) = (before(&h, pool::AVAILABLE), before(&h, pool::TOTAL));
+        at_phase(&mut h, NEXT_QUEST, 1);
+        use_explorer(&mut h, b, me);
+        assert_eq!(held(&h, NEXT_QUEST).map(|q| q.0), Some(status::COMPLETED));
+        assert_eq!(
+            (before(&h, pool::AVAILABLE), before(&h, pool::TOTAL)),
+            (left + pays, total + pays),
+            "at {spellcraft}"
+        );
+    }
 }
 
 /// A quest with a duration fails when its time runs out: nothing just before, then one update
@@ -1213,6 +1446,120 @@ fn a_step_that_requires_a_quest_free_waits_for_that_quests_wait() {
     set(&mut h, status::COMPLETED, now - 7200);
     let from = use_explorer(&mut h, b, me);
     assert_eq!(updates(&h, b, from), vec![0x1000_0000], "its wait is over");
+}
+
+/// A step may wait on a hidden timer having run out: the timer given with the quest, the step
+/// holds back while its time runs and runs once it has run out, the timer told at no point.
+/// Behaviour: server.quests.a-step-waits-for-a-timer-to-run-out
+#[test]
+fn a_step_that_requires_a_quest_failed_waits_for_a_hidden_timer_to_run_out() {
+    let timer = QuestDef {
+        duration: 60.0,
+        hidden: true,
+        ..quest(NEXT_QUEST, 0, -999)
+    };
+    let mut h = explorer_world(
+        vec![quest(HALL_QUEST, 0, -999), timer],
+        vec![
+            step(
+                HALL_QUEST,
+                0,
+                Trigger::Use(EXPLORER_TEMPLATE),
+                Update::Bestow,
+            ),
+            step(NEXT_QUEST, 0, Trigger::Given(HALL_QUEST), Update::Bestow),
+            Step {
+                requires: vec![(NEXT_QUEST, Need::Failed)],
+                ..step(
+                    HALL_QUEST,
+                    1,
+                    Trigger::Use(EXPLORER_TEMPLATE),
+                    Update::Complete,
+                )
+            },
+        ],
+    );
+    let (b, me) = h.player_in_world("one", "Elara");
+    let asked = h.now.0;
+    let from = use_explorer(&mut h, b, me);
+    assert_eq!(
+        updates(&h, b, from),
+        vec![0x1000_0000],
+        "the quest alone told"
+    );
+    assert_eq!(held(&h, NEXT_QUEST), Some((status::UNDERWAY, 1)));
+    let from = use_explorer(&mut h, b, me);
+    assert!(updates(&h, b, from).is_empty(), "its time is running");
+    let from = h.bots[b].inbox.len();
+    h.run_to(yalain_net::LocalTime(asked + 64.0));
+    assert_eq!(held(&h, NEXT_QUEST), Some((status::FAILED, 0)));
+    assert!(updates(&h, b, from).is_empty(), "its running out untold");
+    let from = use_explorer(&mut h, b, me);
+    assert_eq!(updates(&h, b, from), vec![0x3000_0000], "run out: done");
+    assert_eq!(held(&h, HALL_QUEST), Some((status::COMPLETED, 0)));
+}
+
+/// A step requiring a quest failed runs only with it failed: not with it never had, under way or
+/// done, nor with a failure of a giving before the step's own quest was given.
+/// Behaviour: server.quests.a-step-requires-a-quest-failed
+#[test]
+fn a_step_that_requires_a_quest_failed_needs_a_failure_since_its_own_quest_was_given() {
+    let mut h = explorer_world(
+        vec![quest(HALL_QUEST, 0, -999), quest(NEXT_QUEST, 0, -999)],
+        vec![Step {
+            requires: vec![(NEXT_QUEST, Need::Failed)],
+            ..step(
+                HALL_QUEST,
+                1,
+                Trigger::Use(EXPLORER_TEMPLATE),
+                Update::Complete,
+            )
+        }],
+    );
+    let (b, me) = h.player_in_world("one", "Elara");
+    let now = h.unix;
+    let set = |h: &mut Harness, other: Option<(u32, i64)>| {
+        for p in h.server.players.values_mut() {
+            p.play.quests.clear();
+            p.play.quests.push(QuestState {
+                quest: HALL_QUEST,
+                status: status::UNDERWAY,
+                phase: 1,
+                started: now - 100,
+                updated: now - 100,
+            });
+            if let Some((st, started)) = other {
+                p.play.quests.push(QuestState {
+                    quest: NEXT_QUEST,
+                    status: st,
+                    phase: u32::from(st == status::UNDERWAY),
+                    started,
+                    updated: now - 10,
+                });
+            }
+        }
+    };
+    for (other, why) in [
+        (None, "never had"),
+        (Some((status::UNDERWAY, now - 50)), "under way"),
+        (Some((status::COMPLETED, now - 50)), "done"),
+        (Some((status::CANCELLED, now - 50)), "cancelled"),
+        (
+            Some((status::FAILED, now - 200)),
+            "failed in an earlier run",
+        ),
+    ] {
+        set(&mut h, other);
+        let from = use_explorer(&mut h, b, me);
+        assert!(updates(&h, b, from).is_empty(), "{why}");
+    }
+    set(&mut h, Some((status::FAILED, now - 100)));
+    let from = use_explorer(&mut h, b, me);
+    assert_eq!(
+        updates(&h, b, from),
+        vec![0x3000_0000],
+        "failed in this run"
+    );
 }
 
 /// A step may fail its quest: a quest under way fails, told as a failure, and with no wait of its

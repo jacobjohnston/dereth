@@ -61,7 +61,7 @@ pub const IN_PORTAL_SPACE: f64 = 2.466;
 pub const PROTECTION_LINGERS: f64 = 3.39;
 
 /// An act is whole with this many scenes held (hidden ones aside).
-pub const ACT_WHOLE: usize = 7;
+pub use yalain_content::story::ACT_WHOLE;
 
 /// The shard's protection: its effect, its record's flags and categories, its end's text.
 pub mod protection {
@@ -207,6 +207,7 @@ pub fn shard_used<S: Store>(
         resurrect: false,
         sent: false,
         said: None,
+        updates: Vec::new(),
     });
     let id = p.character;
     places::to_all_knowing(s, net, id, &plays);
@@ -225,14 +226,8 @@ fn to_play<S: Store>(s: &Server<S>, held: &[u32], scene: u32) -> Vec<SceneInfo> 
     let Some(sc) = s.story.scenes.get(&scene) else {
         return Vec::new();
     };
-    let act = s.story.act(sc.act);
-    let whole = act
-        .iter()
-        .filter(|x| !x.hidden && held.contains(&x.id))
-        .count()
-        >= ACT_WHOLE;
-    if whole {
-        act.into_iter().map(scene_info).collect()
+    if s.story.act_whole(sc.act, held) {
+        s.story.act(sc.act).into_iter().map(scene_info).collect()
     } else {
         vec![scene_info(sc)]
     }
@@ -288,6 +283,7 @@ pub fn bestow<S: Store>(
         progress::private(net, world, &play_scenes(scenes));
     }
     places::shard_portal_space(s, net, world);
+    crate::quests::teleported(s, net, world, clock);
     s.after(
         clock,
         IN_PORTAL_SPACE,

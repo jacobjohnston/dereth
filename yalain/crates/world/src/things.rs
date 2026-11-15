@@ -34,6 +34,8 @@ pub enum Kind {
     Portal,
     /// A dye plant a player planted.
     Plant,
+    /// An object an effect placed in the world ([`crate::placing`]), no one's.
+    Placed,
 }
 
 /// What a creature is doing.
@@ -116,6 +118,9 @@ pub struct Creature {
     pub weapon_count: u16,
     /// The route it walks at rest, when its camp names one, and where it is on it.
     pub patrol: Option<crate::ai::Patrol>,
+    /// The players (character ids) within its perception at its last step, for a creature that
+    /// marks those that come within it.
+    pub in_sight: Vec<u64>,
 }
 
 /// A corpse's state: who killed what, what it holds, when it goes.
@@ -195,8 +200,10 @@ pub struct Thing {
     pub facts: Facts,
     /// Its place, when it stands in the world.
     pub at: Option<StoredPosition>,
-    /// The object holding it, and its slot there.
-    pub container: Option<(u64, u32)>,
+    /// The object holding it (a player's character, a corpse, a chest, a creature, a broker). Its
+    /// slot there is the holder's to keep: a pack's in its list of what it holds, a corpse's or a
+    /// chest's the item's place in its contents. It changes only through [`crate::holding`].
+    pub container: Option<u64>,
     /// The player wielding or wearing it, and where.
     pub wielded: Option<(u64, u32)>,
     pub instance: u16,
@@ -261,6 +268,22 @@ pub struct Thing {
 }
 
 impl Thing {
+    /// Give it the name a world's row gives what it makes, in place of its template's: a string
+    /// reference it is told by, examined by and (a creature) its corpse named after, or literal
+    /// text it is told and examined by.
+    pub fn name_as(&mut self, name: &yalain_content::Words) {
+        match name {
+            yalain_content::Words::Ref(string, table) => {
+                self.description.name = Some((*string, *table));
+                self.description.name_text = None;
+                self.facts.name = Some((*string, *table));
+            }
+            yalain_content::Words::Literal(text) => {
+                self.description.name_text = Some(text.clone());
+            }
+        }
+    }
+
     /// A thing of a template, nowhere yet.
     #[must_use]
     pub fn of(id: u64, t: &Template, kind: Kind) -> Self {
@@ -433,6 +456,9 @@ pub fn standing_create(t: &Thing) -> CreateObject {
     if let Some(n) = &t.named {
         weenie.mask |= WeenieDesc::NAME;
         weenie.name = n.clone();
+    } else if let Some(n) = &d.name_text {
+        weenie.mask |= WeenieDesc::NAME;
+        weenie.name = StringInfo::literal(n);
     } else if let Some((string_id, table_id)) = d.name {
         weenie.mask |= WeenieDesc::NAME;
         weenie.name = StringInfo {

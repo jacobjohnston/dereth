@@ -9,7 +9,9 @@
 //!   in whole steps, so it moves only when the view moves it by a texel. The blocks' parts and
 //!   ground are drawn into a cache once, and again only when the cascade moves, the sun moves,
 //!   the frame's origin moves or what is resident changes. Each frame the cache is copied into
-//!   the cascade's map and the objects drawn over it.
+//!   the cascade's map and the objects drawn over it. While the wind sways an art pack's models
+//!   by more than a cascade's texel, that cascade is drawn again every frame, so their shadows
+//!   sway with them rather than stand where they stood when the cache was drawn.
 //! - **The sun's share.** Each pixel lit by the sun (the ground and what stands in the sun) is
 //!   looked up in the first cascade that covers it, offset along its normal by a texel and
 //!   compared against the casters with a 4 x 4 tent filter, blended into the next cascade over
@@ -101,6 +103,18 @@ pub struct ShadowStats {
     pub last_dynamic_items: u32,
     /// The bytes the last frame's shadows wrote to the device.
     pub last_bytes: u64,
+}
+
+/// How strongly the wind blows that an art pack's models sway in, meters a second, from the
+/// frame's constants `rows`: 0 where the sway is off and the wind is stilled.
+fn wind_strength(rows: &[u8]) -> f32 {
+    let at = super::light::FRAME_WIND * 16;
+    let f = |k: usize| {
+        rows.get(at + k * 4..at + k * 4 + 4)
+            .and_then(|b| b.try_into().ok())
+            .map_or(0.0, f32::from_le_bytes)
+    };
+    dereth_primitives::num::math::hypotf(f(0), f(1))
 }
 
 /// What places one cascade: when this is the same, the cascade's cached casters are the same.
@@ -312,6 +326,18 @@ pub struct ShadowPass {
     visibility: Option<(Texture, u32, u32, u32)>,
     /// The objects' instances the shadows wrote, with the transform they wrote.
     written: BTreeMap<u32, Mat4>,
+    /// The blocks' parts' spheres in the frame's space, block after block, with whether each is
+    /// ground cover, and each block's box round its parts': worked out once a frame that redraws
+    /// a cascade, for every cascade.
+    spheres: Vec<(Vec3, f32, bool)>,
+    block_boxes: Vec<(Vec3, Vec3)>,
+    /// What `spheres` and `block_boxes` were worked out for: the scene's resident statics, the
+    /// frame's origin and which parts the processor draws ([`super::instances`]). They stand
+    /// until one of them changes.
+    spheres_of: Option<(u64, [i32; 2], u64)>,
+    /// How far the wind bends the most-bent vertex of any resident model, meters at a wind of a
+    /// meter a second, and the meshes' generation it was found at.
+    bend: (Option<u64>, f32),
     pub stats: ShadowStats,
 }
 
@@ -339,6 +365,8 @@ pub struct ShadowPlan {
     pub visibility_index: u32,
     /// The bytes one indirect draw command takes on the device.
     command_bytes: u32,
+    /// The cascades as the parts chosen on the device are cast into them.
+    pub(crate) parts: super::instances::PartsCascades,
 }
 
 fn shader(e: Entry) -> Shader<'static> {
@@ -447,6 +475,10 @@ impl ShadowPass {
             constants: PerFrame::new(d, "remaster shadow cascades", 512, Default::default())?,
             visibility: None,
             written: BTreeMap::new(),
+            spheres: Vec::new(),
+            block_boxes: Vec::new(),
+            spheres_of: None,
+            bend: (None, 0.0),
             stats: ShadowStats::default(),
         })
     }
@@ -552,7 +584,7 @@ impl ShadowPass {
     ///
     /// `camera` is the frame's camera before any sub-pixel jitter, so the cascades hold still under
     /// the anti-aliasing; `frame_rows` is the frame's constants; `drawn` the instances the frame's
-    /// draw wrote; `area` the world's size.
+    /// draw wrote; `area` the world's size; `instances` the models the device casts itself.
     ///
     /// # Errors
     /// What the device refuses.
@@ -566,6 +598,7 @@ impl ShadowPass {
         frame_rows: &[u8],
         drawn: &BTreeSet<u32>,
         area: (u32, u32),
+        instances: &super::instances::DeviceParts,
     ) -> Result<Option<ShadowPlan>, dereth_gfx::Error> {
         if !self.settings.on {
             return Ok(None);
@@ -576,6 +609,17 @@ impl ShadowPass {
         self.maps(d)?;
         let (visibility, visibility_index) = self.visibility(d, area.0, area.1)?;
         let cascades = cascades(camera, sun, self.size);
+        // How far the wind moves the models it sways this frame: a cascade whose texels are
+        // smaller is drawn again every frame.
+        if self.bend.0 != Some(scene.mesh_generation) {
+            let most = scene
+                .meshes
+                .values()
+                .fold(0.0f32, |most, m| most.max(m.sway));
+            self.bend = (Some(scene.mesh_generation), most);
+        }
+        let swayed = self.bend.1 * wind_strength(frame_rows);
+        let swaying = |c: &Cascade| swayed > c.texel;
         let origin = frame.origin;
         let resident = scene.static_generation;
         let drawn_mode = self.settings.casters == Casters::InView;
@@ -637,11 +681,47 @@ impl ShadowPass {
         let command_bytes = super::command_bytes(d);
         let command = |scene: &GpuScene, i: u32, out: &mut Vec<u8>| {
             if let Some(d) = scene.item_draws.get(i as usize) {
-                out.extend(super::command(backend, d.index_count, d.first_index, i));
+                super::command_into(backend, d.index_count, d.first_index, i, out);
             }
         };
+        // The blocks' parts' spheres, once for every cascade drawn again, and the box round each
+        // block's: a cascade its box misses has none of the block's parts.
+        let redraws = cascades.iter().enumerate().any(|(c, cascade)| {
+            drawn_mode
+                || swaying(cascade)
+                || self.keys[c]
+                    != Some(CacheKey {
+                        cascade: cascade.key,
+                        resident,
+                        origin,
+                    })
+        });
+        let spheres_of = (resident, origin, instances.generation());
+        if redraws && self.spheres_of != Some(spheres_of) {
+            self.spheres_of = Some(spheres_of);
+            self.spheres.clear();
+            self.block_boxes.clear();
+            for (id, b) in &scene.blocks {
+                let offset = block_offset(*id, origin);
+                let (mut min, mut max) =
+                    (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+                // The parts the device chooses for, it casts itself.
+                let cpu = instances.cpu_parts(*id);
+                for j in 0..cpu.map_or(b.parts.len(), <[u32]>::len) {
+                    let Some(p) = b.parts.get(cpu.map_or(j, |c| c[j] as usize)) else {
+                        continue;
+                    };
+                    let (centre, radius) = part_sphere(p, p.transform, offset);
+                    min = min.min(centre - Vec3::splat(radius));
+                    max = max.max(centre + Vec3::splat(radius));
+                    self.spheres.push((centre, radius, p.cover));
+                }
+                self.block_boxes.push((min, max));
+            }
+        }
 
         let mut plans = Vec::with_capacity(CASCADES);
+        let mut redraw_bits = 0u32;
         let (mut redrawn, mut static_items, mut ground_blocks, mut dynamic_items) = (0, 0, 0, 0);
         for (c, cascade) in cascades.iter().enumerate() {
             let key = CacheKey {
@@ -649,7 +729,10 @@ impl ShadowPass {
                 resident,
                 origin,
             };
-            let redraw = drawn_mode || self.keys[c] != Some(key);
+            let redraw = drawn_mode || swaying(cascade) || self.keys[c] != Some(key);
+            if redraw {
+                redraw_bits |= 1 << c;
+            }
             let gpu = &mut self.cascades[c];
             // The frame's constants with the cascade's view and projection.
             let mut rows = frame_rows.to_vec();
@@ -663,8 +746,13 @@ impl ShadowPass {
             if redraw {
                 let mut cmds = Vec::new();
                 let mut ground_rows: Vec<[u32; 4]> = Vec::new();
-                for (id, b) in &scene.blocks {
+                let mut first = 0;
+                for ((id, b), (lo, hi)) in scene.blocks.iter().zip(&self.block_boxes) {
                     let offset = block_offset(*id, origin);
+                    let cpu = instances.cpu_parts(*id);
+                    let n = cpu.map_or(b.parts.len(), <[u32]>::len);
+                    let spheres = self.spheres.get(first..first + n).unwrap_or(&[]);
+                    first += n;
                     if let Some(g) = scene.ground.get(id) {
                         let min = offset + Vec3::new(0.0, 0.0, g.z[0]);
                         let max = offset + Vec3::new(192.0, 192.0, g.z[1]);
@@ -676,8 +764,19 @@ impl ShadowPass {
                             ground_rows.push([g.vertices.start, g.cells.start, g.side, b.slot]);
                         }
                     }
-                    for p in &b.parts {
-                        let (centre, radius) = part_sphere(p, p.transform, offset);
+                    if n == 0 || !cascade.reaches_box(*lo, *hi) {
+                        continue;
+                    }
+                    for (j, (centre, radius, cover)) in spheres.iter().enumerate() {
+                        let Some(p) = b.parts.get(cpu.map_or(j, |c| c[j] as usize)) else {
+                            continue;
+                        };
+                        let (centre, radius) = (*centre, *radius);
+                        // Ground cover casts in the nearest cascade alone: the next one, which
+                        // the sun's share blends into over the nearest's last fifth, has none.
+                        if *cover && c > 0 {
+                            continue;
+                        }
                         if !cascade.reaches(centre, radius) {
                             continue;
                         }
@@ -777,6 +876,13 @@ impl ShadowPass {
             visibility,
             visibility_index,
             command_bytes,
+            parts: super::instances::PartsCascades {
+                light_view: cascades[0].light_view,
+                across: cascades.map(|c| c.across),
+                along: cascades.map(|c| c.along),
+                redraw: redraw_bits,
+                in_view: drawn_mode,
+            },
         }))
     }
 }
@@ -814,6 +920,7 @@ impl ShadowPlan {
         caster_push: &dyn Fn(u32) -> Vec<u8>,
         ground_push: &dyn Fn(u32, u32, u32) -> Vec<u8>,
         drawn: Option<&super::drawn::DrawnPlan>,
+        parts: Option<&super::instances::PartsPlan>,
     ) -> Result<(), dereth_gfx::Error> {
         let full = Rect {
             x: 0,
@@ -824,6 +931,14 @@ impl ShadowPlan {
         let p = self.pipelines;
         for (c, cp) in self.cascades.iter().enumerate() {
             if cp.redraw {
+                let parts = parts.filter(|p| p.casts(c));
+                let mut touches = vec![
+                    Touch::Buffer(cp.statics.0, Use::Indirect),
+                    Touch::Buffer(indices, Use::Index),
+                ];
+                if let Some(p) = parts {
+                    touches.extend(p.caster_touches());
+                }
                 r.timestamp(
                     [
                         "shadow cache 0",
@@ -841,10 +956,7 @@ impl ShadowPlan {
                             clear: Some(1.0),
                             write: true,
                         }),
-                        touches: &[
-                            Touch::Buffer(cp.statics.0, Use::Indirect),
-                            Touch::Buffer(indices, Use::Index),
-                        ],
+                        touches: &touches,
                         area: Some(full),
                     },
                     |d| {
@@ -855,16 +967,21 @@ impl ShadowPlan {
                                 d.draw(side * side * 6, *count, 0, 0);
                             }
                         }
-                        if cp.statics.1 > 0 {
+                        if cp.statics.1 > 0 || parts.is_some() {
                             d.set_pipeline(p.caster)?;
                             d.push(0, &caster_push(cp.frame))?;
                             d.bind_index_buffer(indices, 0, IndexType::U32)?;
+                        }
+                        if cp.statics.1 > 0 {
                             d.draw_indexed_indirect(
                                 cp.statics.0,
                                 0,
                                 cp.statics.1,
                                 self.command_bytes,
                             )?;
+                        }
+                        if let Some(parts) = parts {
+                            parts.draw_casters(d, c)?;
                         }
                         Ok(())
                     },
@@ -995,6 +1112,28 @@ mod tests {
     }
 
     const SUN: Vec3 = Vec3::new(0.3, -0.4, 0.866);
+
+    /// The wind the trees sway in is read from the frame's constants as they are written: its
+    /// strength, and none once the sway is off and the wind stilled.
+    #[test]
+    fn the_wind_the_trees_sway_in_is_read_from_the_frames_constants() {
+        let f = crate::scene::FrameDelta {
+            clock: 1234.5,
+            ..crate::scene::FrameDelta::default()
+        };
+        let rows = super::super::light::frame_rows(
+            &f,
+            0.0,
+            super::super::light::LightMode::Vertex,
+            (640, 480),
+        );
+        let w = super::super::light::wind_row(&f);
+        let blowing = wind_strength(&rows.bytes());
+        assert!((blowing - math::hypotf(w[0], w[1])).abs() < 1e-6 && blowing > 0.0);
+        let still = super::super::light::swaying(rows, false).bytes();
+        assert_eq!(wind_strength(&still), 0.0);
+        assert_eq!(wind_strength(&[]), 0.0, "no constants: no wind");
+    }
 
     /// A cascade holds still, and so does its cache, while the view moves less than one of its
     /// texels; it moves when the view crosses one.

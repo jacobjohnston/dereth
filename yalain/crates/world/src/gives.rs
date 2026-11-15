@@ -20,7 +20,10 @@
 //! Land Claim: two records in one instant, 1 of 1). A step that keeps nothing hands the item back
 //! after its update (23 of 23). With no step for it the person says its own refusal of a give and
 //! hands it back (30 of 30): a person with a body plays its handing-over behavior and the item is
-//! back 1.30 s later, an object hands it back at once.
+//! back 1.30 s later, an object hands it back at once. An item that changes the state of an object
+//! holding one ([`crate::puzzles`]) is handed back as it changes it. An item of the set an object's
+//! offering takes ([`crate::offerings`]) is kept by it, or refused when it holds one already. A
+//! seed given to its species' garden is planted there ([`crate::plants`]).
 //!
 //! **Stacks.** What is given is taken whole when a step keeps it: the count asked, a part of a
 //! stack leaving the rest in the pack (2017: 38 of 38). A step may want an exact count: any other
@@ -41,8 +44,7 @@ use auberean_protocol::script::{ClientCall, FunctionId, ObjectCall, ScriptArgs};
 use auberean_protocol::types::{BehaviorParams, MoveTarget, MovementParams, ObjectStamp};
 use auberean_protocol::{queue, ServerMessage};
 use auberean_script::args::Arg;
-use yalain_content::quests::{Step, Transformation, Trigger};
-use yalain_content::QuestTable;
+use yalain_content::quests::{Step, Transformation};
 use yalain_net::{BlobKind, ConnId, ServerNet};
 use yalain_store::{Store, StoredPosition};
 
@@ -80,40 +82,6 @@ pub mod status {
 
 /// The call that tells a client an item in a container is gone (sent as the container's).
 pub const DESTROY_CONTAINED: u32 = 0x820E_005C;
-
-/// The effect a step puts on to make its player a hero, for a world whose steps name no
-/// transformation at all: such a step transforms its player as 2017's did.
-pub const HERO_TRANSFORMATION: u32 = 0x6F00_1C6F;
-
-/// 2017's transformation (the one hero, 1 of 1): the step 25.59 s after the give's answer; an
-/// appearance at the answer, then another and a behavior; the text the new hero is told, its name
-/// in its variable.
-#[must_use]
-pub fn transformation_2017() -> Transformation {
-    Transformation {
-        seconds: 25.59,
-        fx: vec![0x4100_04A5, 0x4100_04B5],
-        behavior: Some(0x4100_0120),
-        text: Some((0x2EE2_0FE4, 0x2500_2BE3)),
-        name: 0x9D06_6C50,
-    }
-}
-
-/// A world whose steps name no transformation at all transforms the players of its steps that put
-/// on [`HERO_TRANSFORMATION`] as 2017 did; one that names any has its rows' alone. Returns whether the
-/// world named none.
-pub fn transformations_or_2017(table: &mut QuestTable) -> bool {
-    if table.steps.iter().any(|s| s.transforms.is_some()) {
-        return false;
-    }
-    for step in &mut table.steps {
-        if matches!(step.trigger, Trigger::Give(..)) && step.effects.contains(&HERO_TRANSFORMATION)
-        {
-            step.transforms = Some(transformation_2017());
-        }
-    }
-    true
-}
 
 /// A give under way.
 #[derive(Debug, Clone, PartialEq)]
@@ -244,7 +212,15 @@ pub fn moved<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, cl
         } else {
             crate::places::WALK_SLACK
         };
-    if crate::places::reach(&p.position, o.cell, o.origin).is_some_and(|d| d <= slack) {
+    let gap = crate::places::walk_gap(
+        s,
+        &p.position,
+        o.template,
+        o.description.scale,
+        o.cell,
+        o.origin,
+    );
+    if gap.is_some_and(|d| d <= slack) {
         hand_over(s, net, world, clock);
         return;
     }
@@ -341,6 +317,21 @@ fn answer(m: &Move, template: u32, look: u32, whole: bool) -> Move {
     }
 }
 
+/// Which script packages derive from which: each package with the packages it derives from, so a
+/// template counts in a class when its package is the class or derives from it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ItemClasses {
+    pub bases: std::collections::HashMap<u32, Vec<u32>>,
+}
+
+impl ItemClasses {
+    /// Does a template of this package count in this class?
+    #[must_use]
+    pub fn counts_in(&self, package: u32, class: u32) -> bool {
+        package == class || self.bases.get(&package).is_some_and(|b| b.contains(&class))
+    }
+}
+
 /// The handing-over is through: the give is answered, then what the person does with the item.
 pub fn handed<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, clock: Clock) {
     let Some(p) = s.players.get_mut(&world) else {
@@ -367,12 +358,16 @@ pub fn handed<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, c
         quantity: m.quantity.min(quantity).max(1),
         target: m.target,
     };
-    let trigger = Trigger::Give(template, target_template);
-    let Some(step) = crate::quests::step_for_give(s, world, trigger, given.quantity, clock.unix)
-    else {
-        if let Some(quest) =
-            crate::quests::wants_another_count(s, world, trigger, given.quantity, clock.unix)
-        {
+    // The give of the item's own template first, then of each class it counts in.
+    let triggers = crate::quests::give_triggers(s, template, target_template);
+    let found = triggers.iter().find_map(|t| {
+        crate::quests::step_for_give(s, world, *t, given.quantity, clock.unix).map(|st| (*t, st))
+    });
+    let Some((trigger, step)) = found else {
+        let wrong = triggers.iter().find_map(|t| {
+            crate::quests::wants_another_count(s, world, *t, given.quantity, clock.unix)
+        });
+        if let Some(quest) = wrong {
             let line = crate::talk::at_wrong_count(s, target_template, Some(i), quest, template);
             if let Some(line) = line {
                 let speaker = crate::talk::content_speaker(s, i);
@@ -381,10 +376,33 @@ pub fn handed<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, c
             hand_back(s, net, world, i, &m, object, None, clock);
             return;
         }
+        match crate::offerings::given(s, i, template) {
+            crate::offerings::Offered::Takes => {
+                crate::offerings::takes(s, net, world, i, given, clock);
+                return;
+            }
+            crate::offerings::Offered::Refuses => {
+                refused(s, net, world, i, &m, object, clock);
+                return;
+            }
+            crate::offerings::Offered::Not => {}
+        }
+        match crate::plants::given(s, net, world, i, given, clock) {
+            Some(true) => return,
+            Some(false) => {
+                hand_back(s, net, world, i, &m, object, None, clock);
+                return;
+            }
+            None => {}
+        }
         if let Some(row) =
             crate::quests::give_for(s, world, template, target_template, given.quantity)
         {
             takes(s, net, world, i, &row, given, clock);
+            return;
+        }
+        if crate::puzzles::given(s, m.target, template, clock) {
+            hand_back(s, net, world, i, &m, object, None, clock);
             return;
         }
         match crate::map_trips::sends(s, i, template) {
@@ -438,6 +456,7 @@ fn takes<S: Store>(
         });
         crate::places::to_knowers(s, net, speaker.id, &played);
     }
+    crate::tallies::give_ran(s, row, clock);
     for line in crate::talk::with_give(s, who, Some(i), given.template) {
         crate::talk::say(s, net, world, &speaker, &line.words, line.how);
     }
@@ -446,25 +465,29 @@ fn takes<S: Store>(
         let count = row.counts.get(n).copied().unwrap_or(1).max(1);
         crate::inventory::give_from(s, net, world, *item, count, given.target);
     }
-    for e in &row.effects {
-        crate::effects::apply(
-            s,
-            net,
-            world,
-            *e,
-            crate::effects::Cast {
-                caster: speaker.id,
-                spellcraft: 1.0,
-                giver: Some((speaker.id, speaker.name)),
-                ..crate::effects::Cast::default()
-            },
-            clock,
-        );
+    // One more item, of several, picked by weight.
+    let pick = s.item_rows.give_pick(row).map(<[(u32, u32)]>::to_vec);
+    let picked = pick.and_then(|p| crate::makes::pick_one(s, &p));
+    if let Some(item) = picked {
+        crate::inventory::give_from(s, net, world, item, 1, given.target);
     }
-    if let Some(text) = row.text {
+    let mut told = Vec::new();
+    for e in &row.effects {
+        let cast = crate::effects::Cast {
+            caster: speaker.id,
+            spellcraft: 1.0,
+            giver: Some((speaker.id, speaker.name)),
+            quiet: row.effects_quiet,
+            ..crate::effects::Cast::default()
+        };
+        told.extend(crate::effects::recipe_line(&s.effect_table, *e, cast));
+        crate::effects::apply(s, net, world, *e, cast, clock);
+    }
+    // A text one of its effects told already is not told again.
+    if let Some(text) = row.text.filter(|t| !told.contains(t)) {
         progress::private(net, world, &crate::chat::show_text(2, progress::text(text)));
     }
-    for item in &row.gives {
+    for item in row.gives.iter().chain(&picked) {
         crate::quests::took(s, net, world, *item, clock);
     }
 }
@@ -625,10 +648,14 @@ pub fn keep<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, giv
         crate::world::keep_player(s, world);
         return;
     }
-    p.play.items.remove(i);
-    crate::inventory::close_up(&mut p.play.items);
-    p.known.remove(&given.item);
-    let instance = s.things.remove(given.item).map_or(0, |t| t.instance);
+    let Ok(gone) = crate::holding::destroy_held(s, world, given.item) else {
+        return;
+    };
+    let instance = gone.map_or(0, |t| t.instance);
+    if let Some(p) = s.players.get_mut(&world) {
+        crate::inventory::close_up(&mut p.play.items);
+        p.known.remove(&given.item);
+    }
     let gone = ServerMessage::ForgetObject(ObjectOnly(ObjectStamp {
         id: given.item,
         instance_stamp: instance,

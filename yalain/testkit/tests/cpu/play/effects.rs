@@ -678,7 +678,7 @@ fn a_quest_steps_effects_come_after_its_gifts_and_before_its_update() {
     let quest = 0x4000_0016;
     h.server.quests.quests.push(QuestDef {
         id: quest,
-        name: (1, 2),
+        name: yalain_content::Words::Ref(1, 2),
         description: (3, 4),
         icon: 0,
         play_fx: false,
@@ -695,15 +695,18 @@ fn a_quest_steps_effects_come_after_its_gifts_and_before_its_update() {
         subquests: Vec::new(),
         min_level: 0,
         fails_on_death: false,
+        fails_on_logout: false,
+        fails_on_teleport: false,
         once: false,
         fellows: yalain_content::quests::Fellows::default(),
-        last_waits: false,
+        ranges: Vec::new(),
         hero_only: false,
         pay: yalain_content::quests::CompletionPay::default(),
         required: None,
         cancel_wait: None,
     });
     let step = Step {
+        key: String::new(),
         quest,
         needs: 0,
         trigger: Trigger::Use(0x4700_31ED),
@@ -714,17 +717,21 @@ fn a_quest_steps_effects_come_after_its_gifts_and_before_its_update() {
         counts: Vec::new(),
         effects: vec![COURAGE_EFFECT],
         text: Some((0x912E_FF1D, 0x2500_10E8)),
+        recipes: Vec::new(),
         placed: "made up for the test".into(),
         requires: Vec::new(),
         takes: Vec::new(),
         races: Vec::new(),
         effects_last: false,
+        effects_quiet: false,
         wants: None,
         fellows: false,
         levels: None,
         xp_share: 0.0,
         to: None,
         transforms: None,
+        chance: None,
+        to_fellows: false,
     };
     let world = *h
         .server

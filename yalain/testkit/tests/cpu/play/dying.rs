@@ -283,6 +283,56 @@ fn a_resurrected_player_is_set_standing_then_glows_as_it_goes() {
     );
 }
 
+/// The freezes and frees of the player's movement a client was sent since `from`: true for a
+/// freeze.
+fn freezes(h: &Harness, b: usize, from: usize) -> Vec<bool> {
+    calls_of(h, b, from)
+        .into_iter()
+        .filter(|(f, _)| *f == yalain_world::session::function::MOVEMENT_FROZEN)
+        .map(|(_, v)| v != vec![Value::Int(0)])
+        .collect()
+}
+
+/// A client holds its player still for as long as it has been frozen more often than freed. Its
+/// death froze it and so does its resurrection's trip, whose freeze the drawn scene lifts; about
+/// three seconds after it is back at its lifestone the death's is lifted too, so a resurrected
+/// player can walk again, and every freeze since the death has been lifted once.
+/// Behaviour: server.death.moves-again-after-return
+#[test]
+fn a_resurrected_player_is_freed_of_its_deaths_freeze_three_seconds_after_its_return() {
+    let mut h = Harness::new();
+    let (b, _) = about_to_die(&mut h);
+    let from = h.bots[b].inbox.len();
+    let _ = run_to_death(&mut h, b, from);
+    wait(&mut h, 11.0);
+    assert_eq!(freezes(&h, b, from), vec![true], "frozen once dead");
+    h.bots[b].send(true, queue::WEENIE, &server_call(RESURRECT, &[]));
+    let out = h.run_until(200, |h| {
+        calls_of(h, b, from)
+            .iter()
+            .any(|(f, _)| *f == yalain_world::places::function::EXIT_PORTAL_SPACE)
+    });
+    assert!(out, "back out of portal space");
+    let exit = h.now.0;
+    scene_drawn(&mut h, b);
+    while h.now.0 < exit + 2.5 {
+        h.step();
+    }
+    assert_eq!(
+        freezes(&h, b, from),
+        vec![true, true, false],
+        "the trip's freeze lifted as the scene is drawn, the death's not yet"
+    );
+    while h.now.0 < exit + 3.1 {
+        h.step();
+    }
+    assert_eq!(
+        freezes(&h, b, from),
+        vec![true, true, false, false],
+        "the death's freeze lifted too"
+    );
+}
+
 /// Back from a resurrection, a player with more than ten focus has ten: sent after its health
 /// and vigor, before it is told it is alive; one with ten or less keeps it, and nothing is sent.
 /// Behaviour: server.focus.resurrection
@@ -731,6 +781,106 @@ fn a_character_never_bound_comes_back_where_it_fell_with_no_lifestone_near() {
     assert_eq!(p.position.cell, fell.cell);
     assert_eq!(p.position.origin, fell.origin);
     assert!(yalain_world::quals::int(&p.qualities, HEALTH).unwrap_or(0) > 0);
+}
+
+/// A lifestone of the world's, with the plain lifestone package, at a place.
+fn stone_at(cell: u32, origin: [f32; 3]) -> yalain_content::ContentObject {
+    yalain_content::ContentObject {
+        object: Some(0x4002_9900_0000_0057),
+        template: 0x4700_113A,
+        description: yalain_content::Description {
+            name_text: None,
+            package: 0x1A00,
+            look: 0x1F00_0ED5,
+            enter_fx: 0,
+            scale: None,
+            name: None,
+            numbers: [0; 6],
+            source: "authored for a test".into(),
+        },
+        cell,
+        origin,
+        rotation: [1.0, 0.0, 0.0, 0.0],
+        kind: yalain_content::Kind::Static,
+        label: String::new(),
+        placed: "authored for a test".into(),
+        destination: None,
+        facts: yalain_content::Facts::default(),
+        walks: None,
+        gate: None,
+    }
+}
+
+/// A player never bound comes back beside the nearest lifestone on the ground there, not at the
+/// height it fell from: outdoors at the land's height where it lands, even from a landblock beside
+/// it on a hill; inside at the lifestone's own height.
+/// Behaviour: server.death.unbound-return-on-the-ground
+#[test]
+fn a_player_never_bound_comes_back_on_the_ground_beside_the_nearest_lifestone() {
+    let mut h = Harness::new();
+    h.server.lifestone_packages.insert(0x1A00);
+    // The ground rises a meter for every five east.
+    h.server.ground = Some(Box::new(yalain_testkit::Slope));
+    let outside = stone_at(0x3C73_0017, [57.63, 120.51, 145.22]);
+    h.server.content.objects = vec![outside];
+    let fell = yalain_store::StoredPosition {
+        cell: 0x3B74_0006,
+        origin: [19.29, 116.45, 154.43],
+        rotation: [1.0, 0.0, 0.0, 0.0],
+    };
+    let at = yalain_world::places::resurrection_place_of(&h.server, &[], fell);
+    // South of it, from another landblock: in the land cell below the stone's.
+    assert_eq!(at.cell, 0x3C73_0016, "beside the lifestone");
+    assert!(
+        (at.origin[2] - at.origin[0] * 0.2).abs() < 1e-4,
+        "on the land where it lands: {:?}",
+        at.origin
+    );
+
+    let inside = stone_at(0x0299_0109, [60.0, 241.0, -44.6]);
+    h.server.content.objects = vec![inside];
+    let fell = yalain_store::StoredPosition {
+        cell: 0x0299_0109,
+        origin: [50.0, 241.0, -30.0],
+        rotation: [1.0, 0.0, 0.0, 0.0],
+    };
+    let at = yalain_world::places::resurrection_place_of(&h.server, &[], fell);
+    assert!(
+        (at.origin[2] - -44.6).abs() < 1e-4,
+        "inside, at the lifestone's height: {:?}",
+        at.origin
+    );
+}
+
+/// A player never bound who fell inside, below a lifestone on the land of the same landblock, comes
+/// back in the land cell its place beside the stone lies in: not the cell it fell in, nor the
+/// stone's own when the place lies across a land cell's edge from it.
+/// Behaviour: server.places.beside-lies-in-its-own-cell
+#[test]
+fn a_return_beside_an_outdoor_lifestone_lies_in_the_land_cell_under_it_from_a_fall_inside() {
+    let mut h = Harness::new();
+    h.server.lifestone_packages.insert(0x1A00);
+    h.server.ground = Some(Box::new(yalain_testkit::Slope));
+    // In the land cell from 40 to 60 m east, a meter from its west edge.
+    h.server.content.objects = vec![stone_at(0x3C73_0017, [41.0, 120.5, 8.2])];
+    let fell = yalain_store::StoredPosition {
+        cell: 0x3C73_0105,
+        origin: [30.0, 120.5, -20.0],
+        rotation: [1.0, 0.0, 0.0, 0.0],
+    };
+    let at = yalain_world::places::resurrection_place_of(&h.server, &[], fell);
+    assert_eq!(
+        at.cell, 0x3C73_000F,
+        "the land cell from 20 to 40 m east: {at:?}"
+    );
+    assert!(
+        (at.origin[0] - 36.5).abs() < 1e-4 && (at.origin[1] - 120.5).abs() < 1e-4,
+        "toward where it fell: {at:?}"
+    );
+    assert!(
+        (at.origin[2] - 36.5 * 0.2).abs() < 1e-4,
+        "on the land: {at:?}"
+    );
 }
 
 /// A character alive at its entry is not brought back: nothing of a return is sent.

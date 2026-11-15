@@ -42,7 +42,7 @@ use empyrean_entity::enums::{
 };
 use serde::Serialize;
 
-use crate::portal_table::PortalTable;
+use crate::portal_table::{Documents, PortalTable};
 
 /// The document's version; the client's bundled `map-places.json` was version 1.
 pub const VERSION: u32 = 2;
@@ -253,7 +253,11 @@ impl PlaceTable {
     /// The table `build` makes, its building begun on a thread of its own.
     #[must_use]
     pub fn building(build: impl FnOnce() -> String + Send + 'static) -> Self {
-        Self(PortalTable::building(build))
+        // The document rides in the portal table's `portals` slot.
+        Self(PortalTable::building(move || Documents {
+            portals: build(),
+            places: String::new(),
+        }))
     }
 
     /// The document once it is built; `None` while it is being built.

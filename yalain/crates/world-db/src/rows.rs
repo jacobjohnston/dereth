@@ -6,7 +6,7 @@
 //! its type, with the fields its kind needs; a row that breaks it is a [`Problem`] and is left
 //! out.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use auberean_pack::Ac2;
@@ -33,6 +33,8 @@ pub struct World {
     pub packs: Vec<String>,
     pub overrides: Vec<Override>,
     pub base: Option<Base>,
+    /// The ids its lockfile gives its shops' copies of their store templates, by the shops' keys.
+    pub stores: BTreeMap<String, u32>,
 }
 
 /// One pack: its header and its rows.
@@ -369,8 +371,24 @@ pub const POOL_RACES: [(&str, u32); 5] = [
 pub struct Keeper {
     pub template: u32,
     pub store: Option<u32>,
+    /// The `[[store]]` it opens, by key: that shop's store template, under the shop's title.
+    pub shop: Option<String>,
     pub greeting: Option<StrRef>,
     pub greeting_text: Option<String>,
+    pub prov: Prov,
+}
+
+/// `[[store]]`: a shop of the world's own, a store template's stock, prices and portrait under a
+/// title of its own.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Store {
+    pub key: String,
+    /// The store template it copies.
+    pub from: u32,
+    /// The shop window's title.
+    pub name_text: String,
+    /// The line under the title, else the template's.
+    pub description_text: Option<String>,
     pub prov: Prov,
 }
 
@@ -425,13 +443,19 @@ pub struct Quest {
     pub visible: Option<bool>,
     /// The least level a player is given it at.
     pub min_level: Option<i32>,
-    /// Whether it fails when its player dies.
+    /// Whether it fails when its player dies, leaves the world, or is taken through portal space;
+    /// each left out, as the quest's setup in the install says.
     pub fails_on_death: Option<bool>,
+    pub fails_on_logout: Option<bool>,
+    pub fails_on_teleport: Option<bool>,
     /// Whether it is given only once.
     pub once: Option<bool>,
     /// Whether a kill's move on it reaches the killer's fellows; left out, as the quest's setup in
     /// the install says.
     pub fellows: Option<bool>,
+    /// The quest this one goes with: as a player's quest of that id is done, fails or is cancelled,
+    /// this one under way, the player's and each of its fellows' in the world, is done or fails.
+    pub companion_of: Option<u32>,
     pub prov: Prov,
 }
 
@@ -443,6 +467,8 @@ pub enum Trigger {
     Use(u32),
     UseOn(u32, u32),
     Give(u32, u32),
+    /// Giving an item of any template of a class (a script package, by number) to one of a template.
+    GiveClass(u32, u32),
     Arrive(u32),
     /// Arriving through one placed portal of the template: the object's id.
     ArriveFrom(u32, u64),
@@ -451,16 +477,21 @@ pub enum Trigger {
     /// Killing a creature of the template that one camp made: the camp's `key`, or `key@XXYY` for
     /// the one in that landblock where several camps share the key.
     KillIn(u32, String),
+    /// A creature of the template dying within some meters of the player, whoever kills it.
+    KillNear(u32, u32),
     Done(u32),
     Given(u32),
 }
 
-/// What a step requires of another quest: under way at a phase, done, or free to be given.
+/// What a step requires of another quest: under way at a phase, done, free to be given, failed
+/// (its time run out), or never completed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Need {
     Phase(u32),
     Done,
     Free,
+    Failed,
+    NeverDone,
 }
 
 /// The update a step makes.
@@ -489,15 +520,36 @@ pub struct Step {
     pub gives: Vec<u32>,
     /// How many of each item given, in order (1 when left out).
     pub counts: Vec<u32>,
+    /// One more item it gives, one of these templates picked by weight (none: no such item).
+    pub gives_one_of: Vec<(u32, u32)>,
     /// The effects it puts on the player (their saved states), and a text shown after them.
     pub effects: Vec<u32>,
     pub text: Option<StrRef>,
+    /// The recipes it teaches the player (the install's, or the world's `[[recipe]]` rows').
+    pub recipes: Vec<u32>,
     /// Other quests it requires.
     pub requires: Vec<(u32, Need)>,
     /// The `[[event]]`s it runs only while they run.
     pub events: Vec<String>,
+    /// The `[[tally]]`s it runs only while they are full, or not yet full.
+    pub tallies: Vec<yalain_content::tallies::Gate>,
     /// The kingdom it runs for alone (a player in none counting as of the neutral one).
     pub kingdom: Option<u32>,
+    /// The acts it runs for only once they are whole (the scenes an act needs held).
+    pub acts: Vec<u32>,
+    /// The craft skills it runs for only at a level (any one of a gate's skills at it).
+    pub crafts: Vec<yalain_content::crafts::CraftGate>,
+    /// It runs only for a player with an untraining under way.
+    pub untraining: bool,
+    /// It runs only for a hero.
+    pub heroes: bool,
+    /// The camps (`key@XXYY`, or `pack:key@XXYY`) whose last creature to die it runs only for a
+    /// player who harmed, or whose fellow harmed.
+    pub fought: Vec<String>,
+    /// The orders of uses keeping their own count it waits on.
+    pub sequences: Vec<yalain_content::item_rows::SequenceGate>,
+    /// What it adds to a `[[tally]]` as it runs (boxed: few steps add).
+    pub adds: Option<Box<yalain_content::tallies::Adds>>,
     /// The items it takes from the player's pack, which the player must hold.
     pub takes: Vec<u32>,
     /// The place it takes the player to, its update made on arrival.
@@ -506,6 +558,8 @@ pub struct Step {
     pub races: Vec<u32>,
     /// Its effects come after its update, not before it.
     pub effects_last: bool,
+    /// Its effects tell no line of their own; its text is still told.
+    pub effects_quiet: bool,
     /// Its update is made for each of the player's fellows as well.
     pub fellows: bool,
     /// For a give, exactly how many of the item it wants (none: whatever is given).
@@ -515,8 +569,17 @@ pub struct Step {
     pub most_level: Option<i32>,
     /// It pays this share of what the player's level takes to reach the next, whole.
     pub xp_share: Option<f64>,
-    /// For a give, it makes its player a hero, after this transformation.
-    pub transforms: Option<yalain_content::quests::Transformation>,
+    /// For a give, it makes its player a hero, after this transformation (boxed: few steps have
+    /// one).
+    pub transforms: Option<Box<yalain_content::quests::Transformation>>,
+    /// The chance it runs each time it may, above 0 and at most 1 (none: every time).
+    pub chance: Option<f64>,
+    /// The creature it sets to follow its player for the quest (boxed: few steps have one).
+    pub escort: Option<Box<yalain_content::escorts::Escort>>,
+    /// Where it takes the player, the player's fellows in the world go too.
+    pub to_fellows: bool,
+    /// For a give of an item it hands back, the effects it puts on that item (their saved states).
+    pub given_effects: Vec<u32>,
     pub prov: Prov,
 }
 
@@ -528,21 +591,42 @@ pub struct Give {
     pub to: u32,
     /// The template of the item given (none: any item).
     pub item: Option<u32>,
+    /// A class (a script package, by number) of the items it takes, any template of which counts.
+    pub item_class: Option<u32>,
     /// Exactly how many of the item it wants (none: whatever is given).
     pub wants: Option<u32>,
     /// The items it gives back in its place.
     pub gives: Vec<u32>,
     /// How many of each item given, in order (1 when left out).
     pub counts: Vec<u32>,
+    /// One more item it gives, one of these templates picked by weight (none: no such item).
+    pub gives_one_of: Vec<(u32, u32)>,
     /// The effects it puts on the player (their saved states), and a text shown after them.
     pub effects: Vec<u32>,
     pub text: Option<StrRef>,
+    /// Its effects tell no line of their own; its text is still told.
+    pub effects_quiet: bool,
     /// What the person or the object plays as it takes the item.
     pub fx: Option<u32>,
     /// The quests it requires.
     pub requires: Vec<(u32, Need)>,
+    /// The `[[tally]]`s it takes the item only while they are full, or not yet full.
+    pub tallies: Vec<yalain_content::tallies::Gate>,
     /// The kingdom it takes the item from alone (a player in none counting as of the neutral one).
     pub kingdom: Option<u32>,
+    /// The craft skills it takes the item for only at a level (any one of a gate's skills at it).
+    pub crafts: Vec<yalain_content::crafts::CraftGate>,
+    /// It takes the item only from a player with an untraining under way.
+    pub untraining: bool,
+    /// It takes the item only from a hero.
+    pub heroes: bool,
+    /// The camps whose last creature to die it takes the item only from a player who harmed, or
+    /// whose fellow harmed.
+    pub fought: Vec<String>,
+    /// The orders of uses keeping their own count it waits on.
+    pub sequences: Vec<yalain_content::item_rows::SequenceGate>,
+    /// What it adds to a `[[tally]]` as it takes the item.
+    pub adds: Option<yalain_content::tallies::Adds>,
     pub prov: Prov,
 }
 
@@ -566,6 +650,13 @@ pub struct Talk {
     pub phase: Option<u32>,
     pub item: Option<u32>,
     pub order: Option<u32>,
+    /// The `[[tally]]`s it is said only while they are full, or not yet full.
+    pub requires: Vec<yalain_content::tallies::Gate>,
+    /// The `[[tally]]` whose count, as a percent, is its one variable.
+    pub fills: Option<String>,
+    /// What is said in its place once that tally is full.
+    pub full_line: Option<StrRef>,
+    pub full_line_text: Option<String>,
     pub prov: Prov,
 }
 
@@ -592,9 +683,11 @@ pub enum Row {
     Camp(Camp),
     Loot(Loot),
     Keeper(Keeper),
+    Store(Store),
     Sale(Sale),
     Quest(Quest),
-    Step(Step),
+    /// Boxed: a step is the largest row by far.
+    Step(Box<Step>),
     Give(Give),
     Place(Place),
     Talk(Talk),
@@ -616,6 +709,7 @@ pub enum Row {
     TreasurePool(TreasurePool),
     EffectName(EffectName),
     Event(Event),
+    Tally(Tally),
     PointsBonus(PointsBonus),
     Popup(Popup),
     EffectRule(EffectRule),
@@ -631,13 +725,25 @@ pub enum Row {
     ItemUse(ItemUse),
     Book(Book),
     StartItem(StartItem),
+    Interaction(Interaction),
+    ObjectStates(ObjectStatesRow),
+    Sequence(SequenceRow),
+    Lever(LeverRow),
+    Offering(OfferingRow),
+    Guarded(GuardedRow),
+    Shifting(ShiftingRow),
     MapRecipes(MapRecipes),
     Spellbinding(Spellbinding),
     Refining(Refining),
+    Recipe(Recipe),
+    Combination(Combination),
     Concealing(Concealing),
     NpcTable(NpcTable),
     FriendTable(FriendTable),
     Creature(Creature),
+    SafePassage(SafePassageRow),
+    CreatureEffect(CreatureEffectRow),
+    Defense(DefenseRow),
     Plant(Plant),
     PlantCross(PlantCross),
     Worn(WornRow),
@@ -666,21 +772,55 @@ pub struct NpcTable {
 }
 
 /// `[[friend_table]]`: what the world says of the creatures of a friend table: whether they may
-/// attack a player first.
+/// attack a player first, and the friend tables whose creatures they take on.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FriendTable {
     pub table: u32,
-    pub attacks_first: bool,
+    pub attacks_first: Option<bool>,
+    pub fights: Vec<u32>,
     pub prov: Prov,
 }
 
 /// `[[creature]]`: what the world says of the creatures of a template: its shooting rhythm, the
 /// gap between its shots times its shot's time scale and its windup before a missile leaves at the
-/// creatures' median time scale, in seconds.
+/// creatures' median time scale, in seconds; the effect it puts on a player that comes within its
+/// perception, with its lines for that by race; whether it takes on only the players it hates;
+/// whether players may not harm it, with the line a player's attack on it is told.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Creature {
     pub template: u32,
     pub rhythm: Option<yalain_content::creature_rows::Rhythm>,
+    pub marks: Option<yalain_content::creature_rows::Mark>,
+    pub only_hated: bool,
+    pub players_kept_out: bool,
+    pub kept_out_line: Option<StrRef>,
+    pub prov: Prov,
+}
+
+/// `[[safe_passage]]`: creatures that let pass a player holding an item or bearing an effect,
+/// sparing it as a concealing effect's class does: a camp's (`key@XXYY`, or `pack:key@XXYY`), or
+/// every creature of a template; an item's template (in the pack or worn), or an effect's saved
+/// state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SafePassageRow {
+    pub key: String,
+    pub camp: Option<String>,
+    pub template: Option<u32>,
+    pub item: Option<u32>,
+    pub effect: Option<u32>,
+    pub prov: Prov,
+}
+
+/// `[[creature_effect]]`: an effect creatures of these templates hold from their first moment, for
+/// as long as they stand, at a spellcraft by the creature's level (points `[level, spellcraft]`
+/// read along the line between them, held at the ends; a number is the same at every level; none:
+/// 1).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreatureEffectRow {
+    pub key: String,
+    pub templates: Vec<u32>,
+    pub effect: u32,
+    pub spellcraft: Vec<(f32, f32)>,
     pub prov: Prov,
 }
 
@@ -692,8 +832,17 @@ pub struct Event {
     pub key: String,
     /// The install's game event it stands for (a value of its game-event enumeration).
     pub game_event: Option<u32>,
+    /// Its windows; none for an event a `[[tally]]` alone starts.
     pub when: Vec<yalain_content::events::Window>,
     pub on_players: Vec<u32>,
+    pub prov: Prov,
+}
+
+/// `[[tally]]`: a count the whole world keeps, which steps and gives fill: when it is full, what
+/// it starts then, when it goes back to nothing, and what goes with it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tally {
+    pub tally: yalain_content::tallies::Tally,
     pub prov: Prov,
 }
 
@@ -720,19 +869,69 @@ pub struct Popup {
     pub prov: Prov,
 }
 
+/// What a step's or a give's `requires` names: other quests, the `[[event]]`s that must be on, the
+/// one kingdom it is for, the acts that must be whole, the craft skills it waits on, whether it
+/// waits on an untraining under way, whether it is for heroes alone, the orders of uses it waits
+/// on and the camps whose last creature's death it waits on its player having fought.
+struct Requires {
+    quests: Vec<(u32, Need)>,
+    events: Vec<String>,
+    tallies: Vec<yalain_content::tallies::Gate>,
+    kingdom: Option<u32>,
+    acts: Vec<u32>,
+    crafts: Vec<yalain_content::crafts::CraftGate>,
+    untraining: bool,
+    heroes: bool,
+    sequences: Vec<yalain_content::item_rows::SequenceGate>,
+    fought: Vec<String>,
+}
+
 /// `[[effect_rule]]`: what the world says of an effect where its own data says nothing: what a ward
-/// keeps off, the share of its player's vitae it takes, the effect an immunity leaves as it ends.
+/// keeps off, the share of its player's vitae it takes, the effect an immunity leaves as it ends,
+/// the complete reset of skills it grants, the untraining it finishes, the skill it trains, the
+/// items it gives, the effects it dispels.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectRule {
-    /// The effect, by its saved state.
-    pub effect: u32,
+    /// The effect, by its saved state, or by its name for one the install holds no state of.
+    pub effect: EffectOf,
     pub ward: Option<yalain_content::effect_rules::Ward>,
     pub vitae_share: Option<f32>,
     /// The vitae it gives back, and to whom.
     pub vitae_restore: Option<yalain_content::effect_rules::VitaeRestore>,
     /// The effect is an immunity under way, which leaves this one (by its saved state) as it ends.
     pub then: Option<u32>,
+    /// The kind of skills a complete reset it grants gives back.
+    pub reset: Option<yalain_content::effect_rules::Reset>,
+    /// It finishes its player's untraining under way at once.
+    pub untrains: bool,
+    /// The skill it trains its player for good, by its number.
+    pub skill: Option<u32>,
+    /// The items it gives its player: a template and how many.
+    pub gives: Option<yalain_content::effect_rules::Grant>,
+    /// What it places in the world at its player.
+    pub places: Option<yalain_content::effect_rules::Placing>,
+    /// The effects it takes off what it is put on (their saved states).
+    pub dispels: Vec<u32>,
     pub prov: Prov,
+}
+
+/// The effect an `[[effect_rule]]` is of: a saved state of the install, or a name the install's
+/// templates give an effect it holds no state of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectOf {
+    State(u32),
+    Name(String),
+}
+
+impl EffectOf {
+    /// Its saved state, when it has one.
+    #[must_use]
+    pub fn state(&self) -> Option<u32> {
+        match self {
+            Self::State(s) => Some(*s),
+            Self::Name(_) => None,
+        }
+    }
 }
 
 /// `[[mine]]`: what a mining craft skill's nodes play, answer and unearth, and the node a delving
@@ -767,16 +966,34 @@ pub struct Spellbinding {
     pub prov: Prov,
 }
 
-/// `[[refining]]`: what a refining recipe yields, by its script package, and the craft skill level
-/// at which it yields all it takes.
+/// `[[refining]]`: what a refining recipe yields, by its script package, the craft skill level at
+/// which it yields all it takes, and the percent of it it yields before any skill.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Refining {
     pub refining: yalain_content::crafts::Refining,
     pub prov: Prov,
 }
 
-/// `[[plant]]`: a species of dye plant: the plant its seed plants, the seed, its pollen and the
-/// pollen's name among the plants' texts, and the plant item a harvest gives.
+/// `[[recipe]]`: a recipe the world defines where the install holds none, made from an install
+/// recipe: its id (one of the world's recipes' saved states, [`auberean_pack::WORLD_RECIPES`]), the
+/// recipe it is made from, its name, description, slots and product.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Recipe {
+    pub recipe: yalain_content::crafts::Recipe,
+    pub prov: Prov,
+}
+
+/// `[[combination]]`: what a recipe that works out its own product makes of one set of
+/// ingredients: the recipe, the templates its slots hold (in any order), and the product, how many.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Combination {
+    pub combination: yalain_content::crafts::Combination,
+    pub prov: Prov,
+}
+
+/// `[[plant]]`: a species of plant: the plant its seed plants, the seed, its pollen and the pollen's
+/// name among the plants' texts, the plant item a harvest gives, how many one seed plants, when they
+/// are ripe, whether they need care, and where their lines are.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plant {
     pub species: yalain_content::plants::Species,
@@ -832,17 +1049,32 @@ pub struct Area {
     pub prov: Prov,
 }
 
-/// `[[death_spawn]]`: what a creature's death effect makes around its killer.
+/// `[[death_spawn]]`: what a creature's death effect makes around its killer, or an item's use effect
+/// before its user: creatures, or a portal.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeathSpawn {
-    /// The death effect, as a creature's template names it.
+    /// The death effect, as a creature's template names it; for a creature's own row, its template
+    /// as [`yalain_content::DeathSpawn::of_creature`] writes it.
     pub effect: String,
+    /// The creature whose death makes it, for a creature's own row.
+    pub creature: Option<u32>,
     pub template: u32,
     pub count: u32,
     pub chance: f32,
     pub offset: At,
-    /// How long each stands, in seconds; it stays until killed when left out.
+    /// The place (a `[[place]]` key) each stands at, for a creature's own row.
+    pub at: Option<String>,
+    /// The place a portal it makes leads to.
+    pub to: Option<String>,
+    /// How long each stands, in seconds; it stays until killed when left out (a portal until the
+    /// server stops).
     pub lasts: Option<f32>,
+    /// The kingdom a player must be of to use a portal it makes, as a description's faction names
+    /// it.
+    pub kingdom: Option<u32>,
+    /// The name what it makes is shown and examined by (`name`, a string reference, else
+    /// `name_text`), in place of its template's.
+    pub name: Option<yalain_content::Words>,
     pub prov: Prov,
 }
 
@@ -857,6 +1089,11 @@ pub struct DeathTreasure {
     pub camp: Option<String>,
     pub item: u32,
     pub chance: f32,
+    /// The quest a chest's opener must hold, and where, for the chest to hold it at that opening,
+    /// or a creature's corpse once for each of its killer and the killer's fellows holding it there:
+    /// `{ quest, phase }`, `{ quest, underway = true }`, `{ quest, done = true }` or
+    /// `{ quest, had = true }`.
+    pub requires: Option<(u32, Gate)>,
     pub prov: Prov,
 }
 
@@ -991,6 +1228,107 @@ pub struct StartItem {
     pub prov: Prov,
 }
 
+/// `[[interaction]]`: what an item used on another makes, where the item's interaction table lets
+/// it be used so and the table's outcome names nothing made: the item used, what it is used on (a
+/// template, or a class the table names), and what it gives the user, how many, and instead where
+/// the table's interaction the use met is for some characters only. What it gives is one template,
+/// or one of several picked by weight (`gives_one_of`), each with its weight (1 for `gives`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Interaction {
+    pub key: String,
+    pub item: u32,
+    pub on: yalain_content::item_rows::On,
+    pub gives: Vec<(u32, u32)>,
+    /// None: `gives`.
+    pub gated_gives: Vec<(u32, u32)>,
+    pub count: u32,
+    /// What it makes at the object it was used on.
+    pub places: Vec<yalain_content::effect_rules::Placing>,
+    pub prov: Prov,
+}
+
+/// `[[object_states]]`: the states the world's objects of some templates hold, each object's first,
+/// what items given change and when an object goes back to its first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjectStatesRow {
+    pub states: yalain_content::item_rows::ObjectStates,
+    pub prov: Prov,
+}
+
+/// `[[sequence]]`: uses in an order judged against the used objects' states, the quest whose phase
+/// counts them, what the object used says at a right use and a wrong one, and the place its last
+/// right use takes the player to (`key`, or `pack:key` in another pack).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SequenceRow {
+    pub sequence: yalain_content::item_rows::Sequence,
+    /// The placed object each use names (`key@XXYY`), where it names one in place of a template.
+    pub objects: Vec<Option<String>>,
+    pub to: Option<String>,
+    pub prov: Prov,
+}
+
+/// `[[lever]]`: placed objects whose pulls open doors: its levers and the doors they open (each
+/// `key@XXYY`, or `pack:key@XXYY` in another pack), how long the doors stay open (until a use closes
+/// them when left out) and how long a pull waits for the others (for as long as it takes when left
+/// out).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LeverRow {
+    pub key: String,
+    pub levers: Vec<String>,
+    pub opens: Vec<String>,
+    pub open_for: Option<f64>,
+    pub within: Option<f64>,
+    pub prov: Prov,
+}
+
+/// `[[offering]]`: a placed object that takes a set of items: the object (`key@XXYY`, or
+/// `pack:key@XXYY`), each item with the placed object that stands while it is held, the placed
+/// objects that stand once it holds the whole set, and for how many seconds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OfferingRow {
+    pub key: String,
+    pub object: String,
+    pub takes: Vec<(u32, Option<String>)>,
+    pub opens: Vec<String>,
+    pub lasts: u32,
+    pub prov: Prov,
+}
+
+/// `[[defense]]`: a device creatures come to attack while it stands, and what it leaves once it has
+/// stood long enough.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DefenseRow {
+    pub defense: yalain_content::defenses::Defense,
+    pub prov: Prov,
+}
+
+/// `[[guarded]]`: placed objects usable only while every creature of a camp is dead: the camp
+/// (`key@XXYY`, or `pack:key@XXYY`), the objects (named so too), the line an object says to a use
+/// it refuses, whether the objects stand only while the camp's creatures are dead, and how long a
+/// use takes an object from the world.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuardedRow {
+    pub key: String,
+    pub camp: String,
+    pub objects: Vec<String>,
+    pub refused: Option<StrRef>,
+    pub hidden: bool,
+    pub gone_for: Option<f64>,
+    pub prov: Prov,
+}
+
+/// `[[shifting]]`: placed objects of which one stands at a time, moving to another after each use:
+/// the objects (`key@XXYY`, or `pack:key@XXYY`), how long none stands after a use, and how long one
+/// stands unused before it moves on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShiftingRow {
+    pub key: String,
+    pub objects: Vec<String>,
+    pub gone_for: Option<f64>,
+    pub moves_after: Option<f64>,
+    pub prov: Prov,
+}
+
 /// `[[tool]]`: what a gathering tool yields when it was not made (a made one's yield is its own).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tool {
@@ -1061,6 +1399,7 @@ impl Row {
             Self::Camp(_) => "camp",
             Self::Loot(_) => "loot",
             Self::Keeper(_) => "keeper",
+            Self::Store(_) => "store",
             Self::Sale(_) => "sale",
             Self::Quest(_) => "quest",
             Self::Step(_) => "step",
@@ -1084,6 +1423,7 @@ impl Row {
             Self::TreasurePool(_) => "treasure_pool",
             Self::EffectName(_) => "effect_name",
             Self::Event(_) => "event",
+            Self::Tally(_) => "tally",
             Self::PointsBonus(_) => "points_bonus",
             Self::Popup(_) => "popup",
             Self::EffectRule(_) => "effect_rule",
@@ -1099,13 +1439,25 @@ impl Row {
             Self::ItemUse(_) => "item_use",
             Self::Book(_) => "book",
             Self::StartItem(_) => "start_item",
+            Self::Interaction(_) => "interaction",
+            Self::ObjectStates(_) => "object_states",
+            Self::Sequence(_) => "sequence",
+            Self::Lever(_) => "lever",
+            Self::Offering(_) => "offering",
+            Self::Guarded(_) => "guarded",
+            Self::Shifting(_) => "shifting",
             Self::MapRecipes(_) => "map_recipes",
             Self::Spellbinding(_) => "spellbinding",
             Self::Refining(_) => "refining",
+            Self::Recipe(_) => "recipe",
+            Self::Combination(_) => "combination",
             Self::Concealing(_) => "concealing",
             Self::NpcTable(_) => "npc_table",
             Self::FriendTable(_) => "friend_table",
             Self::Creature(_) => "creature",
+            Self::SafePassage(_) => "safe_passage",
+            Self::CreatureEffect(_) => "creature_effect",
+            Self::Defense(_) => "defense",
             Self::Plant(_) => "plant",
             Self::PlantCross(_) => "plant_cross",
             Self::Worn(_) => "worn",
@@ -1120,6 +1472,7 @@ impl Row {
             Self::Camp(r) => Some(&r.prov),
             Self::Loot(r) => Some(&r.prov),
             Self::Keeper(r) => Some(&r.prov),
+            Self::Store(r) => Some(&r.prov),
             Self::Sale(r) => Some(&r.prov),
             Self::Quest(r) => Some(&r.prov),
             Self::Step(r) => Some(&r.prov),
@@ -1142,6 +1495,7 @@ impl Row {
             Self::TreasurePool(r) => Some(&r.prov),
             Self::EffectName(r) => Some(&r.prov),
             Self::Event(r) => Some(&r.prov),
+            Self::Tally(r) => Some(&r.prov),
             Self::PointsBonus(r) => Some(&r.prov),
             Self::Popup(r) => Some(&r.prov),
             Self::EffectRule(r) => Some(&r.prov),
@@ -1157,13 +1511,25 @@ impl Row {
             Self::ItemUse(r) => Some(&r.prov),
             Self::Book(r) => Some(&r.prov),
             Self::StartItem(r) => Some(&r.prov),
+            Self::Interaction(r) => Some(&r.prov),
+            Self::ObjectStates(r) => Some(&r.prov),
+            Self::Sequence(r) => Some(&r.prov),
+            Self::Lever(r) => Some(&r.prov),
+            Self::Offering(r) => Some(&r.prov),
+            Self::Guarded(r) => Some(&r.prov),
+            Self::Shifting(r) => Some(&r.prov),
             Self::MapRecipes(r) => Some(&r.prov),
             Self::Spellbinding(r) => Some(&r.prov),
             Self::Refining(r) => Some(&r.prov),
+            Self::Recipe(r) => Some(&r.prov),
+            Self::Combination(r) => Some(&r.prov),
             Self::Concealing(r) => Some(&r.prov),
             Self::NpcTable(r) => Some(&r.prov),
             Self::FriendTable(r) => Some(&r.prov),
             Self::Creature(r) => Some(&r.prov),
+            Self::SafePassage(r) => Some(&r.prov),
+            Self::CreatureEffect(r) => Some(&r.prov),
+            Self::Defense(r) => Some(&r.prov),
             Self::Plant(r) => Some(&r.prov),
             Self::PlantCross(r) => Some(&r.prov),
             Self::Worn(r) => Some(&r.prov),
@@ -1173,11 +1539,12 @@ impl Row {
 }
 
 /// The record kinds, as their tables are written.
-pub const KINDS: [&str; 52] = [
+pub const KINDS: [&str; 66] = [
     "object",
     "camp",
     "loot",
     "keeper",
+    "store",
     "sale",
     "quest",
     "step",
@@ -1201,6 +1568,7 @@ pub const KINDS: [&str; 52] = [
     "treasure_pool",
     "effect_name",
     "event",
+    "tally",
     "points_bonus",
     "popup",
     "effect_rule",
@@ -1216,20 +1584,32 @@ pub const KINDS: [&str; 52] = [
     "item_use",
     "book",
     "start_item",
+    "interaction",
+    "object_states",
+    "sequence",
+    "lever",
+    "offering",
+    "guarded",
+    "shifting",
     "map_recipes",
     "spellbinding",
     "refining",
+    "recipe",
+    "combination",
     "concealing",
     "npc_table",
     "friend_table",
     "creature",
+    "safe_passage",
+    "creature_effect",
+    "defense",
     "plant",
     "plant_cross",
     "worn",
 ];
 
 /// Each record kind's fields.
-pub const FIELDS: [(&str, &[&str]); 52] = [
+pub const FIELDS: [(&str, &[&str]); 66] = [
     (
         "object",
         &[
@@ -1308,7 +1688,18 @@ pub const FIELDS: [(&str, &[&str]); 52] = [
     ),
     (
         "keeper",
-        &["template", "store", "greeting", "greeting_text", "prov"],
+        &[
+            "template",
+            "store",
+            "shop",
+            "greeting",
+            "greeting_text",
+            "prov",
+        ],
+    ),
+    (
+        "store",
+        &["key", "from", "name_text", "description_text", "prov"],
     ),
     (
         "sale",
@@ -1347,8 +1738,11 @@ pub const FIELDS: [(&str, &[&str]); 52] = [
             "visible",
             "min_level",
             "fails_on_death",
+            "fails_on_logout",
+            "fails_on_teleport",
             "once",
             "fellows",
+            "companion_of",
             "prov",
         ],
     ),
@@ -1366,26 +1760,47 @@ pub const FIELDS: [(&str, &[&str]); 52] = [
             "xp",
             "gives",
             "counts",
+            "gives_one_of",
             "effects",
             "text",
+            "recipes",
             "requires",
             "takes",
             "to",
             "races",
             "effects_last",
+            "effects_quiet",
             "fellows",
             "wants",
             "least_level",
             "most_level",
             "xp_share",
             "transforms",
+            "chance",
+            "adds",
+            "escort",
+            "to_fellows",
+            "given_effects",
             "prov",
         ],
     ),
     (
         "give",
         &[
-            "key", "to", "item", "wants", "gives", "counts", "effects", "text", "fx", "requires",
+            "key",
+            "to",
+            "item",
+            "item_class",
+            "wants",
+            "gives",
+            "counts",
+            "gives_one_of",
+            "effects",
+            "text",
+            "effects_quiet",
+            "fx",
+            "requires",
+            "adds",
             "prov",
         ],
     ),
@@ -1421,6 +1836,10 @@ pub const FIELDS: [(&str, &[&str]); 52] = [
             "phase",
             "item",
             "order",
+            "requires",
+            "fills",
+            "full_line",
+            "full_line_text",
             "prov",
         ],
     ),
@@ -1462,7 +1881,19 @@ pub const FIELDS: [(&str, &[&str]); 52] = [
     (
         "death_spawn",
         &[
-            "effect", "template", "count", "chance", "offset", "lasts", "prov",
+            "effect",
+            "creature",
+            "template",
+            "count",
+            "chance",
+            "offset",
+            "at",
+            "to",
+            "lasts",
+            "kingdom",
+            "name",
+            "name_text",
+            "prov",
         ],
     ),
     (
@@ -1497,7 +1928,9 @@ pub const FIELDS: [(&str, &[&str]); 52] = [
     ("pet_limit", &["skill", "limits", "prov"]),
     (
         "death_treasure",
-        &["key", "template", "camp", "item", "chance", "prov"],
+        &[
+            "key", "template", "camp", "item", "chance", "requires", "prov",
+        ],
     ),
     (
         "treasure_pool",
@@ -1507,6 +1940,10 @@ pub const FIELDS: [(&str, &[&str]); 52] = [
     (
         "event",
         &["key", "game_event", "when", "on_players", "prov"],
+    ),
+    (
+        "tally",
+        &["key", "full", "starts", "resets", "clears", "prov"],
     ),
     ("points_bonus", &["effect", "add", "up_to", "prov"]),
     ("popup", &["on", "effect", "prov"]),
@@ -1518,6 +1955,17 @@ pub const FIELDS: [(&str, &[&str]); 52] = [
             "vitae_share",
             "vitae_restore",
             "then",
+            "reset",
+            "untrains",
+            "skill",
+            "gives",
+            "count",
+            "places",
+            "offset",
+            "lasts",
+            "name",
+            "name_text",
+            "dispels",
             "prov",
         ],
     ),
@@ -1526,6 +1974,7 @@ pub const FIELDS: [(&str, &[&str]); 52] = [
         "treasure_rules",
         &[
             "above_base",
+            "above_base_override",
             "most_level",
             "lore",
             "potion_tiers",
@@ -1584,18 +2033,149 @@ pub const FIELDS: [(&str, &[&str]); 52] = [
     ("book", &["template", "table", "picture", "prov"]),
     ("start_item", &["template", "count", "prov"]),
     (
+        "interaction",
+        &[
+            "key",
+            "item",
+            "on",
+            "on_class",
+            "gives",
+            "gives_one_of",
+            "gated_gives",
+            "gated_gives_one_of",
+            "count",
+            "places",
+            "prov",
+        ],
+    ),
+    (
+        "object_states",
+        &["key", "templates", "states", "reverts", "changes", "prov"],
+    ),
+    (
+        "sequence",
+        &[
+            "key",
+            "quest",
+            "uses",
+            "forgets_after",
+            "wrong_starts_over",
+            "right",
+            "wrong",
+            "to",
+            "prov",
+        ],
+    ),
+    (
+        "lever",
+        &["key", "levers", "opens", "open_for", "within", "prov"],
+    ),
+    (
+        "offering",
+        &["key", "object", "takes", "opens", "lasts", "prov"],
+    ),
+    (
+        "guarded",
+        &[
+            "key", "camp", "objects", "refused", "hidden", "gone_for", "prov",
+        ],
+    ),
+    (
+        "shifting",
+        &["key", "objects", "gone_for", "moves_after", "prov"],
+    ),
+    (
         "map_recipes",
         &["region", "drawn", "found", "recipes", "wait", "prov"],
     ),
     ("spellbinding", &["sort", "template", "word", "prov"]),
-    ("refining", &["recipe", "product", "full_at", "prov"]),
+    (
+        "refining",
+        &["recipe", "product", "full_at", "start", "prov"],
+    ),
+    (
+        "recipe",
+        &[
+            "recipe",
+            "like",
+            "name",
+            "description",
+            "ingredients",
+            "product",
+            "count",
+            "skill",
+            "category",
+            "prov",
+        ],
+    ),
+    (
+        "combination",
+        &["key", "recipe", "items", "product", "count", "prov"],
+    ),
     ("concealing", &["effect", "class", "regard", "prov"]),
     ("npc_table", &["name", "heals_kin", "prov"]),
-    ("friend_table", &["table", "attacks_first", "prov"]),
-    ("creature", &["template", "shot_gap", "windup", "prov"]),
+    (
+        "friend_table",
+        &["table", "attacks_first", "fights", "prov"],
+    ),
+    (
+        "creature",
+        &[
+            "template",
+            "shot_gap",
+            "windup",
+            "marks",
+            "mark_lines",
+            "only_hated",
+            "players_kept_out",
+            "kept_out_line",
+            "prov",
+        ],
+    ),
+    (
+        "safe_passage",
+        &["key", "camp", "template", "item", "effect", "prov"],
+    ),
+    (
+        "creature_effect",
+        &["key", "templates", "effect", "spellcraft", "prov"],
+    ),
+    (
+        "defense",
+        &[
+            "device",
+            "holds",
+            "spawns",
+            "population",
+            "regen",
+            "radius",
+            "then",
+            "then_lasts",
+            "then_name",
+            "then_name_text",
+            "says",
+            "hurt_line",
+            "held_line",
+            "prov",
+        ],
+    ),
     (
         "plant",
-        &["plant", "seed", "pollen", "name", "harvest", "prov"],
+        &[
+            "plant",
+            "seed",
+            "pollen",
+            "name",
+            "harvest",
+            "count",
+            "ripe",
+            "tended",
+            "water",
+            "fertilizer",
+            "garden",
+            "texts",
+            "prov",
+        ],
     ),
     (
         "plant_cross",
@@ -1683,6 +2263,136 @@ pub fn read(files: &Files) -> Result<Database, Vec<Problem>> {
 /// have a problem, `None` when its world file does not read, and every problem found, sorted.
 #[must_use]
 pub fn read_partly(files: &Files) -> (Option<Database>, Vec<Problem>) {
+    let (read, problems) = read_files(files, read_rows);
+    (
+        read.map(|(world, packs)| Database { world, packs }),
+        problems,
+    )
+}
+
+/// A database read for its layout alone: its world file, each pack's header, and its rows counted
+/// by the table they are written in and by provenance, without reading what a row says. A release
+/// packaged from it is the same as one packaged from the database read in full.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Layout {
+    pub world: World,
+    /// Each pack's header, in load order, with no rows.
+    pub packs: Vec<Pack>,
+    /// Rows by kind: the table each is written in.
+    pub rows: BTreeMap<String, usize>,
+    /// Rows by provenance: its source, and a capture's by its confidence too (`capture high`).
+    /// Removals are not counted here.
+    pub provenance: BTreeMap<String, usize>,
+}
+
+impl Database {
+    /// The database's layout: its world file, its packs' headers, and its rows counted.
+    #[must_use]
+    pub fn layout(&self) -> Layout {
+        let mut rows: BTreeMap<String, usize> = BTreeMap::new();
+        let mut provenance: BTreeMap<String, usize> = BTreeMap::new();
+        for l in self.rows() {
+            *rows.entry(l.row.kind().to_string()).or_default() += 1;
+            if let Row::Remove(_) = l.row {
+                continue;
+            }
+            if let Some(p) = l.row.prov() {
+                *provenance.entry(prov_count_key(p)).or_default() += 1;
+            }
+        }
+        Layout {
+            world: self.world.clone(),
+            packs: self
+                .packs
+                .iter()
+                .map(|p| Pack {
+                    rows: Vec::new(),
+                    ..p.clone()
+                })
+                .collect(),
+            rows,
+            provenance,
+        }
+    }
+}
+
+/// What a row's provenance is counted under: its source, and a capture's confidence with it.
+fn prov_count_key(p: &Prov) -> String {
+    match (p.source, p.confidence) {
+        (Source::Capture, Some(c)) => format!("capture {}", c.word()),
+        (f, _) => f.word().to_string(),
+    }
+}
+
+/// Read a database's files for their layout alone: the world file, the lockfile and each pack's
+/// header in the shared grammar, every pack file as TOML of tables of rows, and each row's
+/// provenance, where it gives one. A kind or a field this server does not know is no problem: it
+/// is counted as written.
+///
+/// # Errors
+/// Every problem found: no world file, a world, lockfile or pack header that does not read, a pack
+/// file that is not TOML, a table that is not of rows, a row that is not a table, a provenance that
+/// does not read.
+pub fn read_layout(files: &Files) -> Result<Layout, Vec<Problem>> {
+    let mut rows: BTreeMap<String, usize> = BTreeMap::new();
+    let mut provenance: BTreeMap<String, usize> = BTreeMap::new();
+    let read = read_files(files, |_, path, text, t, problems| {
+        let lines = header_lines(text);
+        for (kind, v) in t {
+            let Some(items) = v.as_array() else {
+                problems.push(Problem::new(
+                    path,
+                    0,
+                    format!("{kind} is not a table of rows ([[{kind}]])"),
+                ));
+                continue;
+            };
+            for (i, item) in items.iter().enumerate() {
+                let line = lines.get(kind).and_then(|l| l.get(i)).copied().unwrap_or(0);
+                let Some(table) = item.as_table() else {
+                    problems.push(Problem::new(
+                        path,
+                        line,
+                        format!("a [[{kind}]] row is not a table"),
+                    ));
+                    continue;
+                };
+                *rows.entry(kind.clone()).or_default() += 1;
+                let Some(prov) = table.get("prov") else {
+                    continue;
+                };
+                match prov.clone().try_into::<Prov>() {
+                    Ok(p) if kind != "remove" => {
+                        *provenance.entry(prov_count_key(&p)).or_default() += 1;
+                    }
+                    Ok(_) => {}
+                    Err(e) => problems.push(Problem::new(
+                        path,
+                        line,
+                        format!("[[{kind}]] prov: {}", e.message()),
+                    )),
+                }
+            }
+        }
+    });
+    match read {
+        (Some((world, packs)), problems) if problems.is_empty() => Ok(Layout {
+            world,
+            packs,
+            rows,
+            provenance,
+        }),
+        (_, problems) => Err(problems),
+    }
+}
+
+/// Read the world file, the lockfile and each pack's header, and hand every TOML file of each
+/// pack's `server/` folder, parsed, to `each`: the world and its packs in load order (`None` when
+/// the world file does not read), and every problem found, sorted.
+fn read_files(
+    files: &Files,
+    mut each: impl FnMut(&mut Pack, &str, &str, &toml::Table, &mut Vec<Problem>),
+) -> (Option<(World, Vec<Pack>)>, Vec<Problem>) {
     let mut problems = Vec::new();
     let Some(text) = files.get("world.toml") else {
         return (
@@ -1697,9 +2407,16 @@ pub fn read_partly(files: &Files) -> (Option<Database>, Vec<Problem>) {
     let Some(world) = read_world(text, &mut problems) else {
         return (None, problems);
     };
+    let mut world = world;
     if let Some(lock) = files.get("world.lock") {
-        if let Err(e) = dereth_pack::Lock::<Ac2>::parse(Path::new("world.lock"), lock) {
-            problems.push(problem(&e));
+        match dereth_pack::Lock::<Ac2>::parse(Path::new("world.lock"), lock) {
+            Ok(lock) => {
+                world.stores = lock
+                    .of(auberean_pack::Kind::Store)
+                    .map(|(key, id)| (key.to_owned(), id))
+                    .collect();
+            }
+            Err(e) => problems.push(problem(&e)),
         }
     }
     let mut packs = Vec::new();
@@ -1739,14 +2456,14 @@ pub fn read_partly(files: &Files) -> (Option<Database>, Vec<Problem>) {
                 continue;
             }
             match parse(path, text) {
-                Ok(t) => read_rows(&mut pack, path, text, &t, &mut problems),
+                Ok(t) => each(&mut pack, path, text, &t, &mut problems),
                 Err(p) => problems.push(p),
             }
         }
         packs.push(pack);
     }
     problems.sort();
-    (Some(Database { world, packs }), problems)
+    (Some((world, packs)), problems)
 }
 
 /// The world file, read in the shared grammar: `None` (with the problem) when it does not read.
@@ -1791,6 +2508,7 @@ fn read_world(text: &str, problems: &mut Vec<Problem>) -> Option<World> {
         packs,
         overrides: w.overrides,
         base: w.base,
+        stores: BTreeMap::new(),
     })
 }
 
@@ -1988,8 +2706,19 @@ fn read_row(kind: &str, f: &mut Fields<'_>) -> Option<Row> {
         "keeper" => Row::Keeper(Keeper {
             template: f.req_id("template")?,
             store: f.id("store"),
+            shop: f.key("shop"),
             greeting: f.strref("greeting"),
             greeting_text: f.text("greeting_text"),
+            prov: f.req_prov()?,
+        }),
+        "store" => Row::Store(Store {
+            key: f.req_symbol("key")?,
+            from: f.req_id("from")?,
+            name_text: match f.get("name_text") {
+                Some(_) => f.text("name_text")?,
+                None => return f.missing("name_text"),
+            },
+            description_text: f.text("description_text"),
             prov: f.req_prov()?,
         }),
         "sale" => Row::Sale(Sale {
@@ -2024,8 +2753,11 @@ fn read_row(kind: &str, f: &mut Fields<'_>) -> Option<Row> {
             visible: f.bool("visible"),
             min_level: f.int("min_level").and_then(|v| i32::try_from(v).ok()),
             fails_on_death: f.bool("fails_on_death"),
+            fails_on_logout: f.bool("fails_on_logout"),
+            fails_on_teleport: f.bool("fails_on_teleport"),
             once: f.bool("once"),
             fellows: f.bool("fellows"),
+            companion_of: f.id("companion_of"),
             prov: f.req_prov()?,
         }),
         "step" => {
@@ -2044,8 +2776,19 @@ fn read_row(kind: &str, f: &mut Fields<'_>) -> Option<Row> {
                     return None;
                 }
             };
-            let (requires, events, kingdom) = f.requires_and_events("requires", true);
-            Row::Step(Step {
+            let Requires {
+                quests: requires,
+                events,
+                tallies,
+                kingdom,
+                acts,
+                crafts,
+                untraining,
+                heroes,
+                sequences,
+                fought,
+            } = f.requires_and_events("requires", true);
+            Row::Step(Box::new(Step {
                 key: f.req_symbol("key")?,
                 quest: f.req_id("quest")?,
                 needs: f.req_u32("needs")?,
@@ -2057,41 +2800,82 @@ fn read_row(kind: &str, f: &mut Fields<'_>) -> Option<Row> {
                 xp: f.int("xp").and_then(|v| u64::try_from(v).ok()),
                 gives: f.ids("gives"),
                 counts: f.ids("counts"),
+                gives_one_of: f.one_of("gives_one_of"),
                 effects: f.ids("effects"),
                 text: f.strref("text"),
+                recipes: f.ids("recipes"),
                 requires,
                 events,
+                tallies,
                 kingdom,
+                acts,
+                crafts,
+                untraining,
+                heroes,
+                sequences,
+                fought,
+                adds: f.adds().map(Box::new),
                 takes: f.ids("takes"),
                 to: f.symbol("to"),
                 races: f.ids("races"),
                 effects_last: f.bool("effects_last").unwrap_or(false),
+                effects_quiet: f.bool("effects_quiet").unwrap_or(false),
                 fellows: f.bool("fellows").unwrap_or(false),
                 wants: f.u32("wants"),
                 least_level: f.int("least_level").and_then(|v| i32::try_from(v).ok()),
                 most_level: f.int("most_level").and_then(|v| i32::try_from(v).ok()),
                 xp_share: f.float("xp_share"),
                 transforms: match f.get("transforms") {
-                    Some(_) => Some(f.transformation()?),
+                    Some(_) => Some(Box::new(f.transformation()?)),
                     None => None,
                 },
+                chance: f.share("chance"),
+                escort: f.escort().map(Box::new),
+                to_fellows: f.bool("to_fellows").unwrap_or(false),
+                given_effects: f.ids("given_effects"),
                 prov: f.req_prov()?,
-            })
+            }))
         }
         "give" => {
-            let (requires, _, kingdom) = f.requires_and_events("requires", false);
+            let Requires {
+                quests: requires,
+                tallies,
+                kingdom,
+                crafts,
+                untraining,
+                heroes,
+                sequences,
+                fought,
+                ..
+            } = f.requires_and_events("requires", false);
+            let item = f.id("item");
+            let item_class = f.u32("item_class");
+            if item.is_some() && item_class.is_some() {
+                f.bad("item_class", "one of item or item_class");
+                return None;
+            }
             Row::Give(Give {
                 key: f.req_symbol("key")?,
                 to: f.req_id("to")?,
-                item: f.id("item"),
+                item,
+                item_class,
                 wants: f.u32("wants"),
                 gives: f.ids("gives"),
                 counts: f.ids("counts"),
+                gives_one_of: f.one_of("gives_one_of"),
                 effects: f.ids("effects"),
                 text: f.strref("text"),
+                effects_quiet: f.bool("effects_quiet").unwrap_or(false),
                 fx: f.id("fx"),
                 requires,
+                tallies,
                 kingdom,
+                crafts,
+                untraining,
+                heroes,
+                sequences,
+                fought,
+                adds: f.adds(),
                 prov: f.req_prov()?,
             })
         }
@@ -2135,6 +2919,10 @@ fn read_row(kind: &str, f: &mut Fields<'_>) -> Option<Row> {
                 phase: f.u32("phase"),
                 item: f.id("item"),
                 order: f.u32("order"),
+                requires: f.tally_gates("requires"),
+                fills: f.key("fills"),
+                full_line: f.strref("full_line"),
+                full_line_text: f.text("full_line_text"),
                 prov: f.req_prov()?,
             })
         }
@@ -2247,6 +3035,294 @@ fn read_row(kind: &str, f: &mut Fields<'_>) -> Option<Row> {
                 prov: f.req_prov()?,
             })
         }
+        "interaction" => {
+            use yalain_content::item_rows::On;
+            let key = f.req_symbol("key")?;
+            let item = f.req_id("item")?;
+            let on = match (f.id("on"), f.u32("on_class")) {
+                (Some(t), None) => On::Template(t),
+                (None, Some(c)) => On::Class(c),
+                _ => {
+                    f.bad("on", "one of on or on_class");
+                    return None;
+                }
+            };
+            let places = match f.get("places") {
+                None => Vec::new(),
+                Some(_) => f.placings("places")?,
+            };
+            let gives = match (f.get("gives").is_some(), f.get("gives_one_of").is_some()) {
+                (true, false) => vec![(f.id("gives")?, 1)],
+                (false, true) => f.one_of("gives_one_of"),
+                (false, false) if !places.is_empty() => Vec::new(),
+                _ => {
+                    f.bad("gives", "one of gives or gives_one_of, or places");
+                    return None;
+                }
+            };
+            let gated_gives = match (
+                f.get("gated_gives").is_some(),
+                f.get("gated_gives_one_of").is_some(),
+            ) {
+                (true, false) => vec![(f.id("gated_gives")?, 1)],
+                (false, true) => f.one_of("gated_gives_one_of"),
+                (false, false) => Vec::new(),
+                (true, true) => {
+                    f.bad("gated_gives", "one of gated_gives or gated_gives_one_of");
+                    return None;
+                }
+            };
+            if gives.is_empty() && places.is_empty() {
+                return None;
+            }
+            let count = f.u32("count").unwrap_or(1);
+            let count = f.held("count", count, count > 0, "above 0")?;
+            Row::Interaction(Interaction {
+                key,
+                item,
+                on,
+                gives,
+                gated_gives,
+                count,
+                places,
+                prov: f.req_prov()?,
+            })
+        }
+        "object_states" => {
+            use yalain_content::item_rows::{ObjectStates, StateChange};
+            let key = f.req_symbol("key")?;
+            let name = |v: &toml::Value| v.as_str().filter(|s| is_symbol(s)).map(str::to_string);
+            let states = match f.get("states") {
+                Some(_) => f.typed(
+                    "states",
+                    "a list of state names (lowercase letters, digits and hyphens)",
+                    |v| v.as_array()?.iter().map(name).collect::<Option<Vec<_>>>(),
+                ),
+                None => f.missing("states"),
+            }?;
+            let ok =
+                states.len() >= 2 && states.iter().collect::<BTreeSet<_>>().len() == states.len();
+            let states = f.held("states", states, ok, "two or more, each named once")?;
+            let templates = f.list_of(
+                "templates",
+                "a list of { template, start }: a template whose objects hold a state, and their first state",
+                &["template", "start"],
+                |t| Some((as_u32(t.get("template")?)?, name(t.get("start")?)?)),
+            );
+            let ok = !templates.is_empty() && templates.iter().all(|(_, s)| states.contains(s));
+            let templates = f.held(
+                "templates",
+                templates,
+                ok,
+                "at least one, each starting in one of the states",
+            )?;
+            let reverts = f.float("reverts");
+            let reverts = f.held(
+                "reverts",
+                reverts,
+                reverts.is_none_or(|r| r > 0.0),
+                "above 0",
+            )?;
+            let changes = f.list_of(
+                "changes",
+                "a list of { item, from, to }: an item given an object in one state puts it in another",
+                &["item", "from", "to"],
+                |t| {
+                    Some(StateChange {
+                        item: as_u32(t.get("item")?)?,
+                        from: name(t.get("from")?)?,
+                        to: name(t.get("to")?)?,
+                    })
+                },
+            );
+            let named = changes
+                .iter()
+                .all(|c| states.contains(&c.from) && states.contains(&c.to));
+            let once = changes
+                .iter()
+                .map(|c| (c.item, &c.from))
+                .collect::<BTreeSet<_>>()
+                .len()
+                == changes.len();
+            let changes = f.held(
+                "changes",
+                changes,
+                named && once,
+                "each from and to one of the states, an item and a state changed once",
+            )?;
+            Row::ObjectStates(ObjectStatesRow {
+                states: ObjectStates {
+                    key,
+                    templates,
+                    states,
+                    reverts,
+                    changes,
+                },
+                prov: f.req_prov()?,
+            })
+        }
+        "sequence" => {
+            let key = f.req_symbol("key")?;
+            let quest = f.id("quest");
+            let forgets_after = f.float("forgets_after");
+            let ok = forgets_after.is_none_or(|t| t > 0.0);
+            let forgets_after = f.held("forgets_after", forgets_after, ok, "above 0")?;
+            if forgets_after.is_some() && quest.is_some() {
+                f.bad(
+                    "forgets_after",
+                    "a count of the row's own is forgotten; a quest's phase is the quest's",
+                );
+                return None;
+            }
+            let uses = f.list_of(
+                "uses",
+                "a list of { use, state } or { object, state }: the template used, or the placed object (key@XXYY), and the state its object must be in (any when left out)",
+                &["use", "object", "state"],
+                |t| {
+                    let state = match t.get("state") {
+                        Some(v) => Some(v.as_str().filter(|s| is_symbol(s))?.to_string()),
+                        None => None,
+                    };
+                    match (t.get("use"), t.get("object")) {
+                        (Some(u), None) => Some((as_u32(u)?, None, state)),
+                        (None, Some(o)) => {
+                            let o = o.as_str().filter(|o| is_reference(o))?.to_string();
+                            Some((0, Some(o), state))
+                        }
+                        _ => None,
+                    }
+                },
+            );
+            let ok = !uses.is_empty();
+            let uses = f.held("uses", uses, ok, "at least one")?;
+            let objects: Vec<Option<String>> = uses.iter().map(|u| u.1.clone()).collect();
+            let uses = uses.into_iter().map(|(t, _, st)| (t, st)).collect();
+            let wrong_starts_over = match f.t.get("wrong_starts_over") {
+                Some(_) => f.bool("wrong_starts_over")?,
+                None => true,
+            };
+            let right = f.strref("right").map(|r| (r.string, r.table));
+            let wrong = f.strref("wrong").map(|r| (r.string, r.table));
+            let to = f.symbol("to");
+            Row::Sequence(SequenceRow {
+                sequence: yalain_content::item_rows::Sequence {
+                    key,
+                    quest,
+                    forgets_after,
+                    uses,
+                    objects: Vec::new(),
+                    wrong_starts_over,
+                    right,
+                    wrong,
+                    to: None,
+                },
+                objects,
+                to,
+                prov: f.req_prov()?,
+            })
+        }
+        "lever" => {
+            let key = f.req_symbol("key")?;
+            let levers = f.req_references("levers")?;
+            let ok = !levers.is_empty();
+            let levers = f.held("levers", levers, ok, "at least one")?;
+            let opens = f.req_references("opens")?;
+            let ok = !opens.is_empty();
+            let opens = f.held("opens", opens, ok, "at least one")?;
+            let open_for = f.float("open_for");
+            let ok = open_for.is_none_or(|t| t > 0.0);
+            let open_for = f.held("open_for", open_for, ok, "above 0")?;
+            let within = f.float("within");
+            let ok = within.is_none_or(|t| t > 0.0);
+            let within = f.held("within", within, ok, "above 0")?;
+            Row::Lever(LeverRow {
+                key,
+                levers,
+                opens,
+                open_for,
+                within,
+                prov: f.req_prov()?,
+            })
+        }
+        "offering" => {
+            let key = f.req_symbol("key")?;
+            let object = match f.get("object") {
+                Some(_) => f.symbol("object")?,
+                None => return f.missing("object"),
+            };
+            let takes = f.list_of(
+                "takes",
+                "a list of { item, shows }: an item it takes, and the placed object that stands while it holds it (key@XXYY)",
+                &["item", "shows"],
+                |t| {
+                    let shows = match t.get("shows") {
+                        Some(v) => Some(v.as_str().filter(|s| is_reference(s))?.to_string()),
+                        None => None,
+                    };
+                    Some((as_u32(t.get("item")?)?, shows))
+                },
+            );
+            let ok = !takes.is_empty()
+                && takes.iter().map(|(i, _)| i).collect::<BTreeSet<_>>().len() == takes.len();
+            let takes = f.held("takes", takes, ok, "at least one, each item once")?;
+            let opens = f.req_references("opens")?;
+            let ok = !opens.is_empty();
+            let opens = f.held("opens", opens, ok, "at least one")?;
+            let lasts = f.req_u32("lasts")?;
+            let ok = lasts > 0;
+            let lasts = f.held("lasts", lasts, ok, "above 0")?;
+            Row::Offering(OfferingRow {
+                key,
+                object,
+                takes,
+                opens,
+                lasts,
+                prov: f.req_prov()?,
+            })
+        }
+        "guarded" => {
+            let key = f.req_symbol("key")?;
+            let camp = match f.get("camp") {
+                Some(_) => f.symbol("camp")?,
+                None => return f.missing("camp"),
+            };
+            let objects = f.req_references("objects")?;
+            let ok = !objects.is_empty();
+            let objects = f.held("objects", objects, ok, "at least one")?;
+            let refused = f.strref("refused");
+            let hidden = f.bool("hidden").unwrap_or(false);
+            let gone_for = f.float("gone_for");
+            let ok = gone_for.is_none_or(|t| t > 0.0);
+            let gone_for = f.held("gone_for", gone_for, ok, "above 0")?;
+            Row::Guarded(GuardedRow {
+                key,
+                camp,
+                objects,
+                refused,
+                hidden,
+                gone_for,
+                prov: f.req_prov()?,
+            })
+        }
+        "shifting" => {
+            let key = f.req_symbol("key")?;
+            let objects = f.req_references("objects")?;
+            let ok = objects.len() >= 2;
+            let objects = f.held("objects", objects, ok, "at least two")?;
+            let gone_for = f.float("gone_for");
+            let ok = gone_for.is_none_or(|t| t > 0.0);
+            let gone_for = f.held("gone_for", gone_for, ok, "above 0")?;
+            let moves_after = f.float("moves_after");
+            let ok = moves_after.is_none_or(|t| t > 0.0);
+            let moves_after = f.held("moves_after", moves_after, ok, "above 0")?;
+            Row::Shifting(ShiftingRow {
+                key,
+                objects,
+                gone_for,
+                moves_after,
+                prov: f.req_prov()?,
+            })
+        }
         "tool" => Row::Tool(Tool {
             template: f.req_id("template")?,
             tool_yield: f.req_u32("yield")?,
@@ -2287,8 +3363,28 @@ fn read_row(kind: &str, f: &mut Fields<'_>) -> Option<Row> {
                 prov: f.req_prov()?,
             })
         }
+        "tally" => {
+            let key = f.req_symbol("key")?;
+            let full = f.req_u32("full")?;
+            let full = f.held("full", full, full > 0, "above 0")?;
+            let starts = f.tally_start()?;
+            let resets = f.tally_reset()?;
+            Row::Tally(Tally {
+                tally: yalain_content::tallies::Tally {
+                    key,
+                    full,
+                    starts,
+                    resets,
+                    clears: f.ids("clears"),
+                },
+                prov: f.req_prov()?,
+            })
+        }
         "event" => {
-            let when = f.windows("when")?;
+            let when = match f.get("when") {
+                Some(_) => f.windows("when")?,
+                None => Vec::new(),
+            };
             Row::Event(Event {
                 key: f.req_symbol("key")?,
                 game_event: f.id("game_event"),
@@ -2329,7 +3425,11 @@ fn read_row(kind: &str, f: &mut Fields<'_>) -> Option<Row> {
             })
         }
         "effect_rule" => {
-            let effect = f.req_id("effect")?;
+            let effect = match f.get("effect").map(toml::Value::as_str) {
+                None => return f.missing("effect"),
+                Some(Some(_)) => EffectOf::Name(f.ident("effect")?),
+                Some(None) => EffectOf::State(f.id("effect")?),
+            };
             let ward = match f.get("ward") {
                 Some(_) => Some(f.ward()?),
                 None => None,
@@ -2340,15 +3440,75 @@ fn read_row(kind: &str, f: &mut Fields<'_>) -> Option<Row> {
                 None => None,
             };
             let then = f.id("then");
-            if then == Some(effect) {
+            if then.is_some() && then == effect.state() {
                 f.bad("then", "an immunity leaves another effect than itself");
                 return None;
             }
-            if ward.is_none() && vitae_share.is_none() && vitae_restore.is_none() && then.is_none()
-            {
+            let reset = match f.word(
+                "reset",
+                yalain_content::effect_rules::Reset::from_word,
+                "skills or hero-skills",
+            ) {
+                Some(Some(r)) => Some(r),
+                Some(None) => return None,
+                None => None,
+            };
+            let skill = f.typed("skill", "a skill (its number, such as 925)", |v| {
+                as_u32(v).filter(|n| *n > 0)
+            });
+            if f.get("skill").is_some() && skill.is_none() {
+                return None;
+            }
+            let gives = match f.get("gives") {
+                Some(_) => {
+                    let template = f.req_id("gives")?;
+                    let count = f.u32("count").unwrap_or(1);
+                    let count = f.held("count", count, count > 0, "above 0")?;
+                    Some(yalain_content::effect_rules::Grant { template, count })
+                }
+                None => {
+                    if f.get("count").is_some() {
+                        f.bad("count", "a count is of the items a rule gives");
+                        return None;
+                    }
+                    None
+                }
+            };
+            let untrains = f.bool("untrains").unwrap_or(false);
+            let dispels = match f.get("dispels") {
+                Some(_) => f.req("dispels", "a list of effects' saved states", |v| {
+                    let list = v
+                        .as_array()?
+                        .iter()
+                        .map(as_u32)
+                        .collect::<Option<Vec<_>>>()?;
+                    (!list.is_empty()).then_some(list)
+                })?,
+                None => Vec::new(),
+            };
+            let places = f.placing()?;
+            let others = ward.is_some()
+                || vitae_share.is_some()
+                || vitae_restore.is_some()
+                || then.is_some()
+                || reset.is_some()
+                || untrains
+                || skill.is_some()
+                || gives.is_some()
+                || !dispels.is_empty();
+            if !others && places.is_none() {
                 f.bad(
-                    "ward, vitae_share, vitae_restore, then",
-                    "a rule names a ward, a share of vitae, vitae given back or what an immunity leaves",
+                    "ward, vitae_share, vitae_restore, then, reset, untrains, skill, gives, dispels, places",
+                    "a rule names a ward, a share of vitae, vitae given back, what an immunity leaves, \
+                     a reset it grants, the untraining it finishes, a skill it trains, an item it \
+                     gives, the effects it dispels or what it places",
+                );
+                return None;
+            }
+            if others && matches!(effect, EffectOf::Name(_)) {
+                f.bad(
+                    "effect",
+                    "an effect named by its name, with no saved state, only places: name its saved state for the rest",
                 );
                 return None;
             }
@@ -2358,6 +3518,12 @@ fn read_row(kind: &str, f: &mut Fields<'_>) -> Option<Row> {
                 vitae_share,
                 vitae_restore,
                 then,
+                reset,
+                untrains,
+                skill,
+                gives,
+                places,
+                dispels,
                 prov: f.req_prov()?,
             })
         }
@@ -2452,11 +3618,97 @@ fn read_row(kind: &str, f: &mut Fields<'_>) -> Option<Row> {
             let full_at = f.u32("full_at");
             let ok = full_at.is_none_or(|l| l >= 2);
             let full_at = f.held("full_at", full_at, ok, "a craft skill level from 2")?;
+            let start = f.u32("start");
+            let ok = start.is_none_or(|p| p <= 100);
+            let start = f.held("start", start, ok, "a percent from 0 to 100")?;
             Row::Refining(Refining {
                 refining: yalain_content::crafts::Refining {
                     recipe,
                     product,
                     full_at,
+                    start,
+                },
+                prov: f.req_prov()?,
+            })
+        }
+        "recipe" => {
+            use yalain_content::crafts::RecipeIngredient;
+            let recipe = f.req_id("recipe")?;
+            let (first, last) = auberean_pack::WORLD_RECIPES;
+            let recipe = f.held(
+                "recipe",
+                recipe,
+                (first..=last).contains(&recipe),
+                &format!(
+                    "{recipe:#010X} is outside the world's recipes ({first:#010X} to {last:#010X})"
+                ),
+            )?;
+            let like = f.req_id("like")?;
+            let name = f.req_strref("name")?;
+            let description = f.strref("description");
+            let ingredients = f.list_of(
+                "ingredients",
+                "a list of { items, count, name }: the templates that go in a slot, how many (1 \
+                 when left out) and what the slot says it wants (a string reference, or left out)",
+                &["items", "count", "name"],
+                |t| {
+                    let items = t
+                        .get("items")?
+                        .as_array()?
+                        .iter()
+                        .map(as_u32)
+                        .collect::<Option<Vec<_>>>()
+                        .filter(|i| !i.is_empty())?;
+                    let count = match t.get("count") {
+                        Some(v) => as_u32(v).filter(|n| *n > 0)?,
+                        None => 1,
+                    };
+                    let name = match t.get("name") {
+                        Some(v) => {
+                            let r = v.as_table().filter(|r| r.len() == 2)?;
+                            Some((as_u32(r.get("string")?)?, as_u32(r.get("table")?)?))
+                        }
+                        None => None,
+                    };
+                    Some(RecipeIngredient { items, count, name })
+                },
+            );
+            let ok = !ingredients.is_empty();
+            let ingredients = f.held("ingredients", ingredients, ok, "at least one slot")?;
+            let product = f.req_id("product")?;
+            let count = f.u32("count").unwrap_or(1);
+            let count = f.held("count", count, count > 0, "above 0")?;
+            Row::Recipe(Recipe {
+                recipe: yalain_content::crafts::Recipe {
+                    recipe,
+                    like,
+                    name: (name.string, name.table),
+                    description: description.map(|d| (d.string, d.table)),
+                    ingredients,
+                    product,
+                    count,
+                    skill: f.id("skill"),
+                    category: f.u32("category"),
+                },
+                prov: f.req_prov()?,
+            })
+        }
+        "combination" => {
+            let key = f.req_symbol("key")?;
+            let recipe = f.req_id("recipe")?;
+            let items = f.ids("items");
+            let ok = !items.is_empty();
+            let items = f.held("items", items, ok, "at least one template")?;
+            let product = f.req_id("product")?;
+            let count = f.u32("count").unwrap_or(1);
+            let count = f.held("count", count, count > 0, "above 0")?;
+            Row::Combination(Combination {
+                combination: yalain_content::crafts::Combination {
+                    key,
+                    recipe,
+                    items,
+                    product,
+                    count,
                 },
                 prov: f.req_prov()?,
             })
@@ -2477,6 +3729,81 @@ fn read_row(kind: &str, f: &mut Fields<'_>) -> Option<Row> {
                 prov: f.req_prov()?,
             })
         }
+        "safe_passage" => {
+            let key = f.req_symbol("key")?;
+            let camp = match f.get("camp") {
+                Some(_) => Some(f.symbol("camp")?),
+                None => None,
+            };
+            if camp.is_some() == f.t.contains_key("template") {
+                f.bad(
+                    "camp, template",
+                    "a safe passage names a camp or a template",
+                );
+                return None;
+            }
+            let template = f.id("template");
+            if f.t.contains_key("item") == f.t.contains_key("effect") {
+                f.bad("item, effect", "a safe passage names an item or an effect");
+                return None;
+            }
+            let item = f.id("item");
+            let effect = f.id("effect");
+            Row::SafePassage(SafePassageRow {
+                key,
+                camp,
+                template,
+                item,
+                effect,
+                prov: f.req_prov()?,
+            })
+        }
+        "creature_effect" => {
+            let key = f.req_symbol("key")?;
+            let templates = f.req("templates", "a list of creatures' templates", |v| {
+                let list = v
+                    .as_array()?
+                    .iter()
+                    .map(as_u32)
+                    .collect::<Option<Vec<_>>>()?;
+                (!list.is_empty()).then_some(list)
+            })?;
+            let effect = f.req_id("effect")?;
+            let spellcraft = match f.get("spellcraft") {
+                Some(v) if v.is_array() => f.typed(
+                    "spellcraft",
+                    "a number, or a list of [level, spellcraft]",
+                    |v| {
+                        let points = v
+                            .as_array()?
+                            .iter()
+                            .map(|p| {
+                                let p = p.as_array()?;
+                                (p.len() == 2).then_some(())?;
+                                Some((to_f32(as_number(&p[0])?), to_f32(as_number(&p[1])?)))
+                            })
+                            .collect::<Option<Vec<_>>>()?;
+                        (!points.is_empty()).then_some(points)
+                    },
+                )?,
+                Some(_) => vec![(
+                    0.0,
+                    to_f32(f.typed(
+                        "spellcraft",
+                        "a number, or a list of [level, spellcraft]",
+                        as_number,
+                    )?),
+                )],
+                None => vec![(0.0, 1.0)],
+            };
+            Row::CreatureEffect(CreatureEffectRow {
+                key,
+                templates,
+                effect,
+                spellcraft,
+                prov: f.req_prov()?,
+            })
+        }
         "npc_table" => {
             let name = f.req_ident("name")?;
             let heals_kin = match f.t.get("heals_kin") {
@@ -2492,12 +3819,26 @@ fn read_row(kind: &str, f: &mut Fields<'_>) -> Option<Row> {
         "friend_table" => {
             let table = f.req_id("table")?;
             let attacks_first = match f.t.get("attacks_first") {
-                Some(_) => f.bool("attacks_first")?,
-                None => return f.missing("attacks_first"),
+                Some(_) => Some(f.bool("attacks_first")?),
+                None => None,
             };
+            let fights = match f.t.get("fights") {
+                Some(_) => f.typed("fights", "a list of friend tables (whole numbers)", |v| {
+                    v.as_array()?.iter().map(as_u32).collect::<Option<Vec<_>>>()
+                })?,
+                None => Vec::new(),
+            };
+            if attacks_first.is_none() && fights.is_empty() {
+                f.bad(
+                    "attacks_first, fights",
+                    "a friend table's row gives attacks_first or the tables it fights",
+                );
+                return None;
+            }
             Row::FriendTable(FriendTable {
                 table,
                 attacks_first,
+                fights,
                 prov: f.req_prov()?,
             })
         }
@@ -2515,6 +3856,7 @@ fn read_row(kind: &str, f: &mut Fields<'_>) -> Option<Row> {
                     f.bad("shot_gap, windup", "a time is a number of seconds above 0");
                     return None;
                 }
+                (None, None) => None,
                 _ => {
                     f.bad(
                         "shot_gap, windup",
@@ -2523,9 +3865,114 @@ fn read_row(kind: &str, f: &mut Fields<'_>) -> Option<Row> {
                     return None;
                 }
             };
+            let marks = f.id("marks");
+            let lines = f.mark_lines()?;
+            let marks = match (marks, lines) {
+                (Some(effect), lines) => {
+                    Some(yalain_content::creature_rows::Mark { effect, lines })
+                }
+                (None, lines) if lines.is_empty() => None,
+                (None, _) => {
+                    f.bad(
+                        "mark_lines",
+                        "lines for a mark need the effect it puts on (marks)",
+                    );
+                    return None;
+                }
+            };
+            let only_hated = match f.t.get("only_hated") {
+                Some(_) => f.bool("only_hated")?,
+                None => false,
+            };
+            let players_kept_out = match f.t.get("players_kept_out") {
+                Some(_) => f.bool("players_kept_out")?,
+                None => false,
+            };
+            let kept_out_line = match f.t.get("kept_out_line") {
+                Some(_) => Some(f.strref("kept_out_line")?),
+                None => None,
+            };
+            if kept_out_line.is_some() && !players_kept_out {
+                f.bad(
+                    "kept_out_line",
+                    "a line for a player's attack needs players kept out (players_kept_out = true)",
+                );
+                return None;
+            }
+            if rhythm.is_none() && marks.is_none() && !only_hated && !players_kept_out {
+                f.bad(
+                    "shot_gap, windup, marks, only_hated, players_kept_out",
+                    "a creature's row gives its rhythm, a mark, only_hated or players_kept_out",
+                );
+                return None;
+            }
             Row::Creature(Creature {
                 template,
                 rhythm,
+                marks,
+                only_hated,
+                players_kept_out,
+                kept_out_line,
+                prov: f.req_prov()?,
+            })
+        }
+        "defense" => {
+            let device = f.req_id("device")?;
+            let holds = match f.float("holds") {
+                Some(t) => t,
+                None => return f.missing("holds"),
+            };
+            let holds = f.held("holds", holds, holds > 0.0, "above 0")?;
+            let spawns = f.weighted("spawns");
+            let ok = !spawns.is_empty() && spawns.iter().all(|(_, w)| *w > 0);
+            let spawns = f.held("spawns", spawns, ok, "at least one, each weight above 0")?;
+            let population = f.req_u32("population")?;
+            let population = f.held("population", population, population > 0, "at least 1")?;
+            let regen = f.float("regen");
+            let ok = regen.is_none_or(|t| t > 0.0);
+            let regen = f.held("regen", regen, ok, "above 0")?;
+            let radius = f.float("radius").unwrap_or(10.0);
+            let radius = f.held("radius", radius, radius >= 0.0, "0 or above")?;
+            let then = f.id("then");
+            let then_lasts = f.u32("then_lasts");
+            if then_lasts.is_some() && then.is_none() {
+                f.bad(
+                    "then_lasts",
+                    "a time is of what stands in the device's place",
+                );
+                return None;
+            }
+            let ok = then_lasts.is_none_or(|t| t > 0);
+            let then_lasts = f.held("then_lasts", then_lasts, ok, "above 0")?;
+            let then_name = f.name_words("then_name", "then_name_text");
+            if then_name.is_some() && then.is_none() {
+                f.bad(
+                    "then_name",
+                    "a name is of what stands in the device's place",
+                );
+                return None;
+            }
+            let says = f.timed_lines("says")?;
+            let ok = says.iter().all(|(at, _)| *at <= holds);
+            let says = f.held("says", says, ok, "each at or before holds")?;
+            let line = |l: Option<StrRef>| l.map(|l| (l.string, l.table));
+            let hurt_line = line(f.strref("hurt_line"));
+            let held_line = line(f.strref("held_line"));
+            Row::Defense(DefenseRow {
+                defense: yalain_content::defenses::Defense {
+                    device,
+                    holds,
+                    spawns,
+                    population,
+                    regen,
+                    radius: to_f32(radius),
+                    then,
+                    then_lasts,
+                    then_name,
+                    says,
+                    hurt_line,
+                    held_line,
+                },
                 prov: f.req_prov()?,
             })
         }
@@ -2536,13 +3983,44 @@ fn read_row(kind: &str, f: &mut Fields<'_>) -> Option<Row> {
             let name = f.id("name");
             let both = pollen.is_some() == name.is_some();
             let name = f.held("name", name, both, "a pollen and its name, or neither")?;
+            let harvest = f.req_id("harvest")?;
+            let count = f.u32("count").unwrap_or(1);
+            let count = f.held("count", count, count > 0, "above 0")?;
+            let ripe = f
+                .float("ripe")
+                .unwrap_or(yalain_content::plants::RIPE_SECONDS);
+            let ripe = f.held("ripe", ripe, ripe > 0.0, "above 0")?;
+            let tended = f.bool("tended").unwrap_or(true);
+            let water = f.id("water");
+            let fertilizer = f.id("fertilizer");
+            let garden = f.plant_garden();
+            let texts = f.plant_texts();
+            let cares = water.is_some()
+                || fertilizer.is_some()
+                || texts.is_some_and(|t| t.conditions.is_some() || t.stages.is_some());
+            if cares && !tended {
+                f.bad(
+                    "water, fertilizer, texts",
+                    "care items and how a plant fares are of one that needs care (tended)",
+                );
+                return None;
+            }
             Row::Plant(Plant {
                 species: yalain_content::plants::Species {
-                    plant,
-                    seed,
-                    pollen,
-                    harvest: f.req_id("harvest")?,
-                    name: name.unwrap_or(0),
+                    count,
+                    ripe,
+                    tended,
+                    water: water.unwrap_or(yalain_content::plants::WATERING_CAN),
+                    fertilizer: fertilizer.unwrap_or(yalain_content::plants::FERTILIZER),
+                    garden,
+                    texts,
+                    ..yalain_content::plants::Species::new(
+                        plant,
+                        seed,
+                        pollen,
+                        harvest,
+                        name.unwrap_or(0),
+                    )
                 },
                 prov: f.req_prov()?,
             })
@@ -2599,20 +4077,54 @@ fn read_row(kind: &str, f: &mut Fields<'_>) -> Option<Row> {
                 f.bad("chance", "a chance is a number above 0, at most 1");
                 return None;
             }
+            let requires = f.gate("requires");
+            if requires.is_some() && camp.is_some() {
+                f.bad(
+                    "requires",
+                    "a death treasure for a quest is a chest's: name the chest's template, not a camp",
+                );
+                return None;
+            }
             Row::DeathTreasure(DeathTreasure {
                 key,
                 template,
                 camp,
                 item: f.req_id("item")?,
                 chance,
+                requires,
                 prov: f.req_prov()?,
             })
         }
         "death_spawn" => {
-            if f.get("effect").is_none() {
-                return f.missing("effect");
+            let creature = f.id("creature");
+            let effect = match (f.get("effect").is_some(), creature) {
+                (true, None) => f.ident("effect")?,
+                (false, Some(c)) => yalain_content::DeathSpawn::of_creature(c),
+                (true, Some(_)) => {
+                    f.bad(
+                        "effect, creature",
+                        "a row is of a death effect or of a creature, not both",
+                    );
+                    return None;
+                }
+                (false, None) => return f.missing("effect"),
+            };
+            let at = f.symbol("at");
+            if at.is_some() && (creature.is_none() || f.get("offset").is_some()) {
+                f.bad(
+                    "at",
+                    "a place is for a creature's own row, in place of an offset",
+                );
+                return None;
             }
-            let effect = f.ident("effect")?;
+            let offset = match (creature, f.get("offset").is_some()) {
+                (Some(_), false) => At {
+                    x: 0.0,
+                    y: 0.0,
+                    z: None,
+                },
+                _ => f.req_at("offset")?,
+            };
             let chance = f.float("chance").map_or(1.0, to_f32);
             if !(0.0..=1.0).contains(&chance) {
                 f.bad("chance", "a share is a number from 0 to 1");
@@ -2623,16 +4135,29 @@ fn read_row(kind: &str, f: &mut Fields<'_>) -> Option<Row> {
                 f.bad("lasts", "a time is a number of seconds above 0");
                 return None;
             }
+            let kingdom = f.int("kingdom");
+            if kingdom.is_some_and(|k| ![1, 2, 4].contains(&k)) {
+                f.bad(
+                    "kingdom",
+                    "a kingdom is 1 (Shadow), 2 (Order) or 4 (Dominion)",
+                );
+                return None;
+            }
             Row::DeathSpawn(DeathSpawn {
                 effect,
+                creature,
                 template: f.req_id("template")?,
                 count: f
                     .int("count")
                     .and_then(|v| u32::try_from(v).ok())
                     .unwrap_or(1),
                 chance,
-                offset: f.req_at("offset")?,
+                offset,
+                at,
+                to: f.symbol("to"),
                 lasts,
+                kingdom: kingdom.and_then(|v| u32::try_from(v).ok()),
+                name: f.name_words("name", "name_text"),
                 prov: f.req_prov()?,
             })
         }
@@ -3228,6 +4753,12 @@ impl<'a> Fields<'a> {
         )
     }
 
+    fn key(&mut self, name: &str) -> Option<String> {
+        self.typed(name, "a key (lowercase letters, digits and hyphens)", |v| {
+            v.as_str().filter(|s| is_symbol(s)).map(str::to_string)
+        })
+    }
+
     fn req_symbol(&mut self, name: &str) -> Option<String> {
         match self.t.get(name) {
             Some(_) => self.typed(name, "a key (lowercase letters, digits and hyphens)", |v| {
@@ -3251,6 +4782,23 @@ impl<'a> Fields<'a> {
                 .filter(|s| !s.is_empty() && s.chars().count() <= TEXT_LIMIT)
                 .map(str::to_string)
         })
+    }
+
+    /// A list of references to placed objects (`key@XXYY`, or `pack:key@XXYY`); missing is wrong.
+    fn req_references(&mut self, name: &str) -> Option<Vec<String>> {
+        match self.t.get(name) {
+            Some(_) => self.typed(
+                name,
+                "a list of placed objects (key@XXYY, or pack:key@XXYY from another pack)",
+                |v| {
+                    v.as_array()?
+                        .iter()
+                        .map(|x| x.as_str().filter(|s| is_reference(s)).map(str::to_string))
+                        .collect::<Option<Vec<_>>>()
+                },
+            ),
+            None => self.missing(name),
+        }
     }
 
     fn strings(&mut self, name: &str) -> Vec<String> {
@@ -3300,6 +4848,18 @@ impl<'a> Fields<'a> {
             let n: Option<Vec<f32>> = a.iter().map(|x| as_number(x).map(to_f32)).collect();
             n.map(|n| [n[0], n[1], n[2], n[3]])
         })
+    }
+
+    /// A name a row gives what it makes: the string reference `name`, else the new prose `text`;
+    /// none when it gives neither.
+    fn name_words(&mut self, name: &str, text: &str) -> Option<yalain_content::Words> {
+        let reference = self.strref(name);
+        let prose = self.text(text);
+        match (reference, prose) {
+            (Some(r), _) => Some(yalain_content::Words::Ref(r.string, r.table)),
+            (None, Some(t)) => Some(yalain_content::Words::Literal(t)),
+            (None, None) => None,
+        }
     }
 
     fn strref(&mut self, name: &str) -> Option<StrRef> {
@@ -3362,6 +4922,30 @@ impl<'a> Fields<'a> {
                 })
                 .collect::<Option<Vec<_>>>()
         })
+        .unwrap_or_default()
+    }
+
+    /// One of several templates picked by weight: a list of at least two `{ template, weight }`,
+    /// each weight above 0 (none when left out).
+    fn one_of(&mut self, name: &str) -> Vec<(u32, u32)> {
+        self.typed(
+            name,
+            "a list of at least two { template, weight }, each weight above 0",
+            |v| {
+                let a = v.as_array().filter(|a| a.len() >= 2)?;
+                a.iter()
+                    .map(|x| {
+                        let t = x.as_table()?;
+                        if t.len() != 2 {
+                            return None;
+                        }
+                        let template = as_u32(t.get("template")?)?;
+                        let weight = as_u32(t.get("weight")?).filter(|w| *w > 0)?;
+                        Some((template, weight))
+                    })
+                    .collect::<Option<Vec<_>>>()
+            },
+        )
         .unwrap_or_default()
     }
 
@@ -3594,7 +5178,7 @@ impl<'a> Fields<'a> {
         }
         self.typed(
             name,
-            "one of { use = T }, { use = ITEM, on = TARGET }, { give = ITEM, to = TARGET }, { arrive = T }, { arrive = T, from = OBJECT }, { take = T }, { kill = T }, { kill = T, camp = KEY }, { done = Q }, { given = Q }",
+            "one of { use = T }, { use = ITEM, on = TARGET }, { give = ITEM, to = TARGET }, { give_class = CLASS, to = TARGET }, { arrive = T }, { arrive = T, from = OBJECT }, { take = T }, { kill = T }, { kill = T, camp = KEY }, { kill = T, within = METERS }, { done = Q }, { given = Q }",
             |v| {
                 let t = v.as_table()?;
                 if let (2, Some(item), Some(on)) = (t.len(), t.get("use"), t.get("on")) {
@@ -3607,9 +5191,16 @@ impl<'a> Fields<'a> {
                 if let (2, Some(item), Some(to)) = (t.len(), t.get("give"), t.get("to")) {
                     return Some(Trigger::Give(as_u32(item)?, as_u32(to)?));
                 }
+                if let (2, Some(class), Some(to)) = (t.len(), t.get("give_class"), t.get("to")) {
+                    return Some(Trigger::GiveClass(as_u32(class)?, as_u32(to)?));
+                }
                 if let (2, Some(tpl), Some(camp)) = (t.len(), t.get("kill"), t.get("camp")) {
                     let camp = camp.as_str().filter(|c| !c.is_empty())?;
                     return Some(Trigger::KillIn(as_u32(tpl)?, camp.to_string()));
+                }
+                if let (2, Some(tpl), Some(m)) = (t.len(), t.get("kill"), t.get("within")) {
+                    let m = as_u32(m).filter(|m| *m > 0)?;
+                    return Some(Trigger::KillNear(as_u32(tpl)?, m));
                 }
                 if t.len() != 1 {
                     return None;
@@ -3654,33 +5245,78 @@ impl<'a> Fields<'a> {
         )
     }
 
-    /// A step's or a give's `requires`: other quests (`{ quest, phase }`, `{ quest, done = true }`
-    /// or `{ quest, free = true }`); `{ kingdom = "word" }`, the one kingdom it is for, a word of
-    /// [`yalain_content::kingdoms::kingdom::WORDS`]; and, where `events` allows them,
-    /// `{ event = "key" }`, an `[[event]]` that must be on.
-    fn requires_and_events(
-        &mut self,
-        name: &str,
-        events: bool,
-    ) -> (Vec<(u32, Need)>, Vec<String>, Option<u32>) {
+    /// A step's or a give's `requires`: other quests (`{ quest, phase }`, `{ quest, done = true }`,
+    /// `{ quest, done = false }` (never completed), `{ quest, free = true }` or
+    /// `{ quest, failed = true }`); `{ kingdom = "word" }`, the one kingdom it is for, a word of
+    /// [`yalain_content::kingdoms::kingdom::WORDS`]; `{ tally = "key", full = true|false }`, a
+    /// `[[tally]]` that must be full or not yet full; `{ craft = S, at_least = N }`, a craft skill
+    /// (or `craft = [S, ...]`, any one of several) at level N or above; `{ untraining = true }`, an
+    /// untraining under way; `{ hero = true }`, a hero; `{ fought = "camp@XXYY" }`, a player who
+    /// harmed, or whose fellow harmed, that camp's last creature to die; `{ sequence = "key", at = N }` or
+    /// `{ sequence = "key", done = true }`, a `[[sequence]]` keeping its own count at so many right
+    /// uses, or at all of them; and, for a step (`events`),
+    /// `{ event = "key" }`, an `[[event]]` that must be on, and `{ act = A }`, an act that must be
+    /// whole.
+    fn requires_and_events(&mut self, name: &str, events: bool) -> Requires {
         use yalain_content::kingdoms::kingdom;
         enum Req {
             Quest(u32, Need),
             Event(String),
+            Tally(Vec<yalain_content::tallies::Gate>),
             Kingdom(u32),
+            Act(u32),
+            Craft(yalain_content::crafts::CraftGate),
+            Untraining,
+            Hero,
+            Sequence(yalain_content::item_rows::SequenceGate),
+            Fought(String),
         }
         let (what, keys): (&str, &[&str]) = if events {
             (
-                "a list of { quest, phase }, { quest, done = true }, { quest, free = true }, { event } or { kingdom } (neutral, shadow, order or dominion)",
-                &["quest", "phase", "done", "free", "event", "kingdom"],
+                "a list of { quest, phase }, { quest, done = true }, { quest, done = false }, { quest, free = true }, { quest, failed = true }, { event }, { tally, full }, { tally, at_least, below }, { craft, at_least }, { untraining = true }, { hero = true }, { sequence, at }, { sequence, done = true }, { fought = camp }, { act } or { kingdom } (neutral, shadow, order or dominion)",
+                &["quest", "phase", "done", "free", "failed", "event", "tally", "full", "at_least", "below", "craft", "untraining", "hero", "sequence", "at", "fought", "act", "kingdom"],
             )
         } else {
             (
-                "a list of { quest, phase }, { quest, done = true }, { quest, free = true } or { kingdom } (neutral, shadow, order or dominion)",
-                &["quest", "phase", "done", "free", "kingdom"],
+                "a list of { quest, phase }, { quest, done = true }, { quest, done = false }, { quest, free = true }, { quest, failed = true }, { tally, full }, { tally, at_least, below }, { craft, at_least }, { untraining = true }, { hero = true }, { sequence, at }, { sequence, done = true }, { fought = camp } or { kingdom } (neutral, shadow, order or dominion)",
+                &["quest", "phase", "done", "free", "failed", "tally", "full", "at_least", "below", "craft", "untraining", "hero", "sequence", "at", "fought", "kingdom"],
             )
         };
         let all = self.list_of(name, what, keys, |t| {
+            if t.contains_key("tally") {
+                return tally_gate(t).map(Req::Tally);
+            }
+            if t.contains_key("craft") {
+                return craft_gate(t).map(Req::Craft);
+            }
+            if t.contains_key("at_least") || t.contains_key("below") {
+                return None;
+            }
+            if let Some(u) = t.get("untraining") {
+                return (t.len() == 1 && u.as_bool() == Some(true)).then_some(Req::Untraining);
+            }
+            if let Some(h) = t.get("hero") {
+                return (t.len() == 1 && h.as_bool() == Some(true)).then_some(Req::Hero);
+            }
+            if let Some(c) = t.get("fought") {
+                return (t.len() == 1)
+                    .then(|| c.as_str().filter(|c| !c.is_empty()).map(str::to_string))
+                    .flatten()
+                    .map(Req::Fought);
+            }
+            if let Some(q) = t.get("sequence") {
+                use yalain_content::item_rows::{SequenceGate, SequenceNeed};
+                let key = q.as_str().filter(|s| is_symbol(s))?.to_string();
+                let need = match (t.len(), t.get("at"), t.get("done")) {
+                    (2, Some(n), None) => SequenceNeed::At(as_u32(n)?),
+                    (2, None, Some(d)) if d.as_bool() == Some(true) => SequenceNeed::Done,
+                    _ => return None,
+                };
+                return Some(Req::Sequence(SequenceGate { key, need }));
+            }
+            if t.contains_key("at") {
+                return None;
+            }
             if let Some(e) = t.get("event") {
                 return (t.len() == 1)
                     .then(|| e.as_str().filter(|s| is_symbol(s)).map(str::to_string))
@@ -3693,29 +5329,208 @@ impl<'a> Fields<'a> {
                     .flatten()
                     .map(Req::Kingdom);
             }
+            if let Some(a) = t.get("act") {
+                return (t.len() == 1).then(|| as_u32(a)).flatten().map(Req::Act);
+            }
             let quest = as_u32(t.get("quest")?)?;
-            let need = match (t.get("phase"), t.get("done"), t.get("free")) {
-                (Some(p), None, None) => Need::Phase(as_u32(p)?),
-                (None, Some(d), None) if d.as_bool() == Some(true) => Need::Done,
-                (None, None, Some(f)) if f.as_bool() == Some(true) => Need::Free,
+            let true_ = |v: &toml::Value| v.as_bool() == Some(true);
+            let need = match (
+                t.get("phase"),
+                t.get("done"),
+                t.get("free"),
+                t.get("failed"),
+            ) {
+                (Some(p), None, None, None) => Need::Phase(as_u32(p)?),
+                (None, Some(d), None, None) if true_(d) => Need::Done,
+                (None, Some(d), None, None) if d.as_bool() == Some(false) => Need::NeverDone,
+                (None, None, Some(f), None) if true_(f) => Need::Free,
+                (None, None, None, Some(f)) if true_(f) => Need::Failed,
                 _ => return None,
             };
             Some(Req::Quest(quest, need))
         });
         let mut quests = Vec::new();
         let mut named = Vec::new();
+        let mut tallies = Vec::new();
         let mut kingdoms = Vec::new();
+        let mut acts = Vec::new();
+        let mut crafts = Vec::new();
+        let mut untraining = false;
+        let mut heroes = false;
+        let mut sequences = Vec::new();
+        let mut fought = Vec::new();
         for r in all {
             match r {
                 Req::Quest(q, n) => quests.push((q, n)),
                 Req::Event(e) => named.push(e),
+                Req::Tally(g) => tallies.extend(g),
                 Req::Kingdom(k) => kingdoms.push(k),
+                Req::Act(a) => acts.push(a),
+                Req::Craft(c) => crafts.push(c),
+                Req::Untraining => untraining = true,
+                Req::Hero => heroes = true,
+                Req::Sequence(g) => sequences.push(g),
+                Req::Fought(c) => fought.push(c),
             }
         }
         if kingdoms.len() > 1 {
             self.bad(name, "names at most one kingdom");
         }
-        (quests, named, kingdoms.first().copied())
+        Requires {
+            quests,
+            events: named,
+            tallies,
+            kingdom: kingdoms.first().copied(),
+            acts,
+            crafts,
+            untraining,
+            heroes,
+            sequences,
+            fought,
+        }
+    }
+
+    /// A line's `requires`: `[[tally]]`s that must be full or not yet full, each
+    /// `{ tally = "key", full = true|false }`.
+    fn tally_gates(&mut self, name: &str) -> Vec<yalain_content::tallies::Gate> {
+        self.list_of(
+            name,
+            "a list of { tally, full } (true for while it is full, false for while it is not) or { tally, at_least, below } (its count at least, and below, so many; either or both)",
+            &["tally", "full", "at_least", "below"],
+            tally_gate,
+        )
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// A step's or a give's `adds`: `{ tally = "key", by = N }`, N above 0.
+    fn adds(&mut self) -> Option<yalain_content::tallies::Adds> {
+        let v = self.get("adds")?;
+        let read = v.as_table().and_then(|t| {
+            if t.keys().any(|k| !["tally", "by"].contains(&k.as_str())) {
+                return None;
+            }
+            let tally = t.get("tally")?.as_str().filter(|s| is_symbol(s))?;
+            let by = as_u32(t.get("by")?).filter(|n| *n > 0)?;
+            Some(yalain_content::tallies::Adds {
+                tally: tally.to_string(),
+                by,
+            })
+        });
+        if read.is_none() {
+            self.bad(
+                "adds",
+                "{ tally, by }: a tally's key, and how much it adds, above 0",
+            );
+        }
+        read
+    }
+
+    /// A step's `escort`: `{ template, icon, until, far, portal_fails }`, the creature that follows
+    /// its player, the icon its list shows it with, the phase it goes at, the meters from it its
+    /// player fails the quest past, and whether its player's trip through portal space fails it.
+    fn escort(&mut self) -> Option<yalain_content::escorts::Escort> {
+        let v = self.get("escort")?;
+        let read = v.as_table().and_then(|t| {
+            let known = ["template", "icon", "until", "far", "portal_fails"];
+            if t.keys().any(|k| !known.contains(&k.as_str())) {
+                return None;
+            }
+            let template = as_u32(t.get("template")?)?;
+            let icon = match t.get("icon") {
+                Some(i) => as_u32(i)?,
+                None => 0,
+            };
+            let until = match t.get("until") {
+                Some(u) => Some(as_u32(u).filter(|n| *n > 0)?),
+                None => None,
+            };
+            let far = match t.get("far") {
+                #[allow(clippy::cast_possible_truncation)]
+                Some(m) => Some(as_number(m).filter(|m| *m > 0.0)? as f32),
+                None => None,
+            };
+            let portal_fails = match t.get("portal_fails") {
+                Some(b) => b.as_bool()?,
+                None => false,
+            };
+            Some(yalain_content::escorts::Escort {
+                template,
+                icon,
+                until,
+                far,
+                portal_fails,
+            })
+        });
+        if read.is_none() {
+            self.bad(
+                "escort",
+                "{ template, icon, until, far, portal_fails }: the template that follows, and optionally its icon, the phase it goes at (above 0), the meters past which the quest fails (above 0) and true where a trip through portal space fails it",
+            );
+        }
+        read
+    }
+
+    /// A `[[tally]]`'s `starts`: `{ event, after, lasts }`, the event it starts as it fills, the
+    /// seconds from its filling to the event (0 when left out), and how long the event lasts,
+    /// above 0.
+    fn tally_start(&mut self) -> Option<Option<yalain_content::tallies::Start>> {
+        let Some(v) = self.get("starts") else {
+            return Some(None);
+        };
+        let read = v.as_table().and_then(|t| {
+            if t.keys()
+                .any(|k| !["event", "after", "lasts"].contains(&k.as_str()))
+            {
+                return None;
+            }
+            let event = t.get("event")?.as_str().filter(|s| is_symbol(s))?;
+            let after = match t.get("after") {
+                Some(a) => as_u32(a)?,
+                None => 0,
+            };
+            let lasts = as_u32(t.get("lasts")?).filter(|n| *n > 0)?;
+            Some(yalain_content::tallies::Start {
+                event: event.to_string(),
+                after,
+                lasts,
+            })
+        });
+        if read.is_none() {
+            self.bad(
+                "starts",
+                "{ event, after, lasts }: an event's key, the seconds from the tally's filling to it (0 when left out), and how long it lasts in seconds, above 0",
+            );
+            return None;
+        }
+        Some(read)
+    }
+
+    /// A `[[tally]]`'s `resets`: `{ event = "key" }`, as that event ends, or `{ every = S }`, every
+    /// S seconds by the calendar (above 0); left out, never.
+    fn tally_reset(&mut self) -> Option<yalain_content::tallies::Reset> {
+        use yalain_content::tallies::Reset;
+        let Some(v) = self.get("resets") else {
+            return Some(Reset::Never);
+        };
+        let read = v
+            .as_table()
+            .and_then(|t| match (t.len(), t.get("event"), t.get("every")) {
+                (1, Some(e), None) => e
+                    .as_str()
+                    .filter(|s| is_symbol(s))
+                    .map(|e| Reset::Ends(e.to_string())),
+                (1, None, Some(n)) => as_u32(n).filter(|n| *n > 0).map(Reset::Every),
+                _ => None,
+            });
+        if read.is_none() {
+            self.bad(
+                "resets",
+                "{ event = \"key\" } (as that event ends) or { every = S } (every S seconds by the calendar, above 0)",
+            );
+        }
+        read
     }
 
     /// An `[[event]]`'s `when`: at least one window, each `{ from, until }` (UTC times,
@@ -3729,9 +5544,29 @@ impl<'a> Fields<'a> {
         let empty = v.as_array().is_some_and(Vec::is_empty);
         let w = self.list_of(
             name,
-            "a list of { from, until } (UTC: \"2026-12-24T09:00Z\", the end after the start) or { days, from, until } (days \"mon\" to \"sun\", UTC times of day \"HH:MM\")",
-            &["days", "from", "until"],
+            "a list of { from, until } (UTC: \"2026-12-24T09:00Z\", the end after the start), { days, from, until } (days \"mon\" to \"sun\", UTC times of day \"HH:MM\"), { game = \"hours\", from, until } (the game's hours \"HH:MM\") or { game = \"day\" } or { game = \"night\" }",
+            &["days", "from", "until", "game"],
             |t| {
+                match t.get("game").map(toml::Value::as_str) {
+                    None => {}
+                    Some(Some(day @ ("day" | "night"))) => {
+                        let alone = t.len() == 1;
+                        return alone.then_some(Window::GameDay {
+                            night: day == "night",
+                        });
+                    }
+                    Some(Some("hours")) => {
+                        let (from, until) = (t.get("from")?.as_str()?, t.get("until")?.as_str()?);
+                        if t.contains_key("days") {
+                            return None;
+                        }
+                        return Some(Window::GameHours {
+                            from: time_of_day(from)?,
+                            until: time_of_day(until)?,
+                        });
+                    }
+                    Some(_) => return None,
+                }
                 let (from, until) = (t.get("from")?.as_str()?, t.get("until")?.as_str()?);
                 match t.get("days") {
                     None => {
@@ -3799,6 +5634,108 @@ impl<'a> Fields<'a> {
             self.bad(
                 "tends",
                 "{ whom = \"owner\" or \"owners-pets\", effect, every, below }",
+            );
+        }
+        read
+    }
+
+    /// `{ table, maturity_in, mature, harvest, not_mature, not_yours, withers, stages, conditions }`:
+    /// where a plant's lines are (`table`, `mature` and `harvest` required).
+    fn plant_texts(&mut self) -> Option<yalain_content::plants::Texts> {
+        const KEYS: [&str; 9] = [
+            "table",
+            "maturity_in",
+            "mature",
+            "harvest",
+            "not_mature",
+            "not_yours",
+            "withers",
+            "stages",
+            "conditions",
+        ];
+        const CONDITIONS: [&str; 5] = ["healthy", "dry", "overwatered", "hungry", "overfed"];
+        let v = self.get("texts")?;
+        let read = v.as_table().and_then(|t| {
+            let id = |k: &str| t.get(k).and_then(as_u32);
+            // A key given must read; one left out is none.
+            let opt = |k: &str| match t.get(k) {
+                Some(v) => as_u32(v).map(Some),
+                None => Some(None),
+            };
+            t.keys().all(|k| KEYS.contains(&k.as_str())).then_some(())?;
+            let stages = match t.get("stages") {
+                Some(v) => {
+                    let a = v.as_array()?;
+                    let ids: Vec<u32> = a.iter().map(as_u32).collect::<Option<_>>()?;
+                    Some(<[u32; 3]>::try_from(ids).ok()?)
+                }
+                None => None,
+            };
+            let conditions = match t.get("conditions") {
+                Some(v) => {
+                    let c = v.as_table()?;
+                    (c.len() == CONDITIONS.len()).then_some(())?;
+                    let line = |k: &str| c.get(k).and_then(as_u32);
+                    Some(yalain_content::plants::Conditions {
+                        healthy: line("healthy")?,
+                        dry: line("dry")?,
+                        overwatered: line("overwatered")?,
+                        hungry: line("hungry")?,
+                        overfed: line("overfed")?,
+                    })
+                }
+                None => None,
+            };
+            Some(yalain_content::plants::Texts {
+                table: id("table")?,
+                maturity_in: opt("maturity_in")?,
+                mature: id("mature")?,
+                harvest: id("harvest")?,
+                not_mature: opt("not_mature")?,
+                not_yours: opt("not_yours")?,
+                withers: opt("withers")?,
+                stages,
+                conditions,
+            })
+        });
+        if read.is_none() {
+            self.bad(
+                "texts",
+                "{ table, mature, harvest } and any of maturity_in, not_mature, not_yours, withers \
+                 (string ids), stages (three string ids) and conditions \
+                 ({ healthy, dry, overwatered, hungry, overfed }, string ids)",
+            );
+        }
+        read
+    }
+
+    /// `{ template, planted, busy }`: the garden a plant's seed is given to, and its lines (string
+    /// references, each left out or given).
+    fn plant_garden(&mut self) -> Option<yalain_content::plants::Garden> {
+        let v = self.get("garden")?;
+        let line = |v: Option<&toml::Value>| match v {
+            None => Some(None),
+            Some(v) => {
+                let t = v.as_table()?;
+                (t.len() == 2).then_some(())?;
+                Some(Some((as_u32(t.get("string")?)?, as_u32(t.get("table")?)?)))
+            }
+        };
+        let read = v.as_table().and_then(|t| {
+            t.keys()
+                .all(|k| ["template", "planted", "busy"].contains(&k.as_str()))
+                .then_some(())?;
+            Some(yalain_content::plants::Garden {
+                template: as_u32(t.get("template")?)?,
+                planted: line(t.get("planted"))?,
+                busy: line(t.get("busy"))?,
+            })
+        });
+        if read.is_none() {
+            self.bad(
+                "garden",
+                "{ template, planted, busy }: the template given to, and its lines \
+                 (string references { table, string })",
             );
         }
         read
@@ -3924,6 +5861,13 @@ impl<'a> Fields<'a> {
         let above_base = self.req_floats("above_base")?;
         let ok = weights_ok(&above_base);
         let above_base = self.held("above_base", above_base, ok, WEIGHTS)?;
+        let above_base_override = if self.t.contains_key("above_base_override") {
+            let w = self.req_floats("above_base_override")?;
+            let ok = weights_ok(&w);
+            Some(self.held("above_base_override", w, ok, WEIGHTS)?)
+        } else {
+            None
+        };
         let most_level = self.req("most_level", "a whole number", toml::Value::as_integer)?;
         let most_level = i32::try_from(most_level).ok().filter(|l| *l >= 1);
         let most_level =
@@ -3977,6 +5921,7 @@ impl<'a> Fields<'a> {
         )?;
         Some(Rules {
             above_base,
+            above_base_override,
             most_level,
             lore,
             potion_tiers,
@@ -4196,6 +6141,90 @@ impl<'a> Fields<'a> {
         read
     }
 
+    /// A list of what a use makes standing in the world, each `{ template, offset, lasts }`: the
+    /// template, its offset (`[across, ahead]` in meters, `[0, 0]` when left out) and its time
+    /// (seconds above 0; left out, until cleared or killed). At least one.
+    fn placings(&mut self, name: &str) -> Option<Vec<yalain_content::effect_rules::Placing>> {
+        let list = self.typed(
+            name,
+            "a list of at least one { template, offset = [across, ahead], lasts }, offset and lasts \
+             left out or two numbers of meters and seconds above 0",
+            |v| {
+                let a = v.as_array().filter(|a| !a.is_empty())?;
+                a.iter()
+                    .map(|x| {
+                        let t = x.as_table()?;
+                        if t.keys()
+                            .any(|k| !["template", "offset", "lasts"].contains(&k.as_str()))
+                        {
+                            return None;
+                        }
+                        let template = as_u32(t.get("template")?)?;
+                        let offset = match t.get("offset") {
+                            None => [0.0, 0.0],
+                            Some(o) => match o.as_array()?.as_slice() {
+                                [x, y] => {
+                                    let (x, y) = (to_f32(as_number(x)?), to_f32(as_number(y)?));
+                                    (x.is_finite() && y.is_finite()).then_some([x, y])?
+                                }
+                                _ => return None,
+                            },
+                        };
+                        let lasts = match t.get("lasts") {
+                            None => None,
+                            Some(l) => Some(as_u32(l).filter(|s| *s > 0)?),
+                        };
+                        Some(yalain_content::effect_rules::Placing {
+                            template,
+                            offset,
+                            lasts,
+                            name: None,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()
+            },
+        )?;
+        Some(list)
+    }
+
+    /// An `[[effect_rule]]`'s `places`, a template, with its `offset` (`[across, ahead]` in
+    /// meters, `[0, 0]` when left out) and its `lasts` (seconds, above 0; left out, until cleared);
+    /// neither of those without `places`.
+    fn placing(&mut self) -> Option<Option<yalain_content::effect_rules::Placing>> {
+        if self.get("places").is_none() {
+            for k in ["offset", "lasts", "name", "name_text"] {
+                if self.get(k).is_some() {
+                    self.bad(k, "an offset, a time and a name are of what a rule places");
+                    return None;
+                }
+            }
+            return Some(None);
+        }
+        let template = self.id("places")?;
+        let offset = match self.get("offset") {
+            None => [0.0, 0.0],
+            Some(_) => match self.req_floats("offset")?.as_slice() {
+                [x, y] if x.is_finite() && y.is_finite() => [*x, *y],
+                _ => {
+                    self.bad("offset", "[across, ahead]: two numbers of meters");
+                    return None;
+                }
+            },
+        };
+        let lasts = self.u32("lasts");
+        if self.get("lasts").is_some() && lasts.is_none_or(|t| t == 0) {
+            self.bad("lasts", "a number of seconds above 0");
+            return None;
+        }
+        let name = self.name_words("name", "name_text");
+        Some(Some(yalain_content::effect_rules::Placing {
+            template,
+            offset,
+            lasts,
+            name,
+        }))
+    }
+
     /// A share, above 0 and at most 1.
     fn share(&mut self, name: &str) -> Option<f64> {
         self.typed(name, "a share above 0, at most 1", |v| {
@@ -4256,6 +6285,79 @@ impl<'a> Fields<'a> {
                 "transforms",
                 "{ seconds, fx, behavior, text, name }: its seconds from 0, the appearances and the behavior played meanwhile, the text the hero is told ({ table, string }) and the variable its name fills, which needs the text",
             );
+        }
+        read
+    }
+
+    /// A list of lines said at times: `{ at, line }`, `at` seconds (0 or above), `line` a string
+    /// reference `{ table, string }`, in order of their times; none when left out. `None` when one
+    /// is wrong.
+    fn timed_lines(&mut self, name: &str) -> Option<Vec<(f64, (u32, u32))>> {
+        let Some(v) = self.get(name) else {
+            return Some(Vec::new());
+        };
+        let read = v.as_array().and_then(|a| {
+            a.iter()
+                .map(|e| {
+                    let t = e.as_table().filter(|t| t.len() == 2)?;
+                    let at = t
+                        .get("at")
+                        .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))?;
+                    let l = t.get("line")?.as_table().filter(|l| l.len() == 2)?;
+                    let line = (as_u32(l.get("string")?)?, as_u32(l.get("table")?)?);
+                    (at >= 0.0).then_some((at, line))
+                })
+                .collect::<Option<Vec<_>>>()
+        });
+        let ordered = read
+            .as_ref()
+            .is_some_and(|l| l.windows(2).all(|w| w[0].0 <= w[1].0));
+        if !ordered {
+            self.bad(
+                name,
+                "{ at, line }: seconds (0 or above) and a string reference { table, string }, in order of their times",
+            );
+            return None;
+        }
+        read
+    }
+
+    /// `[[creature]]`'s `mark_lines`: `{ race, line }`, a line said of a player of one race marked
+    /// (or, with no race, of any other), `line` a string reference `{ table, string }`; none when
+    /// left out. `None` when one is wrong.
+    fn mark_lines(&mut self) -> Option<Vec<yalain_content::creature_rows::MarkLine>> {
+        let Some(v) = self.get("mark_lines") else {
+            return Some(Vec::new());
+        };
+        let races = [1, 2, 4, 8, 16];
+        let read = v.as_array().and_then(|a| {
+            a.iter()
+                .map(|e| {
+                    let t = e.as_table()?;
+                    if t.keys().any(|k| !["race", "line"].contains(&k.as_str())) {
+                        return None;
+                    }
+                    let race = match t.get("race") {
+                        Some(r) => Some(as_u32(r).filter(|r| races.contains(r))?),
+                        None => None,
+                    };
+                    let l = t.get("line")?.as_table().filter(|l| l.len() == 2)?;
+                    Some((race, (as_u32(l.get("string")?)?, as_u32(l.get("table")?)?)))
+                })
+                .collect::<Option<Vec<_>>>()
+        });
+        let one_each = read.as_ref().is_some_and(|lines| {
+            lines
+                .iter()
+                .enumerate()
+                .all(|(i, (r, _))| lines[..i].iter().all(|(q, _)| q != r))
+        });
+        if !one_each {
+            self.bad(
+                "mark_lines",
+                "{ race, line }: a race (1, 2, 4, 8 or 16, or none for any other) and a string reference { table, string }, one line to a race",
+            );
+            return None;
         }
         read
     }
@@ -4341,6 +6443,53 @@ fn pair_of(v: &toml::Value) -> Option<(f32, f32)> {
 
 fn as_u32(v: &toml::Value) -> Option<u32> {
     v.as_integer().and_then(|i| u32::try_from(i).ok())
+}
+
+/// `{ craft = S, at_least = N }`: a craft skill (its saved state) at level N (above 0) or above;
+/// `craft = [S, ...]`, any one of several.
+fn craft_gate(t: &toml::Table) -> Option<yalain_content::crafts::CraftGate> {
+    if t.len() != 2 {
+        return None;
+    }
+    let skills = match t.get("craft")? {
+        toml::Value::Array(a) => a.iter().map(as_u32).collect::<Option<Vec<_>>>()?,
+        v => vec![as_u32(v)?],
+    };
+    let at_least = as_u32(t.get("at_least")?).filter(|n| *n > 0)?;
+    (!skills.is_empty()).then_some(yalain_content::crafts::CraftGate { skills, at_least })
+}
+
+/// `{ tally = "key", full = true|false }`: a tally that must be full, or not yet full; or
+/// `{ tally = "key", at_least = N, below = M }`, either or both: its count at least N (above 0),
+/// and below M (above N).
+fn tally_gate(t: &toml::Table) -> Option<Vec<yalain_content::tallies::Gate>> {
+    use yalain_content::tallies::{Gate, Holds};
+    let tally = t.get("tally")?.as_str().filter(|s| is_symbol(s))?;
+    let gate = |holds| Gate {
+        tally: tally.to_string(),
+        holds,
+    };
+    if let Some(full) = t.get("full") {
+        let full = full.as_bool()?;
+        return (t.len() == 2).then(|| vec![gate(if full { Holds::Full } else { Holds::NotFull })]);
+    }
+    let at_least = t.get("at_least").map(as_u32);
+    let below = t.get("below").map(as_u32);
+    let (at_least, below) = match (at_least, below) {
+        (Some(None), _) | (_, Some(None)) | (None, None) => return None,
+        (a, b) => (a.flatten(), b.flatten()),
+    };
+    if at_least == Some(0) || below.is_some_and(|b| b <= at_least.unwrap_or(0)) {
+        return None;
+    }
+    Some(
+        at_least
+            .map(Holds::AtLeast)
+            .into_iter()
+            .chain(below.map(Holds::Below))
+            .map(gate)
+            .collect(),
+    )
 }
 
 #[allow(clippy::cast_precision_loss)]

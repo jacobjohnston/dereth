@@ -44,7 +44,12 @@
 //! return calls every pet back, dropping its fight until it is with its owner again; a death order
 //! (one pet, or all) kills the pet. Attacks and returns run up a debt of a second each that drains
 //! a second a second: one ordered with more than five seconds owed is refused ("You have executed
-//! too many pet commands recently. ...", with the debt past five as the wait).
+//! too many pet commands recently. ...", with the debt past five as the wait). A heal has every
+//! pet that tends its owner tend it, whatever its health, and a buff every pet that keeps a buff on
+//! its owner put it on again, though the owner still holds it: each once, as soon as its own wait
+//! allows (its turn to tend, its next swing), with no answer; a pet that does neither for its owner
+//! takes no notice. An order a pet still waiting takes is spent when its wait is over, whether or
+//! not it could then reach its owner.
 //!
 //! **Behavior**, by the pet's mode (a new pet supports its owner): every three seconds a pet not
 //! fighting plans its way to three meters from where its owner then stands (so it trails a running
@@ -102,12 +107,15 @@ pub mod function {
     pub const REMOVE: u32 = 0x8200_001A;
     pub const UPDATE_MODE: u32 = 0x8200_0035;
     pub const UPDATE_NAME: u32 = 0x8200_0034;
-    /// The client's: attack a target, come back, take a mode, die (0: all pets), take a name.
+    /// The client's: attack a target, come back, take a mode, die (0: all pets), take a name,
+    /// heal its owner, buff its owner.
     pub const ATTACK: u32 = 0x8212_0041;
     pub const RETURN: u32 = 0x8212_0038;
     pub const MODE: u32 = 0x8212_0037;
     pub const DIE: u32 = 0x8212_003B;
     pub const NAME: u32 = 0x8212_003A;
+    pub const HEAL: u32 = 0x8212_0046;
+    pub const BUFF: u32 = 0x8212_003F;
 }
 
 /// The texts of pets (string id, table).
@@ -231,6 +239,9 @@ pub struct Pet {
     pub assist: Option<u64>,
     /// When it may next tend.
     pub next_tend: f64,
+    /// Its owner has ordered it to tend it, or to put its buff on it again, and it has not yet.
+    pub asked_tend: bool,
+    pub asked_buff: bool,
     /// Its last missile did not land: its target was gone by then, or the ground stood between them.
     pub missed: bool,
     /// The attack it is closing in to use, drawn when it was out of that attack's reach.
@@ -537,6 +548,44 @@ pub fn summon<S: Store>(
     made
 }
 
+/// A quest's escort of a kind appears for a player, of a class and with an icon, at a level, to
+/// stay until its quest no longer wants it; it is set down beside its player, and appears with
+/// [`appear`]. None where its kind can't be made there (its template no creature, or it can't be
+/// set down indoors), with nothing told.
+pub fn escort<S: Store>(
+    s: &mut Server<S>,
+    net: &mut ServerNet,
+    world: ConnId,
+    kind: &PetKind,
+    (class, icon): (u32, u32),
+    level: f32,
+    clock: Clock,
+) -> Option<u64> {
+    let owner_at = s.players.get(&world).map(|p| p.position)?;
+    let at = beside_owner(s, &owner_at);
+    let creature = s
+        .catalog
+        .get(kind.template)
+        .and_then(|t| yalain_content::CreatureStats::from_props(&t.props))
+        .is_some();
+    if !creature || (kind.outdoors_only && crate::presence::indoors(at.cell)) {
+        tracing::warn!(
+            template = format_args!("{:08X}", kind.template),
+            "an escort's template can't be made a creature here: nothing follows"
+        );
+        return None;
+    }
+    summon_kind(
+        s,
+        net,
+        world,
+        kind,
+        (class, icon, None),
+        (level, Some(at)),
+        clock,
+    )
+}
+
 /// Told of, then "The summoning fails.", and taken off the list as the use ends (2017: 8 of 8).
 fn fails<S: Store>(
     s: &mut Server<S>,
@@ -693,6 +742,7 @@ fn summon_kind<S: Store>(
         weapon_count: 1,
         patrol: None,
         actions: 0,
+        in_sight: Vec::new(),
     });
     let holds = held_auras(s, &t);
     s.things.insert(t);
@@ -712,6 +762,8 @@ fn summon_kind<S: Store>(
             effect: kind.effect,
             assist: None,
             next_tend: now,
+            asked_tend: false,
+            asked_buff: false,
             missed: false,
             closing: None,
             vigor: None,
@@ -950,7 +1002,8 @@ pub fn hire<S: Store>(
     true
 }
 
-/// A pet that tends does so, when its time has come and someone it tends needs it, at its level.
+/// A pet that tends does so, when its time has come and someone it tends needs it (or its owner
+/// ordered it to, whatever its health), at its level. The order is spent as its time comes.
 fn tend<S: Store>(s: &mut Server<S>, net: &mut ServerNet, pet: &Pet, clock: Clock) {
     let Some(tends) = s.pets.kind_of(pet.effect).and_then(|k| k.tends) else {
         return;
@@ -958,6 +1011,12 @@ fn tend<S: Store>(s: &mut Server<S>, net: &mut ServerNet, pet: &Pet, clock: Cloc
     let now = clock.local.0;
     if now < pet.next_tend {
         return;
+    }
+    let asked = pet.asked_tend;
+    if asked {
+        if let Some(p) = s.pets.by_id.get_mut(&pet.id) {
+            p.asked_tend = false;
+        }
     }
     let low = |n: i32, of: i32| {
         #[allow(clippy::cast_precision_loss)]
@@ -970,10 +1029,12 @@ fn tend<S: Store>(s: &mut Server<S>, net: &mut ServerNet, pet: &Pet, clock: Cloc
             .iter()
             .find(|(_, p)| p.character == pet.owner && !crate::combat::is_dead(p))
             .filter(|(_, p)| {
-                low(
-                    crate::quals::int(&p.qualities, crate::player::quality::HEALTH).unwrap_or(0),
-                    crate::effects::own_greatest(s, p, crate::player::quality::HEALTH_MAX),
-                )
+                asked
+                    || low(
+                        crate::quals::int(&p.qualities, crate::player::quality::HEALTH)
+                            .unwrap_or(0),
+                        crate::effects::own_greatest(s, p, crate::player::quality::HEALTH_MAX),
+                    )
             })
             .map(|(c, _)| crate::effects::On::Player(*c)),
         PetWhom::OwnersPets => s
@@ -1061,7 +1122,9 @@ fn holds_from<S: Store>(s: &Server<S>, on: crate::effects::On, state: u32, pet: 
 /// A pet keeps up what its skills put on its friends: when its turn has come, on itself (its skill
 /// aimed at its user) or its owner (aimed at its summoner: in the world, alive, out of portal space
 /// and within the skill's reach of it), one that no longer holds it from the pet. It is told as the
-/// pet's use of the skill on that friend, and cast by the pet at its level.
+/// pet's use of the skill on that friend, and cast by the pet at its level. Ordered to buff its
+/// owner, it puts what it keeps on its owner on it first, held or not; the order is spent as its
+/// turn comes.
 fn keep_up<S: Store>(s: &mut Server<S>, net: &mut ServerNet, pet: &Pet, clock: Clock) {
     let id = pet.id;
     let now = clock.local.0;
@@ -1074,29 +1137,43 @@ fn keep_up<S: Store>(s: &mut Server<S>, net: &mut ServerNet, pet: &Pet, clock: C
     if !due {
         return;
     }
+    let asked = pet.asked_buff;
+    if asked {
+        if let Some(p) = s.pets.by_id.get_mut(&id) {
+            p.asked_buff = false;
+        }
+    }
     let owner = s
         .players
         .iter()
         .find(|(_, p)| p.character == pet.owner)
         .filter(|(_, p)| p.trip.is_none() && p.dying.is_none() && !crate::combat::is_dead(p))
         .map(|(c, p)| (*c, p.character, p.position));
-    for (skill, u) in kept_up(s, id) {
+    let mut skills = kept_up(s, id);
+    if asked {
+        skills.sort_by_key(|(_, u)| u.valid_targets & aim::SUMMONER == 0);
+    }
+    for (skill, u) in skills {
+        // Each friend, and whether its buff goes on again though it holds it.
         let mut friends = Vec::new();
         if u.valid_targets & aim::SELF != 0 {
-            friends.push((crate::effects::On::Creature(id), id, u.behavior_self[0]));
+            let on = crate::effects::On::Creature(id);
+            friends.push((on, id, u.behavior_self[0], false));
         }
         if u.valid_targets & aim::SUMMONER != 0 {
             if let Some((world, character, there)) = owner {
                 if crate::presence::distance(&at, &there).is_some_and(|d| d <= u.max_range) {
                     let on = crate::effects::On::Player(world);
-                    friends.push((on, character, u.behavior_other[0]));
+                    friends.push((on, character, u.behavior_other[0], asked));
                 }
             }
         }
-        let Some((on, target, behavior)) = friends
-            .into_iter()
-            .find(|(on, _, _)| u.target_effects.iter().any(|e| !holds_from(s, *on, *e, id)))
-        else {
+        if asked {
+            friends.sort_by_key(|f| !f.3);
+        }
+        let Some((on, target, behavior, again)) = friends.into_iter().find(|(on, _, _, again)| {
+            *again || u.target_effects.iter().any(|e| !holds_from(s, *on, *e, id))
+        }) else {
             continue;
         };
         if let Some(c) = s.things.get_mut(id).and_then(|t| t.creature.as_mut()) {
@@ -1123,7 +1200,7 @@ fn keep_up<S: Store>(s: &mut Server<S>, net: &mut ServerNet, pet: &Pet, clock: C
             ..crate::effects::Cast::default()
         };
         for state in &u.target_effects {
-            if !holds_from(s, on, *state, id) {
+            if again || !holds_from(s, on, *state, id) {
                 crate::effects::apply_on(s, net, on, *state, cast, clock);
             }
         }
@@ -1351,7 +1428,47 @@ pub fn request<S: Store>(
                 calm(s, net, id);
             }
         }
+        function::HEAL => ask(s, net, owner, true, clock),
+        function::BUFF => ask(s, net, owner, false, clock),
         _ => {}
+    }
+}
+
+/// A heal or a buff order: each of the owner's pets that tends its owner, or keeps a buff
+/// on it, does so as soon as its own wait allows, at once when it is not waiting; the others take
+/// no notice.
+fn ask<S: Store>(s: &mut Server<S>, net: &mut ServerNet, owner: u64, heal: bool, clock: Clock) {
+    for id in s.pets.of(owner) {
+        let Some(effect) = s.pets.by_id.get(&id).map(|p| p.effect) else {
+            continue;
+        };
+        let takes = if heal {
+            s.pets
+                .kind_of(effect)
+                .and_then(|k| k.tends)
+                .is_some_and(|t| t.whom == PetWhom::Owner)
+        } else {
+            kept_up(s, id)
+                .iter()
+                .any(|(_, u)| u.valid_targets & aim::SUMMONER != 0)
+        };
+        let Some(p) = s.pets.by_id.get_mut(&id).filter(|_| takes) else {
+            continue;
+        };
+        if heal {
+            p.asked_tend = true;
+        } else {
+            p.asked_buff = true;
+        }
+        let pet = p.clone();
+        if !s.things.get(id).is_some_and(Thing::alive) {
+            continue;
+        }
+        if heal {
+            tend(s, net, &pet, clock);
+        } else {
+            keep_up(s, net, &pet, clock);
+        }
     }
 }
 
@@ -1544,6 +1661,7 @@ pub fn dies<S: Store>(s: &mut Server<S>, net: &mut ServerNet, id: u64, killer: u
         }
     }
     let pose = crate::death::falls(s, net, id, clock);
+    crate::escorts::died(s, net, id, clock);
     match s.pets.kind_of(pet.effect).and_then(|k| k.corpse_after) {
         Some(after) => s.after(
             clock,
@@ -1578,6 +1696,7 @@ pub fn owner_leaves<S: Store>(s: &mut Server<S>, net: &mut ServerNet, owner: u64
         crate::death::vanish(s, net, id);
     }
     s.pets.owed.remove(&owner);
+    crate::escorts::owner_leaves(s, owner);
 }
 
 /// An owner has come out of portal space somewhere else: its pets are put beside it there.
@@ -1729,6 +1848,9 @@ fn act<S: Store>(s: &mut Server<S>, net: &mut ServerNet, pet: &Pet, clock: Clock
     if now >= pet.next_plan {
         if let Some(p) = s.pets.by_id.get_mut(&id) {
             p.next_plan = now + PLAN_EVERY;
+        }
+        if crate::escorts::too_far(s, net, id, away, clock) {
+            return;
         }
         if away.is_none_or(|d| d > TOO_FAR) && pet.flags & flag::TELEPORT_TO_MASTER != 0 {
             let to = beside_owner(s, &owner_at);
@@ -2821,7 +2943,7 @@ pub const TURNS_ON_PET: f32 = 0.62;
 /// A strike lands on a thing: a pet loses health (shown wounded at 80% or less, dying with none
 /// left), and one that defends itself fights back what struck it when it fights nothing else; a
 /// creature a pet struck is hurt as its owner's, and fights the pet (turning from another three
-/// times in five).
+/// times in five); one another creature struck is hurt by that creature.
 pub fn struck<S: Store>(
     s: &mut Server<S>,
     net: &mut ServerNet,
@@ -2853,6 +2975,11 @@ pub fn struck<S: Store>(
         if free && pet.order == Order::Follow && pet.flags & flag::SELF_DEFENDING != 0 {
             take_on(s, net, target, by);
         }
+        return;
+    }
+    if !s.pets.is_pet(by) {
+        // A creature's strike on another: it is hurt by that creature, which no player is.
+        crate::combat::hurt_creature_by_skill(s, net, target, (by, by, skill), damage, clock);
         return;
     }
     struck_by_pet(s, net, target, (by, skill), damage, clock);

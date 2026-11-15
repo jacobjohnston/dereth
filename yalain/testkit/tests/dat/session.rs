@@ -272,7 +272,7 @@ fn a_character_entering_again_gives_the_journal_its_quests() {
     s.h.server.quests = QuestTable {
         quests: vec![QuestDef {
             id: QUEST,
-            name: (0xA860_7CEC, 0x2500_17EE),
+            name: yalain_content::Words::Ref(0xA860_7CEC, 0x2500_17EE),
             description: (0x6C45_9364, 0x2500_17EE),
             icon: 0x4100_034B,
             play_fx: true,
@@ -289,9 +289,11 @@ fn a_character_entering_again_gives_the_journal_its_quests() {
             subquests: Vec::new(),
             min_level: 0,
             fails_on_death: false,
+            fails_on_logout: false,
+            fails_on_teleport: false,
             once: false,
             fellows: yalain_content::quests::Fellows::default(),
-            last_waits: false,
+            ranges: Vec::new(),
             hero_only: false,
             pay: yalain_content::quests::CompletionPay::default(),
             required: None,

@@ -32,6 +32,7 @@
 
 pub mod kind;
 pub mod pack;
+pub mod skin;
 mod tables;
 pub mod terrain;
 
@@ -350,6 +351,16 @@ pub struct Material {
     pub maps: Option<MaterialMaps>,
 }
 
+impl Material {
+    /// Whether the surface record draws no picture: neither its image bit nor its clip-map bit
+    /// is set. A room's walls leave such a surface out, as retail draws them: the opaque fillers
+    /// the oldest rooms carry in their openings are never seen.
+    #[must_use]
+    pub const fn untextured(&self) -> bool {
+        self.surface_type & 6 == 0
+    }
+}
+
 /// Which picture, keyed as retail caches pictures, so two surfaces that draw the same picture
 /// share one texture.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -387,6 +398,13 @@ pub trait AssetSource {
     /// A texture's pixels, every level; `clip_map` is the first material's that names it.
     /// `None` when the picture will not decode.
     fn texture(&mut self, key: &TextureKey, clip_map: bool) -> Option<Texture>;
+    /// Start making picture `key` ahead of its use, where the source makes pictures off the
+    /// frame; whether it is ready to be taken now. A source that makes each picture when it is
+    /// asked for is always ready.
+    fn prepare(&mut self, key: &TextureKey, clip_map: bool) -> bool {
+        let _ = (key, clip_map);
+        true
+    }
     /// The pictures of a block's drawn ground cells, in the terrain's cell order.
     fn terrain_cells(&mut self, block: BlockId, terrain: &Terrain) -> Vec<TerrainCell>;
     /// The layers of the ground cells' picture `key` ([`terrain::splat_key`]); `None` when the
@@ -400,6 +418,11 @@ pub trait AssetSource {
     fn ground_colors(&mut self) -> Option<[[f32; 4]; 32]> {
         None
     }
+    /// Where the presentation's own pebbles may lie, as the ground drawn there allows: everywhere
+    /// unless the source says otherwise.
+    fn pebble_grounds(&mut self) -> terrain::PebbleGrounds {
+        terrain::PebbleGrounds::default()
+    }
     /// Every sky object the region's days can show, GfxObjs and Setups, in id order.
     fn sky_objects(&mut self) -> Vec<u32>;
     /// A sky object's mesh, every part in it at its place; `None` when it draws nothing.
@@ -408,6 +431,18 @@ pub trait AssetSource {
     /// pack, the pack has one, and its kind is switched on ([`pack`]). None by default.
     fn pack_model(&mut self, id: u32) -> Option<pack::PackModel> {
         let _ = id;
+        None
+    }
+    /// The art pack's body drawn in place of the parts of an object built on `setup` whose look
+    /// lays `palettes` over its parts, being `who`, when the source has a pack and the pack has one
+    /// and does not keep such an object as it is ([`skin`]). None by default.
+    fn pack_skin(
+        &mut self,
+        setup: u32,
+        palettes: &[u32],
+        who: crate::scene::Who,
+    ) -> Option<std::sync::Arc<skin::SkinModel>> {
+        let _ = (setup, palettes, who);
         None
     }
 }

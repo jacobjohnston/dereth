@@ -107,6 +107,7 @@ fn shop() -> Harness {
         keepers: vec![Keeper {
             template: KEEPER_TEMPLATE,
             store: STORE,
+            shown: None,
             greeting: Some(yalain_content::Words::Ref(0x2824_938C, 0x2500_2AFC)),
             placed: "authored for a test".into(),
         }],
@@ -375,6 +376,54 @@ fn a_store_that_hides_sales_for_others_leaves_them_off_the_page_but_counts_them(
     assert_eq!(page(&mut h), [0, 2, 3], "the finished quest's sale listed");
 }
 
+/// A shopper's client asking its storekeeper for the sales again, as it does when the player's
+/// experience or quests change, is sent the page it is on as it now stands: a quest finished since
+/// lists its sale. Asked of another storekeeper, nothing is sent.
+/// Behaviour: server.store.sales-sent-again-when-asked
+#[test]
+fn a_shopper_asking_for_the_sales_again_gets_its_page_as_it_now_stands() {
+    let mut h = gated_shop(true);
+    let (b, _, view) = enter_gated(&mut h);
+    assert_eq!(
+        listed(&view).1.iter().map(|p| p[9].1).collect::<Vec<u32>>(),
+        [0, 3]
+    );
+    for p in h.server.players.values_mut() {
+        p.play.quests = vec![yalain_world::state::QuestState {
+            quest: GATED_QUEST,
+            status: 0x3000_0000,
+            phase: 0,
+            started: 0,
+            updated: 0,
+        }];
+    }
+    let asked = |h: &mut Harness, keeper: u64| {
+        let from = h.bots[b].inbox.len();
+        h.ask(
+            b,
+            yalain_world::store::function::UPDATE_SALES,
+            &[Arg::LongInt(keeper)],
+            10,
+        );
+        calls_of(h, b, from)
+            .into_iter()
+            .filter(|(f, _)| *f == UPDATE_STORE)
+            .map(|(_, mut v)| listed(&v.remove(0)).1.iter().map(|p| p[9].1).collect())
+            .collect::<Vec<Vec<u32>>>()
+    };
+    assert_eq!(
+        asked(&mut h, GUARD),
+        Vec::<Vec<u32>>::new(),
+        "not its keeper"
+    );
+    assert_eq!(
+        asked(&mut h, KEEPER),
+        [vec![0, 2, 3]],
+        "the page as it stands"
+    );
+    assert_eq!(h.server.unhandled.count("script call 0x9b5e0042"), 0);
+}
+
 /// A store that does not hide them shows the sales a player may not have restricted, and buying
 /// one finds no sale and takes nothing.
 /// Behaviour: server.store.sales-for-others-restricted
@@ -473,6 +522,76 @@ fn a_purchase_takes_its_price_and_makes_the_item_in_the_pack() {
     });
     assert_eq!(money, Some(40));
     let made = h.world_messages(b, from).iter().any(|m| {
+        matches!(m, ServerMessage::CreateObject(o) if o.weenie.entity_did == TEST_ITEM && o.weenie.objects[0] == me)
+    });
+    assert!(made, "the item is made in the pack");
+}
+
+/// A keeper of a world's own shop: its page names the shop's copy of the store template, which the
+/// shop window takes its title from, and lists and sells the store's own sales; a page asked for
+/// again names the copy too.
+/// Behaviour: server.store.a-worlds-shop-is-titled-by-its-copy
+#[test]
+fn a_keeper_of_a_worlds_shop_names_its_copy_and_sells_the_stores_sales() {
+    const COPY: u32 = 0x6F10_0000;
+    const UPDATE_SALES: u32 = 0x9B5E_0042;
+    let mut h = shop();
+    h.server.stores.keepers[0].shown = Some(COPY);
+    let (b, me) = h.player_in_world("one", "Elara");
+    for p in h.server.players.values_mut() {
+        yalain_world::quals::set_int(&mut p.qualities, 3100, 50);
+    }
+    let from = h.bots[b].inbox.len();
+    h.bots[b].send(
+        true,
+        queue::WEENIE,
+        &server_call(USE, &[use_of(KEEPER, me)]),
+    );
+    h.run(10);
+    let named = |h: &Harness, from: usize, f: u32| -> Vec<(u32, usize)> {
+        calls_of(h, b, from)
+            .iter()
+            .filter(|(x, _)| *x == f)
+            .map(|(_, args)| {
+                let Some(calls::Node::Script { slots, .. }) = args[0].root() else {
+                    panic!("a store view");
+                };
+                (slots[1].1, listed(&args[0]).1.len())
+            })
+            .collect()
+    };
+    assert_eq!(
+        named(&h, from, ENTER_STORE),
+        [(COPY, 1)],
+        "the copy, with the store's sale"
+    );
+    // Asked again, the page still names the copy.
+    let again = h.bots[b].inbox.len();
+    h.ask(b, UPDATE_SALES, &[Arg::LongInt(KEEPER)], 10);
+    assert_eq!(named(&h, again, UPDATE_STORE), [(COPY, 1)]);
+    // The sale is bought by the store's own stock id.
+    let bought = h.bots[b].inbox.len();
+    let stock = yalain_world::store::STOCK_BASE | u64::from(STORE & 0xFFFF) << 8;
+    let mut g = Builder::new();
+    g.object(
+        0x1B76,
+        &[
+            Slot::Long(stock),
+            Slot::Ref(None),
+            Slot::Long(me),
+            Slot::Int(1),
+            Slot::Long(KEEPER),
+            Slot::Int(0),
+            Slot::Int(0),
+        ],
+    );
+    h.bots[b].send(
+        true,
+        queue::WEENIE,
+        &server_call(PURCHASE, &[Arg::Object(g.graph())]),
+    );
+    h.run(10);
+    let made = h.world_messages(b, bought).iter().any(|m| {
         matches!(m, ServerMessage::CreateObject(o) if o.weenie.entity_did == TEST_ITEM && o.weenie.objects[0] == me)
     });
     assert!(made, "the item is made in the pack");
@@ -739,6 +858,7 @@ fn a_purchase_of_what_the_world_cannot_make_is_refused_and_nothing_is_paid() {
 
 fn quests() -> QuestTable {
     let step = |needs, template, update| Step {
+        key: String::new(),
         quest: QUEST,
         needs,
         trigger: Trigger::Use(template),
@@ -749,22 +869,26 @@ fn quests() -> QuestTable {
         counts: Vec::new(),
         effects: Vec::new(),
         text: None,
+        recipes: Vec::new(),
         placed: "authored for a test".into(),
         requires: Vec::new(),
         takes: Vec::new(),
         races: Vec::new(),
         effects_last: false,
+        effects_quiet: false,
         wants: None,
         fellows: false,
         levels: None,
         xp_share: 0.0,
         to: None,
         transforms: None,
+        chance: None,
+        to_fellows: false,
     };
     QuestTable {
         quests: vec![QuestDef {
             id: QUEST,
-            name: (0xA860_7CEC, 0x2500_17EE),
+            name: yalain_content::Words::Ref(0xA860_7CEC, 0x2500_17EE),
             description: (0x6C45_9364, 0x2500_17EE),
             icon: 0x4100_034B,
             play_fx: true,
@@ -781,9 +905,11 @@ fn quests() -> QuestTable {
             subquests: Vec::new(),
             min_level: 0,
             fails_on_death: false,
+            fails_on_logout: false,
+            fails_on_teleport: false,
             once: false,
             fellows: yalain_content::quests::Fellows::default(),
-            last_waits: false,
+            ranges: Vec::new(),
             hero_only: false,
             pay: yalain_content::quests::CompletionPay::default(),
             required: None,

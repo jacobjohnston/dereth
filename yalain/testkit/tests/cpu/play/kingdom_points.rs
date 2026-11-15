@@ -77,6 +77,7 @@ fn gem_give(item: u32, effect: u32) -> Give {
         counts: Vec::new(),
         effects: vec![effect],
         text: Some(REWARD),
+        effects_quiet: false,
         fx: None,
         requires: Vec::new(),
         placed: "authored for a test".into(),
@@ -86,7 +87,7 @@ fn gem_give(item: u32, effect: u32) -> Give {
 fn quest(id: u32) -> QuestDef {
     QuestDef {
         id,
-        name: (0xA860_7CEC, 0x2500_2958),
+        name: yalain_content::Words::Ref(0xA860_7CEC, 0x2500_2958),
         description: (0x6C45_9364, 0x2500_2958),
         icon: 0x4100_034B,
         play_fx: true,
@@ -103,9 +104,11 @@ fn quest(id: u32) -> QuestDef {
         subquests: Vec::new(),
         min_level: 0,
         fails_on_death: false,
+        fails_on_logout: false,
+        fails_on_teleport: false,
         once: false,
         fellows: yalain_content::quests::Fellows::default(),
-        last_waits: false,
+        ranges: Vec::new(),
         hero_only: false,
         pay: yalain_content::quests::CompletionPay::default(),
         required: None,
@@ -520,6 +523,7 @@ fn a_give_requiring_a_quest_and_a_kingdom_needs_both() {
 #[test]
 fn a_step_for_one_kingdom_runs_only_for_its_players() {
     let step = Step {
+        key: String::new(),
         quest: QUEST,
         needs: 0,
         trigger: Trigger::Give(SLIVER, SHRINE_T),
@@ -530,17 +534,21 @@ fn a_step_for_one_kingdom_runs_only_for_its_players() {
         counts: Vec::new(),
         effects: vec![SLIVER_BONUS],
         text: None,
+        recipes: Vec::new(),
         placed: "authored for a test".into(),
         requires: Vec::new(),
         takes: vec![SLIVER],
         races: Vec::new(),
         effects_last: false,
+        effects_quiet: false,
         wants: None,
         fellows: false,
         levels: None,
         xp_share: 0.0,
         to: None,
         transforms: None,
+        chance: None,
+        to_fellows: false,
     };
     for (k, runs) in [(kingdom::DOMINION, true), (kingdom::ORDER, false)] {
         let mut h = world(true);

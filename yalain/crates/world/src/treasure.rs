@@ -13,7 +13,9 @@
 //! dropped weapons, armor and shields examined whose templates set none showed their own, none of
 //! 41 lutes and flutes; below a base of 48, 1,214 of 1,256 at the base plus 0 to 3; from a base of
 //! 50, 533 of 533 at 50; no Arcane Lore at a base of 51 or below, 0 of 1,616, and a share and a
-//! value growing with the base above it.)
+//! value growing with the base above it.) A world may give droppers whose base is their loot
+//! quality override weights of their own for that least level (2017: 393 such drops at a base of 46
+//! or below, from 63 creatures, at the base plus 0 to 2 and none at plus 3).
 //!
 //! **Its numbers.** A template's damage and armor are placeholders, so a treasure weapon, shield or
 //! piece of armor gets its own by its item level (its least level, or its dropper's base from level
@@ -23,6 +25,10 @@
 //! **Its enchantments.** It may draw some by its level: see [`enchantments`]. Each is cast at one
 //! below its item level, and it is named for one of them. An effect on what it hits lands by that
 //! effect's own chance.
+//!
+//! **What a weapon applies.** An effect on a weapon that applies another (one put on it for a while,
+//! as a quest's imbue does, or its own) puts that one on the creature each of its blows lands on,
+//! harm or none ([`applied_on_blow`]).
 //!
 //! **Treasure jewelry** is plain with no least level, or by its dropper's level has one enchantment
 //! on its wearer and a least level.
@@ -120,6 +126,8 @@ pub const SHIELDS: [&str; 1] = ["ShieldTemplate"];
 pub const JEWELRY: [&str; 1] = ["JewelryTemplate"];
 /// The script package of the treasure potions.
 pub const POTIONS: [&str; 1] = ["PotionMagic"];
+/// The script package of gems.
+pub const GEMS: [&str; 1] = ["GemTemplate"];
 /// The script package of the Tesserae.
 pub const TESSERAE: &str = "HeroSkillCreditToken";
 /// The script packages of the tarot's trumps: the greater, and the lesser of each suit.
@@ -133,8 +141,8 @@ pub const TRUMPS: [&str; 5] = [
 /// The property that makes an item a rare.
 pub const RARE: &str = "Item_IsRareItem";
 
-/// What treasure reads from the install: the packages of the catalog's treasure equipment and
-/// potions, and the game's Arcane Lore table.
+/// What treasure reads from the install: the packages of the catalog's treasure equipment,
+/// potions, trumps and gems, and the game's Arcane Lore table.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Kinds {
     pub equipment: std::collections::HashSet<u32>,
@@ -144,6 +152,8 @@ pub struct Kinds {
     pub potions: std::collections::HashSet<u32>,
     /// The packages of the tarot's trumps.
     pub trumps: std::collections::HashSet<u32>,
+    /// The packages of gems.
+    pub gems: std::collections::HashSet<u32>,
     /// Each potion effect's name table and the strength of the color it gives its potion.
     pub potion_looks: std::collections::HashMap<u32, (u32, f32)>,
     /// The game's Arcane Lore table ([`ARCANE_LORE_TABLE`]).
@@ -423,7 +433,8 @@ pub fn slayer_harm(classes: &[(u32, f32)], superclass: u32, spellcraft: f32) -> 
 }
 
 /// A hit lands: each slayer of the striker's weapon harms what it hits if it names it, told as its
-/// own story; each effect the weapon puts on what it hits, by that effect's own chance.
+/// own story; each effect the weapon puts on what it hits, by that effect's own chance; then what
+/// its template names for what it hits ([`crate::combat::weapon_hit_effects`]).
 pub fn on_hit<S: yalain_store::Store>(
     s: &mut crate::Server<S>,
     net: &mut yalain_net::ServerNet,
@@ -480,6 +491,72 @@ pub fn on_hit<S: yalain_store::Store>(
             );
         }
     }
+    crate::combat::weapon_hit_effects(
+        s,
+        net,
+        me,
+        weapon,
+        crate::effects::On::Creature(target),
+        clock,
+    );
+}
+
+/// A blow lands on a creature, whether or not it did it any harm: each effect on the striker's weapon
+/// that applies another (one put on the weapon for a while, or one of its own) puts that one on the
+/// creature, by its own chance at its spellcraft, cast by the striker from the weapon.
+pub fn applied_on_blow<S: yalain_store::Store>(
+    s: &mut crate::Server<S>,
+    net: &mut yalain_net::ServerNet,
+    world: yalain_net::ConnId,
+    target: u64,
+    clock: crate::Clock,
+) {
+    let Some(me) = s.players.get(&world).map(|p| p.character) else {
+        return;
+    };
+    let Some(weapon) = crate::skill_use::wielded(s, me).first().map(|(i, _)| *i) else {
+        return;
+    };
+    let Some(w) = s.things.get(weapon) else {
+        return;
+    };
+    let on_it: Vec<(u32, f32)> = crate::effects::running_on_item(s, w)
+        .into_iter()
+        .map(|e| (e.state, e.spellcraft))
+        .chain(w.enchantments.iter().copied())
+        .collect();
+    for (state, spellcraft) in on_it {
+        let Some(crate::effect_defs::Kind::Applies(applied)) =
+            s.effect_table.get(state).map(|d| d.kind.clone())
+        else {
+            continue;
+        };
+        if !s
+            .things
+            .get(target)
+            .is_some_and(crate::things::Thing::alive)
+        {
+            return;
+        }
+        let chance = s.effect_table.chance(state, spellcraft);
+        if chance < 1.0 && !s.rng.chance(chance) {
+            continue;
+        }
+        crate::effects::apply_on(
+            s,
+            net,
+            crate::effects::On::Creature(target),
+            applied,
+            crate::effects::Cast {
+                caster: me,
+                spellcraft,
+                pk: true,
+                item: weapon,
+                ..crate::effects::Cast::default()
+            },
+            clock,
+        );
+    }
 }
 
 /// The saved state of the game's Arcane Lore table: the lore of each item level from 50 to 150.
@@ -525,18 +602,24 @@ pub fn lore_at(table: &crate::craft::LevelMap, level: f32) -> Option<i32> {
     (lore > 0).then_some(lore)
 }
 
-/// The loot base of a creature: its loot quality override in tens, else its level.
-#[must_use]
-pub fn base_of(level: i32, quality: Option<i64>) -> i32 {
+/// A creature's loot quality override in tens, when it has one.
+fn override_base(quality: Option<i64>) -> Option<i32> {
     quality
         .filter(|q| *q > 0)
         .and_then(|q| i32::try_from(q / 10).ok())
-        .unwrap_or(level)
 }
 
-/// A treasure item's own least level, from its dropper's base.
-pub fn min_level(rng: &mut Rng, rules: &Rules, base: i32) -> i32 {
-    let above = rng.weighted(rules.above_base.iter().copied()).unwrap_or(0);
+/// The loot base of a creature: its loot quality override in tens, else its level.
+#[must_use]
+pub fn base_of(level: i32, quality: Option<i64>) -> i32 {
+    override_base(quality).unwrap_or(level)
+}
+
+/// A treasure item's own least level, from its dropper's base, drawn by the weights for a base
+/// that is a loot quality override when `overridden`.
+pub fn min_level(rng: &mut Rng, rules: &Rules, base: i32, overridden: bool) -> i32 {
+    let weights = rules.above_base_of(overridden).iter().copied();
+    let above = rng.weighted(weights).unwrap_or(0);
     (base + i32::try_from(above).unwrap_or(0)).clamp(1, rules.most_level.max(1))
 }
 
@@ -589,11 +672,12 @@ pub fn endow<S: yalain_store::Store>(
         return;
     };
     let base = base_of(level, quality);
+    let overridden = override_base(quality).is_some();
     let mut own = Own::default();
     let rules = &s.treasure_tables.rules;
     if s.treasure.equipment.contains(&package) {
         own.look = draw_look(&mut s.rng, &s.treasure_tables, template);
-        let least = min_level(&mut s.rng, rules, base);
+        let least = min_level(&mut s.rng, rules, base, overridden);
         own.min_level = Some(least);
         own.arcane_lore = arcane_lore(&mut s.rng, rules, &s.treasure.lore, base);
         let value = s.things.get(item).map_or(0, |t| t.value);
@@ -620,7 +704,7 @@ pub fn endow<S: yalain_store::Store>(
     } else if s.treasure.jewelry.contains(&package) {
         // Enchanted or plain by its dropper, with a least level only if enchanted (2017: 73 of 73
         // with a least level had one effect, 120 of 120 with none had none).
-        let least = min_level(&mut s.rng, rules, base);
+        let least = min_level(&mut s.rng, rules, base, overridden);
         if put_enchantments(s, item, &mut own, Sort::Jewelry, least.max(base)) {
             own.min_level = Some(least);
             own.arcane_lore =

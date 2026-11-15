@@ -7,14 +7,15 @@
 // Laid over retail's height, when asked: the scene's own offset for the blocks round the viewer
 // (so what stands on the ground and the ground agree), a fine relief and terraces leveled under
 // each body, and far off the smooth surface through retail's vertices with an eroded relief, out
-// to the world's edge. The water's bed is lowered under the water, and the land beside it never
-// lies below the water's level at its edge.
+// to the world's edge. The water's bed is drawn where a body standing in the water stands, as
+// deep under retail's ground as physics sinks it, and the land beside it never lies below the
+// water's level at its edge.
 //
 // Each pixel takes the drawn surface's normal (finite differences of the drawn height), leaned
 // to the smooth surface's where the ground is pinned to retail's; its picture is its cell's,
 // composite or splat, where the block is held, and far off its corners' terrain's colors. The
 // material target carries, on the ground, the water's share of the blend (third byte) and how far
-// under the water's surface the bed is drawn, in 4 cm steps (fourth byte; where the ground is not
+// under the water's surface the bed is drawn, in 1 cm steps (fourth byte; where the ground is not
 // water and the weather is drawn, how much of it is puddle).
 import bindless;
 import ground;
@@ -31,8 +32,8 @@ struct Push
     uint heights;
     uint words;
     uint water;
-    // The near offset: each slot a block, 192 by 192 samples of two floats, the offset and how
-    // much of it the pins leave.
+    // The near offset: each slot a block, 192 by 192 samples of three floats, the offset, how
+    // much of it the pins leave, and the part of it the rock bands make.
     uint near;
     // The patches: two rows each.
     uint patches;
@@ -58,8 +59,8 @@ static const uint D_GLOBAL = 1;   // xy the frame's origin, world meters; z near
 static const uint D_K0 = 2;       // x the fine relief's height, y its size; z the level round's radius, w its fade
 static const uint D_K1 = 3;       // x a terrace's height, y its cap, z the slope it starts at; w the rounding kept far
 static const uint D_K2 = 4;       // x, y where the near gives way to the far; z 1 for the far ground; w its relief's height
-static const uint D_K3 = 5;       // x the far relief's size; w how many bodies
-static const uint D_WATER = 6;    // x 1 while the bed is lowered, y its deepest, z where it gets there
+static const uint D_K3 = 5;       // x the far relief's size; y, z the distances the rock bands fade in between; w how many bodies
+static const uint D_WATER = 6;    // x 1 while the water is drawn over its bed, y how far in from its edge the bed slopes down to where bodies stand
 static const uint D_ORIGIN = 7;   // (uint) xy the frame's origin block, z the blocks table's reach, w its side
 static const uint D_BODIES = 8;   // 32 rows
 static const uint D_SLOTS = 40;   // 64 rows of four blocks, `x * 256 + y`, or -1
@@ -85,7 +86,9 @@ static const float WALKABLE_Z = 0.6641741;
 static const float BELOW = 0.01;
 // The step the bed's depth under the water is written in, meters: the material target's fourth
 // byte on the ground.
-static const float BED_STEP = 0.04;
+static const float BED_STEP = 0.01;
+// How far under the water's level the bed lies before the ground there is drawn as water.
+static const float SURFACE_FROM = 0.02;
 
 // --- the world's vertices ---------------------------------------------------------------------
 
@@ -163,6 +166,50 @@ float smooth_height(float2 p)
         h += wx[i] * column;
     }
     return h;
+}
+
+// The rises over a cell between which a vertex's slope is eased toward its gentler side's: the
+// scene's own.
+static const float EASE_FROM = 0.8391 * CELL;
+static const float EASE_TO = 1.1325 * CELL;
+
+// The slope at the middle of three heights a cell apart, meters a cell: the smooth surface's,
+// eased toward one that keeps to the gentler step where the steeper is steep. The scene's own
+// arithmetic.
+float eased_slope(float a, float b, float c)
+{
+    float d0 = b - a;
+    float d1 = c - b;
+    float mean = 0.5 * (d0 + d1);
+    float kept = d0 * d1 <= 0.0 ? 0.0 : 2.0 * d0 * d1 / (d0 + d1);
+    return mean + (kept - mean) * smoothstep(EASE_FROM, EASE_TO, max(abs(d0), abs(d1)));
+}
+
+// The cubic from `h0` to `h1` over a cell, leaving with slope `m0` and arriving with `m1`.
+float hermite(float h0, float h1, float m0, float m1, float t)
+{
+    float t2 = t * t;
+    float t3 = t2 * t;
+    return h0 * (2.0 * t3 - 3.0 * t2 + 1.0) + h1 * (3.0 * t2 - 2.0 * t3) + m0 * (t3 - 2.0 * t2 + t) + m1 * (t3 - t2);
+}
+
+// The smooth surface eased where gentle ground meets a steep face, so it meets level ground
+// level, at world `p`: the scene's own arithmetic.
+float eased_height(float2 p)
+{
+    float2 q = p / CELL;
+    int2 c = int2(floor(q));
+    float2 f = clamp(q - float2(c), 0.0, 1.0);
+    float rows[4];
+    for (int j = 0; j < 4; j++)
+    {
+        float h0 = vertex_height(c + int2(-1, j - 1));
+        float h1 = vertex_height(c + int2(0, j - 1));
+        float h2 = vertex_height(c + int2(1, j - 1));
+        float h3 = vertex_height(c + int2(2, j - 1));
+        rows[j] = hermite(h1, h2, eased_slope(h0, h1, h2), eased_slope(h1, h2, h3), f.x);
+    }
+    return hermite(rows[1], rows[2], eased_slope(rows[0], rows[1], rows[2]), eased_slope(rows[1], rows[2], rows[3]), f.y);
 }
 
 // A lattice point's hash, 0..1: the scene's own arithmetic.
@@ -278,15 +325,68 @@ float shore_distance(float2 p, float foot)
     return s + shore_wander(p, foot);
 }
 
-// The bed's depth below the water's surface `inside` meters inside the water.
-float bed_depth(float inside, float depth, float shelf)
+// How far physics stands a body under retail's ground at a point standing on it, meters, by its
+// cell's water corners: in a cell of water corners alone, its deepest; in one with some, by
+// whether the corner nearest is water; in one with none, nought.
+static const float SINK_DEEP = 0.9;
+static const float SINK_WET = 0.45;
+static const float SINK_DRY = 0.1;
+// How far either side of where two of those depths meet the bed eases from one to the other.
+static const float SINK_EASE = 0.75;
+
+// How far physics stands a body under retail's ground in quarter `q` of a cell (two a cell each
+// way), from `wet`, whether each of the 3 by 3 vertices from vertex `from` is water.
+float quarter_sink(int2 q, int2 from, bool wet[3][3])
+{
+    int2 c = int2(floor(float2(q) * 0.5)) - from;
+    bool a = wet[c.x][c.y];
+    bool b = wet[c.x + 1][c.y];
+    bool d = wet[c.x][c.y + 1];
+    bool e = wet[c.x + 1][c.y + 1];
+    if (a && b && d && e)
+    {
+        return SINK_DEEP;
+    }
+    if (!(a || b || d || e))
+    {
+        return 0.0;
+    }
+    int2 near = c + (q - int2(floor(float2(q) * 0.5)) * 2);
+    return wet[near.x][near.y] ? SINK_WET : SINK_DRY;
+}
+
+// How far physics stands a body at world `p` under retail's ground, its quarter's depth eased
+// over `SINK_EASE` either side of where quarters meet.
+float shore_sink(float2 p)
+{
+    float half_cell = 0.5 * SHORE_CELL;
+    float2 b = round(p / half_cell);
+    float2 t = float2(smoothstep(-SINK_EASE, SINK_EASE, p.x - b.x * half_cell),
+                      smoothstep(-SINK_EASE, SINK_EASE, p.y - b.y * half_cell));
+    int2 q = int2(b);
+    int2 from = int2(floor(float2(q - 1) * 0.5));
+    bool wet[3][3];
+    for (int i = 0; i < 3; i++)
+    {
+        for (int j = 0; j < 3; j++)
+        {
+            wet[i][j] = shore_texel(from + int2(i, j)).x > 0.0;
+        }
+    }
+    return lerp(lerp(quarter_sink(q - int2(1, 1), from, wet), quarter_sink(q - int2(0, 1), from, wet), t.x),
+                lerp(quarter_sink(q - int2(1, 0), from, wet), quarter_sink(q, from, wet), t.x), t.y);
+}
+
+// How far under retail's ground the bed is drawn at world `p`, `inside` meters inside the water:
+// where a body standing there stands, sloping up to nought over `slope` meters to
+// the water's edge.
+float bed_depth(float2 p, float inside, float slope)
 {
     if (inside <= 0.0)
     {
         return 0.0;
     }
-    float t = 1.0 - min(inside / max(shelf, 1e-3), 1.0);
-    return depth * (1.0 - t * t);
+    return shore_sink(p) * smoothstep(0.0, max(slope, 1e-3), inside);
 }
 
 float shore_floor(float level, float inside)
@@ -321,15 +421,15 @@ float level_at(float2 p)
 
 // --- the offset -------------------------------------------------------------------------------
 
-// The near offset's sample at world meter `g`: the offset and the pins' weight, and whether a
-// slot holds the block; nought and whole where none does.
-float3 near_sample(int2 g)
+// The near offset's sample at world meter `g`: the offset, the pins' weight, the rock bands'
+// part of the offset, and whether a slot holds the block; nought and whole where none does.
+float4 near_sample(int2 g)
 {
     float4 gl = row(push.drawn, D_GLOBAL);
     int n = int(gl.z);
     if (n <= 0)
     {
-        return float3(0.0, 1.0, 0.0);
+        return float4(0.0, 1.0, 0.0, 0.0);
     }
     int2 b = int2(floor(float2(g) / BLOCK));
     int2 slot = ((b % n) + n) % n;
@@ -337,25 +437,32 @@ float3 near_sample(int2 g)
     int held = asint(row_u(push.drawn, D_SLOTS + uint(k) / 4)[k % 4]);
     if (held != b.x * 256 + b.y)
     {
-        return float3(0.0, 1.0, 0.0);
+        return float4(0.0, 1.0, 0.0, 0.0);
     }
     int2 local = g - b * 192;
-    uint at = (uint(k) * 192 * 192 + uint(local.y) * 192 + uint(local.x)) * 8;
-    float2 v = asfloat(buffers[NonUniformResourceIndex(push.near)].Load2(at));
-    return float3(v, 1.0);
+    uint at = (uint(k) * 192 * 192 + uint(local.y) * 192 + uint(local.x)) * 12;
+    float3 v = asfloat(buffers[NonUniformResourceIndex(push.near)].Load3(at));
+    return float4(v, 1.0);
 }
 
-// The near offset and the pins' weight at world `p`, between the samples; z whether any sample
-// round it is held.
-float3 near_at(float2 p)
+// The near offset, the pins' weight and the rock bands' part of the offset at world `p`, between
+// the samples; w whether any sample round it is held.
+float4 near_at(float2 p)
 {
     int2 i = int2(floor(p));
     float2 f = p - floor(p);
-    float3 a = near_sample(i);
-    float3 b = near_sample(i + int2(1, 0));
-    float3 c = near_sample(i + int2(0, 1));
-    float3 d = near_sample(i + int2(1, 1));
+    float4 a = near_sample(i);
+    float4 b = near_sample(i + int2(1, 0));
+    float4 c = near_sample(i + int2(0, 1));
+    float4 d = near_sample(i + int2(1, 1));
     return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+}
+
+// How much of the rock bands is drawn `dist` meters from the eye: the scene's own arithmetic.
+float bands_kept(float dist)
+{
+    float4 k3 = row(push.drawn, D_K3);
+    return smoothstep(k3.y, max(k3.z, k3.y + 1e-3), dist);
 }
 
 // How far `dist` meters from the eye has given way to the far ground: 0 near, 1 far.
@@ -464,8 +571,8 @@ float4 drawn_at(float2 p, float dist, float fine_share, float foot)
 {
     float3 r = retail_at(p);
     float far = morph_far(dist);
-    float3 near = near_at(p);
-    float offset = near.x;
+    float4 near = near_at(p);
+    float offset = near.x - near.z * (1.0 - bands_kept(dist));
     float4 water = row(push.drawn, D_WATER);
     float4 k1 = row(push.drawn, D_K1);
     float4 k2 = row(push.drawn, D_K2);
@@ -482,7 +589,7 @@ float4 drawn_at(float2 p, float dist, float fine_share, float foot)
         float far_offset = (k1.w * (rounded - r.x) + far_relief(p, k3.x, k2.w, length(r.yz), foot)) * dry;
         offset = lerp(offset, far_offset, far);
     }
-    float h = r.x + offset - bed_depth(inside, water.y, water.z);
+    float h = r.x + offset - bed_depth(p, inside, water.y);
     // The forest cover's canopy far off, kept out of the water and its shore.
     h += canopy(p, dist) * (1.0 - smoothstep(-SHORE_CELL, 0.0, inside));
     if (fine_share > 0.0)
@@ -493,7 +600,7 @@ float4 drawn_at(float2 p, float dist, float fine_share, float foot)
     {
         h = max(h, shore_floor(level_at(p), inside));
     }
-    return float4(h, near.y * near.z, r.x, far);
+    return float4(h, near.y * near.w, r.x, far);
 }
 
 // --- the mesh ---------------------------------------------------------------------------------
@@ -582,6 +689,79 @@ float3 smooth_normal(float2 p, float e)
     return normalize(float3(-hx / e, -hy / e, 1.0));
 }
 
+// The eased smooth surface's normal at world `p`, by differences `e` meters on.
+float3 eased_normal(float2 p, float e)
+{
+    float h = eased_height(p);
+    float hx = eased_height(p + float2(e, 0.0)) - h;
+    float hy = eased_height(p + float2(0.0, e)) - h;
+    return normalize(float3(-hx / e, -hy / e, 1.0));
+}
+
+
+// How far a pack's bank blends from the cell beside it into a cell, meters: where the cell beside
+// lays the bed in place of retail's water ground and this one lays the land beside the water, the
+// bed comes in over this much of this cell, so their side is no line between the two.
+static const float BED_BESIDE = 6.0;
+
+// Whether the held cell at world `p` lays a pack's bed in place of retail's water ground.
+bool lays_bed(float2 p)
+{
+    uint4 o = row_u(push.drawn, D_ORIGIN);
+    int2 b = int2(floor(p / BLOCK));
+    int2 at = b - int2(o.xy) + int(o.z);
+    if (any(at < 0) || any(at >= int(o.w)))
+    {
+        return false;
+    }
+    uint2 entry = row_u(push.blocks, uint(at.y) * o.w + uint(at.x)).xy;
+    if (entry.x == 0xFFFFFFFF)
+    {
+        return false;
+    }
+    uint side = max(entry.y, 1u);
+    float2 local = (p - float2(b) * BLOCK) / (BLOCK / float(side));
+    uint2 ij = uint2(clamp(floor(local), 0.0, float(side - 1)));
+    uint w = row_u(push.cells, entry.x + ij.x * side + ij.y).w;
+    return w != 0xFFFFFFFF && (row_u(push.splats, w * SPLAT_ROWS).w & SPLAT_BANK_IS_BED) != 0;
+}
+
+// How much of the bed a cell `size` meters a side that lays the land beside the water takes at
+// `f` across it (0 to 1 each way), from the cells about it that lay the bed: all of it at their
+// side or corner, none `BED_BESIDE` meters in from it.
+float bed_beside(float2 p, float2 f, float size)
+{
+    float2 lo = f * size;
+    float2 hi = (1.0 - f) * size;
+    if (min(min(lo.x, lo.y), min(hi.x, hi.y)) >= BED_BESIDE)
+    {
+        return 0.0;
+    }
+    float2 corner = p - lo;
+    float most = 0.0;
+    for (int i = -1; i <= 1; i++)
+    {
+        for (int j = -1; j <= 1; j++)
+        {
+            if (i == 0 && j == 0)
+            {
+                continue;
+            }
+            float dx = i < 0 ? lo.x : (i > 0 ? hi.x : 0.0);
+            float dy = j < 0 ? lo.y : (j > 0 ? hi.y : 0.0);
+            float d = length(float2(dx, dy));
+            if (d >= BED_BESIDE)
+            {
+                continue;
+            }
+            if (lays_bed(corner + (float2(i, j) + 0.5) * size))
+            {
+                most = max(most, 1.0 - smoothstep(0.0, BED_BESIDE, d));
+            }
+        }
+    }
+    return most;
+}
 
 // The ground's picture at world `p` and the water's share of it: its cell's, where its block is
 // held; far off, its corners' terrain's colors. `dx`, `dy` are `p`'s steps across the screen;
@@ -642,8 +822,15 @@ float4 picture(float2 p, float2 dx, float2 dy, float3 steep, float dist, float f
                 if (banks)
                 {
                     from_water = shore_distance(p, foot);
-                    // Well inside the water, the bed's own ground in place of the land beside it.
-                    float into = smoothstep(BED_FROM, BED_IN, from_water) * s.water;
+                    // Well inside the water, the bed's own ground in place of the land beside it;
+                    // and by the side of a cell that lays the bed there, coming in over a few
+                    // meters, so their side is no line between the two.
+                    float into = smoothstep(BED_FROM, BED_IN, from_water);
+                    if ((flags & SPLAT_BANK_IS_BED) == 0)
+                    {
+                        into = max(into, bed_beside(p, f, size));
+                    }
+                    into *= s.water;
                     if (into > 0.001)
                     {
                         SteepSample t = bank_row(push.splats, push.wrap, at_splat, rot, inside, udx, udy, 2, place);
@@ -846,6 +1033,7 @@ Targets fs_ground(Varyings in)
     float4 parts = drawn_at(p, dist, in.fine_share, foot);
     float e = max(clamp(dist * 0.002, 0.1, 6.0), foot);
     float3 n = drawn_normal(p, dist, e, parts.x, in.fine_share, foot);
+    float3 drawn_n = n;
     // Where no offset is laid the ground is retail's, shaded with the smooth surface's normal as
     // the retail grid's vertex normals shade it, not with its triangles' own.
     float drawn_share = lerp(parts.y, 1.0, parts.w);
@@ -857,18 +1045,28 @@ Targets fs_ground(Varyings in)
     float3 bend;
     float roughness;
     float takes;
-    // How steep the ground is for what is laid by its slope: on walkable ground by the smooth
-    // surface's slope, as much as asked, so the materials sweep over retail's facets; on
-    // unwalkable ground by the drawn ground's own, so the rock bands' treads and risers take them
-    // apart. x the scree's share, y the rock's, z how far from walkable it is.
+    // How steep the ground is for what is laid by its slope: by the drawn ground's own shape, its
+    // rounding, pins and rock bands but not the fine relief, over at least a meter so its
+    // samples do not show; where no offset is laid, by the smooth surface it is rounded to, eased
+    // where it meets a steep face. On walkable ground that surface's slope is taken as much as
+    // asked. x the scree's share, y the rock's, z how far from walkable it is.
     float3 steep = float3(0.0, 0.0, 0.0);
     float4 sloped = row(push.drawn, D_SLOPE2);
     if (sloped.x > 0.0)
     {
         float4 from = row(push.drawn, D_SLOPE);
-        float level = smooth_normal(p, max(e, 0.5)).z;
+        float es = max(e, 1.0);
+        float smooth_up = eased_normal(p, max(e, 0.5)).z;
+        // Without the fine relief and over a meter or more, the shading's own normal.
+        float3 shape = drawn_n;
+        if (in.fine_share > 0.0 || e < 1.0)
+        {
+            float shaped = in.fine_share > 0.0 ? drawn_at(p, dist, 0.0, foot).x : parts.x;
+            shape = drawn_normal(p, dist, es, shaped, 0.0, foot);
+        }
+        float level = lerp(smooth_up, shape.z, drawn_share);
         steep.z = 1.0 - smoothstep(WALKABLE_Z - 0.04, WALKABLE_Z + 0.04, level);
-        float up = lerp(n.z, level, sloped.y * (1.0 - steep.z));
+        float up = lerp(level, smooth_up, sloped.y * (1.0 - steep.z));
         float angle = degrees(acos(clamp(up, -1.0, 1.0)));
         steep.x = smoothstep(from.x, from.x + max(from.y, 0.1), angle);
         steep.y = smoothstep(from.z, from.z + max(from.w, 0.1), angle);
@@ -905,17 +1103,39 @@ Targets fs_ground(Varyings in)
     }
     t.rgb = forest(t.rgb, p, dist, abs(eye.z - at.z) / max(length(eye - at), 1e-3));
     bool per_pixel = row(push.frame, FRAME_SCREEN).y > 0.5;
-    // How far below the water's surface the bed is drawn here, in steps of 4 cm: the water stands
+    // How far below the water's surface the bed is drawn here, in steps of 1 cm: the water stands
     // that far over the ground's own pixel.
     float4 water = row(push.drawn, D_WATER);
-    float bed = water.x > 0.5 ? bed_depth(shore_distance(p, foot), water.y, water.z) : 0.0;
-    uint below = uint(clamp(bed / BED_STEP + 0.5, 0.0, 255.0));
+    float bed = water.x > 0.5 ? bed_depth(p, shore_distance(p, foot), water.y) : 0.0;
+    // Counted from the depth this pixel writes, the mesh's, which lies a little off the drawn
+    // height between its vertices where the bed eases or slopes, so the surface over it stays at
+    // the water's level.
+    float depth = bed > 0.0 ? max(parts.x + bed - (in.world.z - BELOW), 0.0) : 0.0;
+    uint below = uint(clamp(depth / BED_STEP + 0.5, 0.0, 255.0));
+    // Where the bed is lowered under the water's level the ground is water, whatever retail's
+    // picture lays there, so the water's surface runs on over the land inside its edge rather
+    // than ending where the picture turns to land.
+    if (bed > SURFACE_FROM && level_at(p) - parts.x > SURFACE_FROM)
+    {
+        kind = KIND_WATER;
+    }
+    // Ground left dry, where its bed still stands over the water's level, has no water over it.
+    if (kind != KIND_WATER)
+    {
+        below = 0;
+    }
     // Where the ground is not water and the weather is drawn, the fourth byte is how much of it is
-    // puddle instead: on ground the smooth surface holds flat, judged the same way however far
-    // off it is drawn.
+    // puddle instead: on ground the smooth surface holds flat, judged over half a meter however
+    // far off it is drawn, and over the stretch the pixel covers where that is longer, so a far
+    // pixel drawn across the foot of a slope gathers none from the flat half meter at its middle.
     if (kind != KIND_WATER && push.weather != NO_WEATHER)
     {
         float3 level = smooth_normal(p, 0.5);
+        float3 wide = smooth_normal(p, max(e, 0.5));
+        if (wide.z < level.z)
+        {
+            level = wide;
+        }
         below = puddle_byte(puddle_share(push.weather, at, level, takes * (1.0 - t.a)));
     }
     Targets o;
@@ -1237,11 +1457,14 @@ void cs_grass(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID)
 // The push's `first` is the bytes of one draw command, as for the grass; the scatter's command is
 // the third. Its constants: G_SCATTER (12 + 32 = 43) x candidates a square meter, y how far they
 // reach, z the room for them, w how big; G_PEBBLES (44..75) each terrain type's x share of
-// pebbles; G_PALETTE (76..83) the flowers' colors.
+// pebbles, y share of its flowers kept and z 1 where its pebbles lie at all (0 where a pack keeps
+// them off its ground, flat and steep); G_PALETTE (76..83) the flowers' colors; G_ROADSIDE (84) x
+// 1 where pebbles lie along the road's edges.
 
 static const uint G_SCATTER = 43;
 static const uint G_PEBBLES = 44;
 static const uint G_PALETTE = 76;
+static const uint G_ROADSIDE = 84;
 static const uint PALETTE = 8;
 
 uint pack_color(float3 c, uint flags)
@@ -1312,11 +1535,16 @@ void cs_scatter(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID)
         uint words[4] = { vertex_word(cc), vertex_word(cc + int2(1, 0)), vertex_word(cc + int2(0, 1)), vertex_word(cc + int2(1, 1)) };
         float weights[4] = { (1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y };
         float pebbles = 0.0;
+        float kept = 0.0;
+        float lie = 0.0;
         uint scene = 0;
         float most = -1.0;
         for (uint j = 0; j < 4; j++)
         {
-            pebbles += weights[j] * row(g, G_PEBBLES + ((words[j] >> 2) & 31)).x;
+            float4 ground_row = row(g, G_PEBBLES + ((words[j] >> 2) & 31));
+            pebbles += weights[j] * ground_row.x * ground_row.z;
+            kept += weights[j] * ground_row.y;
+            lie += weights[j] * ground_row.z;
             if (weights[j] > most)
             {
                 most = weights[j];
@@ -1325,8 +1553,9 @@ void cs_scatter(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID)
         }
         float inside = road_inside((words[0] & 3) != 0, (words[2] & 3) != 0, (words[1] & 3) != 0,
                                    (words[3] & 3) != 0, f.x * CELL, f.y * CELL);
-        pebbles = max(pebbles, 0.5 * (smoothstep(-3.0, -1.2, inside) - smoothstep(0.0, 1.5, inside)));
-        pebbles += 0.4 * smoothstep(0.5, 0.8, slope);
+        pebbles = max(pebbles, row(g, G_ROADSIDE).x * 0.5 * (smoothstep(-3.0, -1.2, inside) - smoothstep(0.0, 1.5, inside)));
+        pebbles += lie * 0.4 * smoothstep(0.5, 0.8, slope);
+        flowers *= kept;
         float u = grass_unit(h3);
         bool flower = u < flowers * 0.85;
         bool pebble = !flower && u < flowers * 0.85 + pebbles * 0.3;

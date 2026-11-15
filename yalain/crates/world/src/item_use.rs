@@ -40,7 +40,7 @@
 //! **An item that is only looked at** (its usage action the examination's, no effects) is shown
 //! to the player as an examination, then the use answered at once.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use auberean_protocol::types::BehaviorParams;
 use auberean_protocol::ServerMessage;
@@ -113,6 +113,8 @@ pub const USED: (&str, &str) = ("Usage_Effect", "_Spellcraft");
 pub const WORN: (&str, &str) = ("Item_EquipperEffect", "Stat");
 /// And on whoever kills a creature.
 pub const DIED: (&str, &str) = ("NPC_DeathEffect", "Stat");
+/// And on what a weapon's blows land on.
+pub const HIT: (&str, &str) = ("Item_TargetEffect", "Stat");
 
 /// The effects a template's properties name by one pair of [`USED`] and [`WORN`], in order, each at
 /// its spellcraft (else 1), resolved by `resolve` (a name that resolves to nothing is left out).
@@ -191,60 +193,18 @@ pub fn read_named_or<'a>(
         .collect()
 }
 
-/// The item uses a world with no `[[item_use]]` row has, until the world's release holds them. A
-/// forager's food (a Piece of Food): its template names no effect for its use, but its use heals
-/// health and vigor at the food's spellcraft, the forage's (2017: 40 for 10 of the 15 foods used,
-/// their heals 244 each, 50 of 66 vital updates; 45 and 19 for the others), and wears it by one;
-/// at its last durability it is destroyed through overuse (12 of 12, at the fifth use). The
-/// training hall's potions (haste, healing, thorns): their templates name no effect, but each is
-/// drunk for its one effect, at the spellcraft of 1 (2017: 5 of 5 drinks, 2 haste, 2 healing,
-/// 1 thorns). Both play the drink (65 of 65 uses; 5 of 5).
+/// The kinds of item row a world has none of: it has no item uses, books or first gifts of such
+/// a kind.
 #[must_use]
-pub fn fallback_uses() -> BTreeMap<u32, yalain_content::item_rows::ItemUse> {
-    let food = yalain_content::item_rows::ItemUse {
-        template: 0x4700_0845,
-        effects: vec![(0x6F00_2255, 40.0), (0x6F00_2251, 40.0)],
-        behavior: Some(DRINK),
-        wears: Some(5),
-    };
-    let potion = |template, state| yalain_content::item_rows::ItemUse {
-        template,
-        effects: vec![(state, 1.0)],
-        behavior: Some(DRINK),
-        wears: None,
-    };
+pub fn kinds_missing(rows: &yalain_content::item_rows::ItemRows) -> Vec<&'static str> {
     [
-        food,
-        potion(0x4700_1AEE, 0x7000_0A13),
-        potion(0x4700_1AEF, 0x7000_0A00),
-        potion(0x4700_1AF0, 0x7000_09FD),
+        ("item_use", rows.uses.is_empty()),
+        ("book", rows.books.is_empty()),
+        ("start_item", rows.start_items.is_empty()),
     ]
     .into_iter()
-    .map(|u| (u.template, u))
+    .filter_map(|(kind, none)| none.then_some(kind))
     .collect()
-}
-
-/// A world's item rows, each kind its rows or, with none, the server's own (never the two
-/// merged), and the kinds that fell back.
-#[must_use]
-pub fn world_item_rows(
-    rows: yalain_content::item_rows::ItemRows,
-) -> (yalain_content::item_rows::ItemRows, Vec<&'static str>) {
-    let mut out = rows;
-    let mut fell_back = Vec::new();
-    if out.uses.is_empty() {
-        out.uses = fallback_uses();
-        fell_back.push("item_use");
-    }
-    if out.books.is_empty() {
-        out.books = crate::books::fallback_books();
-        fell_back.push("book");
-    }
-    if out.start_items.is_empty() {
-        out.start_items = crate::inventory::fallback_start_items();
-        fell_back.push("start_item");
-    }
-    (out, fell_back)
 }
 
 /// The effects an item's use puts on that the world's rows name, not its template.
@@ -442,6 +402,7 @@ pub fn begin<S: Store>(
         && !seed
         && !own
         && !crate::death_spawn::names_one(s, &t.props)
+        && !crate::placing::names_one(s, &t.props)
         && crate::pets::made_by_use(s, template, &t.props).is_empty()
     {
         return false;
@@ -562,6 +523,9 @@ fn cannot_make<S: Store>(s: &Server<S>, template: u32, props: &Props) -> bool {
     }
     if crate::death_spawn::names_one(s, props) {
         return !crate::death_spawn::can_make_all(s, props);
+    }
+    if crate::placing::names_one(s, props) && !crate::placing::can_make_all(s, props) {
+        return true;
     }
     let names_unmade = (1..=8)
         .filter_map(|i| props.text(&format!("{}{i}", USED.0)))
@@ -686,10 +650,16 @@ pub fn not_monarch<S: Store>(s: &Server<S>, world: ConnId, props: &Props) -> boo
             .is_none_or(|p| s.allegiances.monarch(p.character) != Some(p.character))
 }
 
+/// Is this for heroes alone, and the player of these qualities none?
+#[must_use]
+pub fn not_hero(props: &Props, qualities: &[u8]) -> bool {
+    props.flag("Usage_HeroOnly") && !crate::focus::is_hero(qualities)
+}
+
 /// Why a player may not use an item of these properties now, if it may not: for monarchs alone and
 /// the player none, moving (an item that may not be used so), a mount's item with its hands full,
 /// a mount on or indoors, too far from the item's place, its quest (one the server knows) not where
-/// the item needs it, below the item's least level.
+/// the item needs it, below the item's least level, for heroes alone and the player none.
 fn refused<S: Store>(s: &Server<S>, world: ConnId, props: &Props, clock: Clock) -> Option<u32> {
     let p = s.players.get(&world)?;
     if not_monarch(s, world, props) {
@@ -727,7 +697,7 @@ fn refused<S: Store>(s: &Server<S>, world: ConnId, props: &Props, clock: Clock) 
     if i64::from(crate::examine::level_of(&p.qualities)) < least {
         return Some(refusal::LEVEL_TOO_LOW);
     }
-    None
+    not_hero(props, &p.qualities).then_some(refusal::HERO_ONLY)
 }
 
 /// May an item of these properties not be used moving?
@@ -987,7 +957,7 @@ fn carry_out<S: Store>(
     }
     // One that makes what a world's row names moves the quest it names too, before it's answered
     // (2017: a practice gem's quest 0.06 s before its answer, 4 of 4).
-    if crate::death_spawn::names_one(s, &t.props) {
+    if crate::death_spawn::names_one(s, &t.props) || crate::placing::names_one(s, &t.props) {
         for e in crate::quests::named_for_use(s, &t.props) {
             crate::quests::moves(s, net, world, e, true, clock);
         }
@@ -1008,8 +978,12 @@ fn carry_out<S: Store>(
             progress::private(net, world, &m);
         }
     }
-    // A seed's plant stands.
-    crate::plants::sow(s, net, world, template, clock);
+    // A seed's plants stand, and the quests its template names for its use move with them.
+    if !crate::plants::sow(s, net, world, template, clock).is_empty() {
+        for e in crate::quests::named_for_use(s, &t.props) {
+            crate::quests::moves(s, net, world, e, true, clock);
+        }
+    }
     let spent = spends(&s.item_rows, t.id, &t.props);
     if spent {
         crate::craft::use_up(s, net, world, u.item, 1);
@@ -1042,6 +1016,7 @@ fn carry_out<S: Store>(
     let done = crate::places::use_done(&u, me, f, false, 0.0);
     progress::private(net, world, &done);
     crate::death_spawn::used(s, net, world, &t.props, clock);
+    crate::placing::used(s, net, world, &t.props, clock);
     // An item a row says wears (a forager's food) wears with each use, and goes at its last.
     if let Some(uses) = s.item_rows.wears(template) {
         crate::butchery::wear_tool_by(s, net, world, u.item, 1.0, uses);
@@ -1141,8 +1116,14 @@ pub(crate) fn put_on<S: Store>(
         item,
         giver: None,
         answers: false,
+        quiet: false,
     };
     match def.kind {
+        // One that only changes what creatures make of its bearer, which the world's rows say:
+        // a record for its time, as any.
+        Kind::Other if def.lasts() && s.creature_rows.reads_effect(e.state) => {
+            effects::apply(s, net, world, e.state, cast, clock);
+        }
         // What it does is the server's own (an antidote's cure, a portal): not made here.
         Kind::Other
         | Kind::Immunity { .. }

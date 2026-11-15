@@ -9,7 +9,8 @@
 //!   crafting, the templates of creatures' weapons, the operator's banned names, the placed
 //!   objects, the camps and the veins, and the areas of player conflict (a player whose
 //!   landblock's status changed is told it at once), the scheduled events (those on end, and
-//!   the new ones start at the next step as their times say), the kingdom rows (what raises
+//!   the new ones start at the next step as their times say), the levers (pulls waiting on
+//!   others start over), the offerings (each keeps what it holds), the kingdom rows (what raises
 //!   kingdom points, and the steps and gives for one kingdom alone), the tips (what each
 //!   moment shows; who has been shown one stays so), the item rows (what items' uses do,
 //!   what books and people show, what new characters are given), the creature rows (whom
@@ -132,6 +133,9 @@ pub struct PlacedKinds {
     pub doors: HashMap<u32, crate::usable::doors::Kind>,
     pub doors_through_locks: HashSet<u32>,
     pub chests: HashSet<u32>,
+    /// Of the chests, those that go once closed.
+    pub chests_gone_once_closed: HashSet<u32>,
+    pub portal_doors: HashSet<u32>,
 }
 
 /// The tables a reload looks at, by the name it reports them under.
@@ -153,6 +157,13 @@ pub mod table {
     pub const VEINS: &str = "veins";
     pub const CONFLICT: &str = "conflict areas";
     pub const EVENTS: &str = "scheduled events";
+    pub const TALLIES: &str = "tallies";
+    pub const LEVERS: &str = "levers";
+    pub const OFFERINGS: &str = "offerings";
+    pub const GUARDED: &str = "guarded objects";
+    pub const SHIFTING: &str = "shifting objects";
+    pub const DEFENSES: &str = "defended devices";
+    pub const ESCORTS: &str = "escorts";
     pub const KINGDOMS: &str = "kingdom rows";
     pub const POPUPS: &str = "tips";
     pub const ITEMS: &str = "item rows";
@@ -250,6 +261,69 @@ impl<S: Store> Server<S> {
             crate::events::end_all(self, net);
             self.content.events = std::mem::take(&mut t.content.events);
         }
+        // The tallies: each keeps its count by its key, and one the world no longer has is
+        // dropped.
+        let changed = t.content.tallies != self.content.tallies;
+        r.note(table::TALLIES, changed, true);
+        if changed {
+            self.content.tallies = std::mem::take(&mut t.content.tallies);
+            let tallies = &self.content.tallies;
+            self.tallies
+                .counts
+                .retain(|k, _| tallies.tally(k).is_some());
+        }
+        // The levers: pulls waiting on others start over. The offerings: each keeps what it holds
+        // by its key, and what the world no longer names is dropped.
+        let changed = t.content.levers != self.content.levers;
+        r.note(table::LEVERS, changed, true);
+        if changed {
+            self.content.levers = std::mem::take(&mut t.content.levers);
+            self.levers = crate::usable::levers::Levers::default();
+        }
+        let changed = t.content.offerings != self.content.offerings;
+        r.note(table::OFFERINGS, changed, true);
+        if changed {
+            self.content.offerings = std::mem::take(&mut t.content.offerings);
+            self.offerings.keep_only(&self.content.offerings);
+        }
+        // The guarded objects: what was gone a while and what was found dead are found again.
+        let changed = t.content.guards != self.content.guards;
+        r.note(table::GUARDED, changed, true);
+        if changed {
+            self.content.guards = std::mem::take(&mut t.content.guards);
+            self.guards = crate::guards::Guards::default();
+        }
+        // The shifting objects: what stood is forgotten, and each row stands one again.
+        let changed = t.content.shifting != self.content.shifting;
+        r.note(table::SHIFTING, changed, true);
+        if changed {
+            crate::shifting::forget_all(self, net);
+            self.content.shifting = std::mem::take(&mut t.content.shifting);
+        }
+        // The defended devices: those standing go on as their rows now say, by their place.
+        let changed = t.content.defenses != self.content.defenses;
+        r.note(table::DEFENSES, changed, true);
+        if changed {
+            self.content.defenses = std::mem::take(&mut t.content.defenses);
+            let rows = &self.content.defenses;
+            let things = &self.things;
+            self.defenses.running.retain(|id, run| {
+                let template = things.get(*id).map_or(0, |t| t.template);
+                match rows.of_device(template) {
+                    Some(row) => {
+                        run.row = row;
+                        true
+                    }
+                    None => false,
+                }
+            });
+        }
+        // The escorts: those following now keep following as their rows said when they were made.
+        let changed = t.content.escorts != self.content.escorts;
+        r.note(table::ESCORTS, changed, true);
+        if changed {
+            self.content.escorts = std::mem::take(&mut t.content.escorts);
+        }
         // The placed objects as the world holds them: with camps, the camps keep the creatures.
         if !t.spawns.camps.is_empty() {
             t.content.objects.retain(|o| o.kind != Kind::Creature);
@@ -274,9 +348,24 @@ impl<S: Store> Server<S> {
         r.note(table::STORES, changed, true);
         self.stores = t.stores;
 
-        let changed = t.quests != self.quests;
+        let changed = t.quests != self.quests
+            || t.content.class_gives != self.content.class_gives
+            || t.content.companions != self.content.companions
+            || t.content.craft_gates != self.content.craft_gates
+            || t.content.untraining_gates != self.content.untraining_gates
+            || t.content.hero_gates != self.content.hero_gates
+            || t.content.fought_gates != self.content.fought_gates;
         r.note(table::QUESTS, changed, true);
         self.quests = t.quests;
+        // The classes the gives take go with the gives they name by place, the quests that go
+        // with others with the quests, and the craft skills, untrainings, heroes and fights steps
+        // and gives wait on with them.
+        self.content.class_gives = std::mem::take(&mut t.content.class_gives);
+        self.content.companions = std::mem::take(&mut t.content.companions);
+        self.content.craft_gates = std::mem::take(&mut t.content.craft_gates);
+        self.content.untraining_gates = std::mem::take(&mut t.content.untraining_gates);
+        self.content.hero_gates = std::mem::take(&mut t.content.hero_gates);
+        self.content.fought_gates = std::mem::take(&mut t.content.fought_gates);
 
         let changed = t.talk != self.talk;
         r.note(table::TALK, changed, true);
@@ -358,6 +447,10 @@ impl<S: Store> Server<S> {
                 .creatures_through_locks
                 .extend(k.doors_through_locks);
             self.chests.packages.extend(k.chests);
+            self.chests
+                .gone_once_closed
+                .extend(k.chests_gone_once_closed);
+            self.portal_door_packages.extend(k.portal_doors);
         }
 
         // Veins stand in the world as nodes, not among the placed objects.

@@ -26,7 +26,30 @@ pub struct ClientOption {
 /// data it has never spoken.
 #[must_use]
 pub fn retail_can_play(world: &World) -> bool {
-    required_set_for(world) != SetKind::Original
+    !plays_launch_pair(world)
+}
+
+/// The base a world names for itself ([`World::world_base`]), in lowercase.
+fn named_base(world: &World) -> Option<String> {
+    world.world_base.as_deref().map(str::to_ascii_lowercase)
+}
+
+/// Whether `world` is drawn from Launch's pair, the 1999 files: its era is Launch, or it names that
+/// pair as its base (`original`, as a world written when the pair was a kind of its own says).
+#[must_use]
+pub fn plays_launch_pair(world: &World) -> bool {
+    match named_base(world).as_deref() {
+        Some("original") => true,
+        Some("modern") => false,
+        _ => world.era.as_deref().and_then(EraId::parse) == Some(EraId::Launch),
+    }
+}
+
+/// Whether the Classic set `set` is a pair `world` may be given: Launch's pair on a world drawn
+/// from it, any other year's pair on any other world.
+#[must_use]
+pub fn pair_suits(world: &World, set: &DatSet) -> bool {
+    set.kind.is_pair() && (set.pair_era() == Some(EraId::Launch)) == plays_launch_pair(world)
 }
 
 /// The clients there are, Dereth first, each with whether this world accepts it. `dereth` is the
@@ -154,15 +177,9 @@ pub fn default_set_for(state: &LauncherState, world: &World, last: Option<&str>)
 /// The data set a world's world is drawn from: the one it names ([`World::world_base`]), else its
 /// era's ([`crate::eras::required_set`]).
 pub fn required_set_for(world: &World) -> SetKind {
-    match world
-        .world_base
-        .as_deref()
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
+    match named_base(world).as_deref() {
         Some("modern") => SetKind::Modern,
-        Some("classic") => SetKind::Classic,
-        Some("original") => SetKind::Original,
+        Some("classic" | "original") => SetKind::Classic,
         _ => crate::eras::required_set(world.era.as_deref()),
     }
 }
@@ -177,32 +194,26 @@ pub fn dat_dirs_for(
     classic: Option<&Path>,
 ) -> Result<DatDirs, MissingSet> {
     match required_set_for(world) {
+        SetKind::Classic if plays_launch_pair(world) => {
+            dat_dirs(Some(EraId::Launch.name()), modern, classic)
+        }
         SetKind::Classic => dat_dirs(Some(EraId::Infiltration.name()), modern, classic),
-        SetKind::Original => dat_dirs(Some(EraId::Launch.name()), modern, classic),
         SetKind::Modern | SetKind::Auberean => dat_dirs(None, modern, classic),
     }
 }
 
-/// The kind of pair the Dereth client's second folder (`--classic-dat-dir`) takes on a world: the
-/// Original set where its world is drawn from the 1999 files, the Classic set otherwise.
-pub fn pair_kind_for(world: &World) -> SetKind {
-    if required_set_for(world) == SetKind::Original {
-        SetKind::Original
-    } else {
-        SetKind::Classic
-    }
-}
-
-/// The pairs the Dereth client may be given on a world: every set of the kind it takes
-/// ([`pair_kind_for`]). No world patches or ships them, so any world may read any of them.
+/// The pairs the Dereth client may be given on a world (`--classic-dat-dir`): every Classic set
+/// whose iterations suit it ([`pair_suits`]), the default first. No world patches or ships them,
+/// so any world may read any of them.
 pub fn classic_sets_for(state: &LauncherState, world: &World) -> Vec<DatSet> {
-    let kind = pair_kind_for(world);
-    state
+    let mut sets: Vec<DatSet> = state
         .dat_sets
         .iter()
-        .filter(|s| s.kind == kind)
+        .filter(|s| pair_suits(world, s))
         .cloned()
-        .collect()
+        .collect();
+    sets.sort_by_key(|s| s.origin != DatOrigin::Shared);
+    sets
 }
 
 /// The folders the Dereth client is started with: `--dat-dir` and, when there is one,
@@ -221,8 +232,8 @@ pub enum MissingSet {
     Modern,
     /// The era is before Throne of Destiny, and no Classic set was chosen.
     Classic,
-    /// The era is Launch, and no Original set (the 1999 files) was chosen.
-    Original,
+    /// The era is Launch, and no Classic set of Launch's (the 1999 files) was chosen.
+    Launch,
 }
 
 impl core::fmt::Display for MissingSet {
@@ -232,8 +243,8 @@ impl core::fmt::Display for MissingSet {
             MissingSet::Classic => {
                 "This world's era is before Throne of Destiny: choose Classic data files (portal.dat and cell.dat) as well as the Modern ones."
             }
-            MissingSet::Original => {
-                "This world plays the 1999 launch: choose the 1999 data files (portal.dat and cell.dat) as well as the Modern ones."
+            MissingSet::Launch => {
+                "This world plays the 1999 launch: choose the Launch data files (the 1999 portal.dat and cell.dat) as well as the Modern ones."
             }
         })
     }
@@ -254,9 +265,9 @@ pub fn dat_dirs(
     classic: Option<&Path>,
 ) -> Result<DatDirs, MissingSet> {
     match crate::eras::required_set(era) {
-        kind @ (SetKind::Classic | SetKind::Original) => {
-            let missing = if kind == SetKind::Original {
-                MissingSet::Original
+        SetKind::Classic => {
+            let missing = if era.and_then(EraId::parse) == Some(EraId::Launch) {
+                MissingSet::Launch
             } else {
                 MissingSet::Classic
             };
@@ -277,11 +288,11 @@ pub fn dat_dirs(
     }
 }
 
-/// Whether an Asheron's Call 2 world's page offers a private copy of the retail client's install,
-/// as an Asheron's Call world's offers a private set ([`offers_private_copy`]): the world writes
-/// into the install ([`World::writes_retail_install`]), there is a retail client to copy, and the
-/// world has no copy yet. A copy is made only when the player asks.
-pub fn offers_retail_copy(state: &LauncherState, world: &World) -> bool {
+/// Whether playing an Asheron's Call 2 world with the retail client first makes the world a private
+/// copy of the retail client's install, which it then plays from: the world writes into the
+/// install ([`World::writes_retail_install`]), there is a retail client to copy, and the world has
+/// no copy yet. The player's own install is never written.
+pub fn copies_retail_at_play(state: &LauncherState, world: &World) -> bool {
     world.game == crate::world::Game::Auberean
         && world.writes_retail_install()
         && state.auberean.retail.is_some()
@@ -390,43 +401,71 @@ mod tests {
     }
 
     #[test]
-    fn classic_sets_are_offered_to_every_world_but_launch_which_is_offered_the_1999_sets() {
-        let set = |id: &str, kind| DatSet {
-            id: id.into(),
-            path: PathBuf::from(id),
-            kind,
-            origin: DatOrigin::Unassigned,
+    fn classic_sets_are_offered_by_their_iterations_the_1999_pair_to_launch_and_others_elsewhere() {
+        let pair = |id: &str, portal: u32, cell: u32, origin| {
+            let d = crate::datset::tests::tmp(&format!("choices-pair-{id}"));
+            crate::testing::write_classic_set(&d, portal, cell);
+            DatSet {
+                id: id.into(),
+                path: d.clone(),
+                kind: SetKind::Classic,
+                origin,
+                files: crate::datset::scan_classic_dir(&d),
+                last_patched_by_server: None,
+                created_by_launcher: false,
+            }
+        };
+        let modern = DatSet {
+            id: "m".into(),
+            path: PathBuf::from("m"),
+            kind: SetKind::Modern,
+            origin: DatOrigin::Shared,
             files: vec![],
             last_patched_by_server: None,
             created_by_launcher: false,
         };
         let s = LauncherState {
             dat_sets: vec![
-                set("m", SetKind::Modern),
-                set("c", SetKind::Classic),
-                set("o", SetKind::Original),
+                modern,
+                pair("aug", 124, 108, DatOrigin::Unassigned),
+                pair("feb", 2112, 1593, DatOrigin::Shared),
+                pair("nov", 105, 67, DatOrigin::Unassigned),
+                pair("cd", 102, 67, DatOrigin::Unassigned),
             ],
             ..Default::default()
         };
         let mut w = World::new("eulmore", "Eulmore");
         let ids = |v: Vec<DatSet>| v.into_iter().map(|d| d.id).collect::<Vec<_>>();
         assert_eq!(ids(dat_sets_for(&s, &w)), ["m"]);
-        assert_eq!(ids(classic_sets_for(&s, &w)), ["c"]);
+        assert_eq!(
+            ids(classic_sets_for(&s, &w)),
+            ["feb", "aug"],
+            "the default first"
+        );
         w.era = Some("infiltration".into());
-        assert_eq!(ids(classic_sets_for(&s, &w)), ["c"]);
+        assert_eq!(ids(classic_sets_for(&s, &w)), ["feb", "aug"]);
         w.era = Some("launch".into());
         assert_eq!(ids(dat_sets_for(&s, &w)), ["m"]);
-        assert_eq!(ids(classic_sets_for(&s, &w)), ["o"]);
+        assert_eq!(ids(classic_sets_for(&s, &w)), ["nov", "cd"]);
+        // A world written when the 1999 pair was a kind of its own names it as its base.
+        w.era = None;
+        w.world_base = Some("original".into());
+        assert_eq!(ids(classic_sets_for(&s, &w)), ["nov", "cd"]);
+        assert_eq!(required_set_for(&w), SetKind::Classic);
+        for d in s.dat_sets.iter().skip(1) {
+            let _ = std::fs::remove_dir_all(&d.path);
+        }
     }
 
     #[test]
-    fn a_launch_world_needs_the_1999_set_beside_the_modern_one() {
+    fn a_launch_world_needs_the_launch_pair_beside_the_modern_one() {
         let (m, o) = (Path::new("/m"), Path::new("/o"));
         let mut w = World::new("x", "X");
         w.era = Some("launch".into());
-        assert_eq!(required_set_for(&w), SetKind::Original);
-        assert_eq!(dat_dirs_for(&w, Some(m), None), Err(MissingSet::Original));
-        assert!(MissingSet::Original.to_string().contains("1999 data files"));
+        assert_eq!(required_set_for(&w), SetKind::Classic);
+        assert!(plays_launch_pair(&w));
+        assert_eq!(dat_dirs_for(&w, Some(m), None), Err(MissingSet::Launch));
+        assert!(MissingSet::Launch.to_string().contains("Launch data files"));
         assert_eq!(
             dat_dirs_for(&w, Some(m), Some(o)),
             Ok(DatDirs {
@@ -585,11 +624,11 @@ mod tests {
         assert_eq!(default_client(&[], &w, None), None);
     }
 
-    /// An Asheron's Call 2 world that patches or serves the admin library offers a private copy of
-    /// the retail install, once there is a retail client and until the world has a copy; a world
-    /// that writes nothing, or one of Asheron's Call, doesn't.
+    /// Playing an Asheron's Call 2 world that patches or serves the admin library with the retail
+    /// client makes it a private copy of the retail install, once there is a retail client and
+    /// until the world has a copy; a world that writes nothing, or one of Asheron's Call, doesn't.
     #[test]
-    fn a_world_that_writes_into_the_retail_install_offers_a_private_copy_until_it_has_one() {
+    fn a_world_that_writes_into_the_retail_install_is_copied_at_play_until_it_has_a_copy() {
         let mut state = LauncherState::default();
         let mut world = World {
             slug: "dawnsong".into(),
@@ -598,25 +637,25 @@ mod tests {
         };
         world.dats.admin_library = Some(true);
         assert!(
-            !offers_retail_copy(&state, &world),
+            !copies_retail_at_play(&state, &world),
             "no retail client to copy"
         );
         state.auberean.retail = Some(install(ClientKind::Retail, "ac2client-0930"));
-        assert!(offers_retail_copy(&state, &world));
+        assert!(copies_retail_at_play(&state, &world));
         world.dats.admin_library = None;
-        assert!(!offers_retail_copy(&state, &world), "writes nothing");
+        assert!(!copies_retail_at_play(&state, &world), "writes nothing");
         world.dats.patches_over_wire = Some(true);
-        assert!(offers_retail_copy(&state, &world));
+        assert!(copies_retail_at_play(&state, &world));
         state
             .auberean
             .retail_copies
             .insert("dawnsong".into(), PathBuf::from("C:/copies/dawnsong"));
-        assert!(!offers_retail_copy(&state, &world), "it has one");
+        assert!(!copies_retail_at_play(&state, &world), "it has one");
         world.slug = "other".into();
-        assert!(offers_retail_copy(&state, &world));
+        assert!(copies_retail_at_play(&state, &world));
         world.game = crate::world::Game::Dereth;
         assert!(
-            !offers_retail_copy(&state, &world),
+            !copies_retail_at_play(&state, &world),
             "a world of the other game"
         );
     }

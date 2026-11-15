@@ -15,11 +15,13 @@ pub mod ao;
 #[cfg(all(feature = "dlss", windows))]
 pub mod dlss;
 pub mod drawn;
+pub mod far_pictures;
 pub mod forest;
 pub mod gi;
 pub mod grade;
 pub mod grass;
 pub mod impostor;
+pub mod instances;
 pub mod intent;
 pub mod lamps;
 pub mod landscape;
@@ -38,10 +40,14 @@ pub mod rt_shadow;
 pub mod scene;
 pub mod settings;
 pub mod shadow;
+pub mod skin_pass;
+pub mod skins;
 pub mod sky;
 pub mod sky_probe;
 pub mod terrain;
 pub mod upscale;
+pub(crate) mod waiting;
+pub mod wake;
 pub mod water;
 pub mod weather;
 
@@ -56,7 +62,7 @@ use glam::{Vec3, Vec4Swizzles};
 
 use self::light::{LightMode, LightSet};
 use self::scene::{Bucket, GpuScene, NONE};
-use crate::assets::{AssetSource, AssetTables};
+use crate::assets::{AssetSource, AssetTables, MeshKey};
 use crate::scene::{BlockId, FrameDelta, SceneDelta};
 use crate::shaders::{spirv, Entry};
 
@@ -89,6 +95,10 @@ struct Pipelines {
     forward: [[Pipeline; 2]; 2],
     /// The cut-outs' edges: front faces culled away, then both drawn.
     edge: [Pipeline; 2],
+    /// The lists the device sorts, each drawn by one pipeline whatever its items' sides: the
+    /// cut-outs' edges, and the blended and added surfaces where the device blends both in one.
+    edge_any: Pipeline,
+    forward_any: Option<Pipeline>,
     /// The sky: opaque, blended, additive; each with front faces culled away, then both drawn.
     /// No depth: the sky is behind everything.
     sky: [[Pipeline; 2]; 3],
@@ -104,6 +114,9 @@ pub const NORMAL: Format = Format::Rg16Snorm;
 pub const LIGHT: Format = Format::Rgba16Float;
 pub const MATERIAL: Format = Format::Rgba8Unorm;
 pub const DEPTH: Format = Format::D32Float;
+
+/// The meshes the far trees' pictures are made of that a frame holds, at most.
+const FAR_MESHES_A_FRAME: usize = 16;
 pub const COLOR: Format = Format::Rgba8Unorm;
 
 /// The commands one cull bucket holds at most.
@@ -132,6 +145,9 @@ pub struct ReadBack {
     pub eye: Vec3,
     /// The sun's share at each pixel, a byte a pixel, when the frame drew the sun's shadows.
     pub sun_visibility: Option<Vec<u8>>,
+    /// How much of the sky reaches each pixel, a float a pixel at the render size, when the frame
+    /// drew the occlusion.
+    pub occlusion: Option<Vec<u8>>,
 }
 
 /// One buffer rewritten every frame, grown when a frame needs more.
@@ -203,6 +219,11 @@ pub struct RenderStats {
     pub last_forward: u32,
     /// The particles' draw items of the last frame.
     pub last_particle_items: u32,
+    /// Bodies posed, their vertices, and the time posing them took, in nanoseconds (an
+    /// instrument's count, read from the wall clock).
+    pub skin_poses: u64,
+    pub skin_vertices: u64,
+    pub skin_nanos: u64,
 }
 
 /// The renderer: the layer's device, the retained scene and each frame's passes.
@@ -240,6 +261,9 @@ pub struct Renderer {
     ao: self::ao::AoPass,
     /// The art pack's swaps made.
     packs: crate::assets::pack::PackSwaps,
+    /// The objects drawn with an art pack's body, and their bodies.
+    skins: skins::Skins,
+    skin_pass: skin_pass::SkinPass,
     /// Whether an art pack's light and grade are laid over the frame.
     pack_look: bool,
     /// Which of the landscape's additions are drawn.
@@ -296,6 +320,8 @@ pub struct Renderer {
     /// How the ground's cells are drawn, and what the scene's changes counted.
     terrain: terrain::TerrainSettings,
     changes: terrain::ChangeCounts,
+    /// The scene's changes waiting for their pictures.
+    waiting: waiting::Waiting,
     /// The last frame's view and projection, and whether it drew the sun's shadows.
     view_projection: glam::Mat4,
     eye: Vec3,
@@ -303,6 +329,8 @@ pub struct Renderer {
     /// The lamps' pass.
     pub(crate) lamps: lamps::LampsPass,
     pub(crate) lod: lod::Lod,
+    /// The blocks' parts chosen and listed on the device.
+    pub(crate) instances: instances::DeviceParts,
     pub(crate) impostors: impostor::ImpostorPass,
     /// The art pack's far trees and forest cover.
     pub(crate) forest: forest::ForestPass,
@@ -313,6 +341,13 @@ pub struct Renderer {
     lift_probe: dereth_gfx::Pipeline,
     /// The instances of the trees the last frame drew as meshes, with lifts onto the ground.
     mesh_trees: Vec<u32>,
+    /// How long the last frame's lists of what it drew were, to make this frame's that long at
+    /// once.
+    drawn_sizes: DrawnSizes,
+    /// The last frame's outdoor edges and blended surfaces as the processor drew them, item by
+    /// item, and which of the two lists the device sorted instead: for the checks.
+    blended: [Vec<u32>; 2],
+    blended_sorted: [bool; 2],
 }
 
 /// A raw shader from the embedded blobs.
@@ -329,15 +364,16 @@ pub(crate) fn command_bytes(gfx: &dereth_gfx::Device) -> u32 {
     gfx.indexed_command_words() * 4
 }
 
-/// One indexed indirect draw command on `backend`: `indices` indices from `first_index`, once,
-/// the draw's item `item`.
-pub(crate) fn command(
+/// One indexed indirect draw command on `backend`, appended to `out`: `indices` indices from
+/// `first_index`, once, the draw's item `item`.
+pub(crate) fn command_into(
     backend: dereth_gfx::Backend,
     indices: u32,
     first_index: u32,
     item: u32,
-) -> Vec<u8> {
-    push_words(&backend.indexed_command(indices, 1, first_index, 0, item))
+    out: &mut Vec<u8>,
+) {
+    backend.write_indexed_command(indices, 1, first_index, 0, item, out);
 }
 
 fn gbuffer_targets() -> [ColorTarget; 4] {
@@ -412,6 +448,8 @@ impl Pipelines {
             resolve_pixel: scene.resolve_pixel,
             forward: scene.forward,
             edge: scene.edge,
+            edge_any: scene.edge_any,
+            forward_any: scene.forward_any,
             sky: scene.sky,
             composite,
             cull,
@@ -426,6 +464,8 @@ impl Pipelines {
             resolve_pixel: scene.resolve_pixel,
             forward: scene.forward,
             edge: scene.edge,
+            edge_any: scene.edge_any,
+            forward_any: scene.forward_any,
             sky: scene.sky,
             ..self
         }
@@ -441,6 +481,8 @@ struct ScenePipelines {
     resolve_pixel: Pipeline,
     forward: [[Pipeline; 2]; 2],
     edge: [Pipeline; 2],
+    edge_any: Pipeline,
+    forward_any: Option<Pipeline>,
     sky: [[Pipeline; 2]; 3],
 }
 
@@ -514,6 +556,48 @@ impl ScenePipelines {
                 cull,
             })?;
         }
+        let edge_any = d.create_graphics_pipeline(&GraphicsDesc {
+            label: "remaster cut-out edges, sorted",
+            vertex: shader(Entry::GbufferVsMain),
+            fragment: Some(shader(Entry::GbufferFsEdgeAny)),
+            color: &[ColorTarget {
+                format,
+                blend: Some(blends[0]),
+                write_alpha: false,
+            }],
+            depth: Some(DepthState {
+                format: DEPTH,
+                compare: Some(Compare::LessEqual),
+                write: true,
+            }),
+            cull: Cull::None,
+        })?;
+        // A blended surface's alpha comes with its color and one less it goes with what is drawn,
+        // as the blended pipeline has them; an added one's color comes whole and all of what is
+        // drawn stays, as the added pipeline has them.
+        let forward_any = if d.caps().dual_source_blend {
+            Some(d.create_graphics_pipeline(&GraphicsDesc {
+                label: "remaster forward, sorted",
+                vertex: shader(Entry::GbufferVsMain),
+                fragment: Some(shader(Entry::GbufferFsForwardAny)),
+                color: &[ColorTarget {
+                    format,
+                    blend: Some(Blend {
+                        src: Factor::Src1Alpha,
+                        dst: Factor::OneMinusSrc1Color,
+                    }),
+                    write_alpha: false,
+                }],
+                depth: Some(DepthState {
+                    format: DEPTH,
+                    compare: Some(Compare::LessEqual),
+                    write: false,
+                }),
+                cull: Cull::None,
+            })?)
+        } else {
+            None
+        };
         let mut sky = [[resolve_vertex; 2]; 3];
         for (b, blend) in [None, Some(blends[0]), Some(blends[1])]
             .into_iter()
@@ -539,6 +623,8 @@ impl ScenePipelines {
             resolve_pixel,
             forward,
             edge,
+            edge_any,
+            forward_any,
             sky,
         })
     }
@@ -546,7 +632,11 @@ impl ScenePipelines {
 
 /// Little-endian words, as the shaders' push constants read them.
 fn push_words(w: &[u32]) -> Vec<u8> {
-    w.iter().flat_map(|x| x.to_le_bytes()).collect()
+    let mut out = Vec::with_capacity(w.len() * 4);
+    for x in w {
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    out
 }
 
 impl Renderer {
@@ -561,6 +651,8 @@ impl Renderer {
         let impostors = impostor::ImpostorPass::new(&mut gfx)?;
         let forest = forest::ForestPass::new(&mut gfx)?;
         let grass = grass::GrassPass::new(&mut gfx)?;
+        let instances = instances::DeviceParts::new(&mut gfx)?;
+        let skin_pass = skin_pass::SkinPass::new(&mut gfx)?;
         let lift_probe = gfx.create_compute_pipeline(&dereth_gfx::ComputeDesc {
             label: "remaster lift probe",
             shader: shader(Entry::LiftCsBases),
@@ -572,13 +664,17 @@ impl Renderer {
             label: "remaster commands",
             size: u64::from(scene::CULLED_BUCKETS * BUCKET_CAPACITY)
                 * u64::from(command_bytes(&gfx)),
-            usage: BufferUsage::STORAGE | BufferUsage::INDIRECT,
+            // Read back by the checks.
+            usage: BufferUsage::STORAGE | BufferUsage::INDIRECT | BufferUsage::TRANSFER_SRC,
             location: Location::Gpu,
         })?;
         let counts = gfx.create_buffer(&BufferDesc {
             label: "remaster counts",
             size: 16,
-            usage: BufferUsage::STORAGE | BufferUsage::INDIRECT | BufferUsage::TRANSFER_DST,
+            usage: BufferUsage::STORAGE
+                | BufferUsage::INDIRECT
+                | BufferUsage::TRANSFER_DST
+                | BufferUsage::TRANSFER_SRC,
             location: Location::Gpu,
         })?;
         let commands_index = gfx.bind_buffer(commands)?;
@@ -610,6 +706,8 @@ impl Renderer {
             forward: per_frame(&mut gfx, "remaster forward", 1 << 18, BufferUsage::INDIRECT)?,
             ao: self::ao::AoPass::new(&mut gfx)?,
             packs: crate::assets::pack::PackSwaps::default(),
+            skins: skins::Skins::default(),
+            skin_pass,
             pack_look: false,
             landscape: self::landscape::LandscapeSettings::default(),
             water: self::water::WaterPass::new(&mut gfx)?,
@@ -664,6 +762,7 @@ impl Renderer {
             },
             terrain: terrain::TerrainSettings::default(),
             changes: terrain::ChangeCounts::default(),
+            waiting: waiting::Waiting::default(),
             view_projection: glam::Mat4::IDENTITY,
             eye: Vec3::ZERO,
             shadowed: false,
@@ -687,11 +786,15 @@ impl Renderer {
             stats: RenderStats::default(),
             lamps,
             lod: lod::Lod::default(),
+            instances,
             impostors,
             forest,
             grass,
             lift_probe,
             mesh_trees: Vec::new(),
+            drawn_sizes: DrawnSizes::default(),
+            blended: Default::default(),
+            blended_sorted: [false; 2],
         })
     }
 
@@ -758,6 +861,7 @@ impl Renderer {
         let looks = self.intents.looks();
         self.post.set_grade_tables(grade::tables_with(looks));
         self.drawn_ground.grass_kinds = grass::kinds_with(looks);
+        self.grass.set_kinds(self.drawn_ground.grass_kinds);
     }
 
     /// The looks laid over retail's light.
@@ -770,6 +874,53 @@ impl Renderer {
     #[must_use]
     pub fn intent(&self) -> &self::intent::Intent {
         self.intents.last()
+    }
+
+    /// Whether skinned bodies are posed on the device (on by default) or on the processor.
+    pub fn set_skin_gpu(&mut self, on: bool) {
+        self.skins.gpu = on;
+    }
+
+    /// Whether a skinned body still dying when its object leaves is drawn on to the end of its
+    /// death (on by default), for an instrument showing what that adds.
+    pub fn set_skin_ghosts(&mut self, on: bool) {
+        self.skins.ghosting = on;
+    }
+
+    /// What each object's body last played of its own clips ([`skins::Skins::playing`]).
+    #[must_use]
+    pub fn skin_playing(
+        &self,
+    ) -> Vec<(
+        crate::scene::ObjectKey,
+        Option<crate::assets::skin::Slot>,
+        f32,
+        bool,
+    )> {
+        self.skins.playing()
+    }
+
+    /// The objects drawn as ghosts, and the corpses hidden under them ([`skins::Skins::ghosts`]).
+    #[must_use]
+    pub fn skin_ghosts(&self) -> (Vec<crate::scene::ObjectKey>, Vec<crate::scene::ObjectKey>) {
+        self.skins.ghosts()
+    }
+
+    /// Each skinned body drawn, by the id of its object's mesh.
+    #[must_use]
+    pub fn skin_bodies(
+        &self,
+    ) -> std::collections::BTreeMap<u32, std::sync::Arc<crate::assets::skin::SkinModel>> {
+        self.skins.meshes()
+    }
+
+    /// Whether the motion pass is given skinned bodies' last places, vertex by vertex (on by
+    /// default; off, a body moves in the motion pass only as its anchor part does).
+    pub fn set_skin_motion(&mut self, on: bool) {
+        self.skins.motion = on;
+        if !on {
+            self.scene.previous.clear();
+        }
     }
 
     /// What the renderer has counted.
@@ -932,10 +1083,33 @@ impl Renderer {
     }
 
     /// The instances of the trees the last frame drew as meshes (not wholly as impostors) that
-    /// carry lifts onto the ground drawn over retail's.
-    #[must_use]
-    pub fn mesh_trees(&self) -> &[u32] {
-        &self.mesh_trees
+    /// carry lifts onto the ground drawn over retail's: those the processor chose, then those
+    /// the device chose, read back after it has finished.
+    pub fn mesh_trees(&mut self) -> Vec<u32> {
+        let mut out = self.mesh_trees.clone();
+        if !self.lod.settings().on {
+            return out;
+        }
+        for s in self.part_states() {
+            if !s.drawn || s.share >= 1.0 {
+                continue;
+            }
+            let Some(p) = self
+                .scene
+                .blocks
+                .get(&s.block)
+                .and_then(|b| b.parts.get(s.part as usize))
+            else {
+                continue;
+            };
+            let tree = p
+                .degrade
+                .is_some_and(|r| self.lod.record_is_tree(s.block, r));
+            if p.lifts != [0.0; 2] && tree {
+                out.push(p.instance);
+            }
+        }
+        out
     }
 
     /// Where each of `instances` stands (the frame's space) and how far it is drawn above it, as
@@ -1043,10 +1217,68 @@ impl Renderer {
     }
 
     /// Where the last frame's impostor cards stand their trees' bases (the frame's space), and
-    /// how far each was lifted onto the ground drawn over retail's.
-    #[must_use]
-    pub fn impostor_bases(&self) -> Vec<(Vec3, f32)> {
-        self.impostors.bases().to_vec()
+    /// how far each was lifted onto the ground drawn over retail's: the processor's cards, then
+    /// the device's, read back after it has finished.
+    pub fn impostor_bases(&mut self) -> Vec<(Vec3, f32)> {
+        let mut out = self.impostors.bases().to_vec();
+        for (card, p, offset) in self.device_cards() {
+            let Some(row) = self.impostors.atlas_row(card.gfxobj) else {
+                continue;
+            };
+            let base = p.transform.w_axis.truncate() + offset;
+            let lift = card.centre.z - (p.transform.transform_point3(row.centre) + offset).z;
+            out.push((base + Vec3::new(0.0, 0.0, lift), lift));
+        }
+        out
+    }
+
+    /// The last frame's impostor cards: the processor's, then the device's, read back after it
+    /// has finished.
+    pub fn impostor_cards(&mut self) -> Vec<impostor::DrawnCard> {
+        let mut out = self.impostors.drawn().to_vec();
+        out.extend(self.device_cards().into_iter().map(|(c, _, _)| c));
+        out
+    }
+
+    /// The cards the device drew last frame, each with its tree's part and its block's offset
+    /// from that frame's origin.
+    fn device_cards(&mut self) -> Vec<(impostor::DrawnCard, scene::PartItems, Vec3)> {
+        let cards = self.instances.read_cards(&mut self.gfx).unwrap_or_default();
+        let origin = self.instances.origin();
+        let mut out = Vec::with_capacity(cards.len());
+        for c in cards {
+            let Some(p) = self
+                .scene
+                .blocks
+                .get(&c.block)
+                .and_then(|b| b.parts.get(c.part as usize))
+            else {
+                continue;
+            };
+            let Some(gfxobj) = p.degrade.and_then(|r| self.lod.first_level(c.block, r)) else {
+                continue;
+            };
+            let (x, y) = (i32::from(c.block >> 8), i32::from(c.block & 0xFF));
+            #[allow(clippy::cast_precision_loss)] // a few hundred blocks
+            let offset = Vec3::new(
+                (x - origin[0]) as f32 * 192.0,
+                (y - origin[1]) as f32 * 192.0,
+                0.0,
+            );
+            let [r0, r1, ..] = c.rows;
+            out.push((
+                impostor::DrawnCard {
+                    gfxobj,
+                    centre: Vec3::new(r0[0], r0[1], r0[2]),
+                    radius: r0[3],
+                    turn: dereth_primitives::num::math::atan2f(r1[1], r1[0]),
+                    share: r1[3],
+                },
+                p.clone(),
+                offset,
+            ));
+        }
+        out
     }
 
     /// How the ground's cells are drawn, from the next frame the scene hands over.
@@ -1101,6 +1333,7 @@ impl Renderer {
         } else {
             None
         };
+        let occlusion = self.ao.read_occlusion(&mut self.gfx).ok().flatten();
         let (color, (width, height)) = self
             .post
             .upscaled_output()
@@ -1119,6 +1352,7 @@ impl Renderer {
             view_projection: self.view_projection,
             eye: self.eye,
             sun_visibility,
+            occlusion,
         })
     }
 
@@ -1134,7 +1368,7 @@ impl Renderer {
     pub fn receive(
         &mut self,
         deltas: Vec<SceneDelta>,
-        frame: FrameDelta,
+        mut frame: FrameDelta,
         detail: [Option<(u32, f32)>; 2],
         src: &mut dyn AssetSource,
     ) {
@@ -1148,14 +1382,38 @@ impl Renderer {
                 self.ground_colors = true;
             }
         }
+        self.grass.set_pebbles(src.pebble_grounds());
         // The ground switched between its composites and its splats: every held block's cells
         // are written again once the tables have handed over the other form.
         let switched = self.tables.splat() != self.terrain.splat;
         if switched {
             self.tables.set_splat(self.terrain.splat, src);
         }
-        // An art pack's models in place of the placements it has them for, as the blocks come.
+        // An art pack's models in place of the placements it has them for, as the blocks come;
+        // its bodies in place of the parts of the objects it has them for, as the objects come.
         let deltas = self.packs.swap(deltas, &mut |id| src.pack_model(id));
+        // A body still dying when its object leaves is drawn on to the end of its death.
+        let deltas = self
+            .skins
+            .haunt(deltas, &frame, self.packs.settings.characters);
+        let deltas = if self.packs.settings.characters {
+            self.skins.swap(deltas, &mut |setup, palettes, who| {
+                src.pack_skin(setup, palettes, who)
+            })
+        } else {
+            self.skins.forget(&deltas);
+            deltas
+        };
+        let mut with_skins = skins::WithSkins {
+            src,
+            meshes: self.skins.meshes(),
+        };
+        let src: &mut dyn AssetSource = &mut with_skins;
+        // The changes whose pictures are ready, in order; the rest wait for theirs.
+        let deltas = self
+            .waiting
+            .admit(deltas, &mut frame.levels, &mut self.tables, src);
+        self.changes.waiting = self.waiting.len();
         for d in &deltas {
             self.tables.apply(d, src);
             match d {
@@ -1169,6 +1427,24 @@ impl Renderer {
         self.lod.take(&deltas, &frame.levels);
         self.tables
             .particles_in(frame.particles.iter().map(|p| p.gfx), src);
+        // The meshes the far trees' pictures are made of, held once their own pictures are ready.
+        for id in self
+            .forest
+            .wanted_meshes()
+            .iter()
+            .take(FAR_MESHES_A_FRAME)
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            let ready = self
+                .tables
+                .impostor_pictures_wanted(id, src)
+                .into_iter()
+                .all(|(k, clip)| self.tables.holds_texture(&k) || src.prepare(&k, clip));
+            if ready {
+                self.tables.impostor_in(id, src);
+            }
+        }
         self.scene.upload(&mut self.gfx, &mut self.tables);
         if switched {
             if let Err(e) = self.scene.rewrite_ground_cells(&mut self.gfx, &self.tables) {
@@ -1224,10 +1500,73 @@ impl Renderer {
             if let Err(e) = r {
                 tracing::warn!(target: "dereth::remaster", "the scene could not take a change: {e}");
             }
+            if let SceneDelta::BlockIn(b) | SceneDelta::BlockChanged(b) = d {
+                let packs = &self.packs;
+                self.scene.mark_cover(b.block, &|m| packs.is_cover(m));
+            }
+        }
+        if let Err(e) = self.instances.take(
+            &mut self.gfx,
+            (&self.scene, &self.tables),
+            &mut self.lod,
+            &mut self.impostors,
+            &deltas,
+        ) {
+            tracing::warn!(target: "dereth::remaster", "the parts were not taken: {e}");
         }
         for l in &frame.levels {
             self.scene.levels(l);
+            if let Err(e) = self
+                .instances
+                .levels(&mut self.gfx, &self.scene, &self.lod, l)
+            {
+                tracing::warn!(target: "dereth::remaster", "retail's levels were not taken: {e}");
+            }
         }
+        // The ghosts stand in the frame, and the corpses under them are hidden.
+        self.skins.with_ghosts(&mut frame);
+        // Each body posed by its object's parts this frame, written over its mesh: on the device,
+        // where here only each body's joints are worked out (and its data sent the first time);
+        // or here, every vertex.
+        let started = std::time::Instant::now();
+        let vertices = self.skins.posed;
+        let (bodies, posed) = if self.skins.gpu {
+            let jobs = self.skins.joints(&frame);
+            let motion = self.skins.motion;
+            let r = self
+                .skin_pass
+                .receive(&mut self.gfx, &mut self.scene, &jobs, motion);
+            if let Err(e) = r {
+                tracing::warn!(target: "dereth::remaster", "the bodies were not posed: {e}");
+            }
+            (jobs.len(), Vec::new())
+        } else {
+            let posed = self.skins.pose(&frame);
+            (posed.len(), posed)
+        };
+        self.stats.skin_nanos += u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.stats.skin_poses += bodies as u64;
+        self.stats.skin_vertices += self.skins.posed - vertices;
+        for (id, rows) in posed {
+            if self.skins.motion {
+                let last = self.skins.last_rows(id, &rows);
+                let r = self
+                    .scene
+                    .write_mesh_previous(&mut self.gfx, MeshKey::GfxObj(id), &last);
+                if let Err(e) = r {
+                    tracing::warn!(target: "dereth::remaster", "a body's last places were not kept: {e}");
+                }
+            }
+            let r = self
+                .scene
+                .write_mesh_vertices(&mut self.gfx, MeshKey::GfxObj(id), &rows);
+            if let Err(e) = r {
+                tracing::warn!(target: "dereth::remaster", "a body was not posed: {e}");
+            }
+        }
+        // What a body dying now is, should its object leave; nothing the bodies hold is drawn.
+        self.skins.remember(&frame);
+        self.skins.hide_held(&mut frame);
         self.particles = frame
             .particles
             .iter()
@@ -1457,8 +1796,11 @@ fn make_ground_samplers(gfx: &mut Device, bias: f32) -> Result<[u32; 2], dereth_
 pub(crate) struct Drawn {
     /// Whether the viewer stands inside with the outdoors drawn.
     pub inside: bool,
-    /// The G-buffer's items.
+    /// The G-buffer's items, and for each of the outdoors' its block part's place in the walk:
+    /// block by block as the frame drew them, each taking a place for each of its parts (`NONE`
+    /// for any other item).
     pub opaque: Vec<u32>,
+    pub opaque_walk: Vec<u32>,
     pub opaque_inside: Vec<u32>,
     /// The forward pass's items, far to near, with their buckets.
     pub forward: Vec<(f32, u32, Bucket)>,
@@ -1484,17 +1826,42 @@ pub(crate) struct Drawn {
     pub instances: Vec<(u32, Vec<u8>)>,
     /// The objects' material overrides, a row each.
     pub overrides: Vec<[f32; 4]>,
-    /// Each degrading block part drawn by the levels chosen here: its block, its place among the
-    /// block's parts, what it draws and the level retail chose.
+    /// The degrading block parts drawn by the levels chosen here that fade, turn or are trees
+    /// drawn as meshes: each one's block, its place among the block's parts, what it draws and
+    /// the level retail chose.
     pub lod: Vec<(BlockId, usize, lod::PartDraw, u8)>,
+    /// What the levels chosen here did, over every degrading block part drawn.
+    pub lod_tally: lod::LodTally,
     /// The trees drawn as impostors.
     pub impostors: Vec<impostor::ImpostorDraw>,
 }
 
+/// How long a frame's longest lists of what it drew are ([`Drawn`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DrawnSizes {
+    opaque: usize,
+    forward: usize,
+    edges: usize,
+    lod: usize,
+}
+
+impl Drawn {
+    /// How long its longest lists are.
+    pub(crate) fn sizes(&self) -> DrawnSizes {
+        DrawnSizes {
+            opaque: self.opaque.len(),
+            forward: self.forward.len(),
+            edges: self.edges.len(),
+            lod: self.lod.len(),
+        }
+    }
+}
+
 impl Renderer {
     /// What the frame draws: the walk's own set, block by block, room by room and object part by
-    /// object part.
+    /// object part. Its longest lists start as long as the last frame's were.
     pub(crate) fn drawn(&self, frame: &FrameDelta) -> Drawn {
+        let sizes = self.drawn_sizes;
         let mut out = Drawn {
             inside: frame.landscape && !frame.light.outdoor,
             // Set 0 is every room's: every dynamic light.
@@ -1502,6 +1869,11 @@ impl Renderer {
                 &frame.light.lights,
                 frame.light.statics,
             )],
+            opaque: Vec::with_capacity(sizes.opaque),
+            opaque_walk: Vec::with_capacity(sizes.opaque),
+            forward: Vec::with_capacity(sizes.forward),
+            edges: Vec::with_capacity(sizes.edges),
+            lod: Vec::with_capacity(sizes.lod),
             ..Drawn::default()
         };
         let eye = frame.camera.eye;
@@ -1516,11 +1888,12 @@ impl Renderer {
         };
         // `interior`: the items are the interior's, drawn after the stamps when the viewer
         // stands inside. `fading`: a material is fading them, so whatever they are they blend.
+        // `walk`: their block part's place in the walk, `NONE` for any other item.
         let push_items = |out: &mut Drawn,
                           r: &std::ops::Range<u32>,
                           centre: Vec3,
-                          interior: bool,
-                          fading: bool| {
+                          (interior, fading): (bool, bool),
+                          walk: u32| {
             let late = interior && out.inside;
             for i in r.clone() {
                 let far = centre.distance_squared(eye);
@@ -1551,6 +1924,7 @@ impl Renderer {
                             }
                         } else {
                             out.opaque.push(i);
+                            out.opaque_walk.push(walk);
                             if edge {
                                 out.edges.push((far, i));
                             }
@@ -1565,26 +1939,50 @@ impl Renderer {
                 .map_or(0, |l| usize::from(*l))
         };
         if frame.landscape {
+            // The next block's first place in the walk.
+            let mut places = 0u32;
             for id in &frame.drawn_blocks {
                 let Some(b) = self.scene.blocks.get(id) else {
                     continue;
                 };
+                let walk = places;
+                places = places.saturating_add(u32::try_from(b.parts.len()).unwrap_or(u32::MAX));
                 if let Some(g) = self.scene.ground.get(id) {
                     out.ground
                         .push([g.vertices.start, g.cells.start, g.side, b.slot]);
                 }
                 let o = offset(*id);
-                for (k, p) in b.parts.iter().enumerate() {
+                let lod = self.lod.block(*id);
+                let lod_on = self.lod.chooses(*id);
+                // The parts the device chooses for are left to it.
+                let cpu = self.instances.cpu_parts(*id);
+                for j in 0..cpu.map_or(b.parts.len(), <[u32]>::len) {
+                    let k = cpu.map_or(j, |c| c[j] as usize);
+                    let Some(p) = b.parts.get(k) else {
+                        continue;
+                    };
                     let c = p.transform.transform_point3(Vec3::from(p.sphere.0)) + o;
                     let retail = u8::try_from(level_of(b, p)).unwrap_or(u8::MAX);
-                    let d = self.lod.part(*id, p, retail, true);
+                    let d = lod.part(p, retail, true);
                     for l in std::iter::once(d.level).chain(d.fade.map(|f| f.0)) {
                         if let Some(r) = p.levels.get(usize::from(l)) {
-                            push_items(&mut out, r, c, false, false);
+                            push_items(
+                                &mut out,
+                                r,
+                                c,
+                                (false, false),
+                                walk.saturating_add(u32::try_from(k).unwrap_or(u32::MAX)),
+                            );
                         }
                     }
-                    if p.degrade.is_some() && (self.lod.settings().on || d.turned.is_some()) {
-                        out.lod.push((*id, k, d, retail));
+                    if let (Some(record), true) = (p.degrade, lod_on || d.turned.is_some()) {
+                        out.lod_tally.add(lod_on, &d, retail);
+                        // Only a part fading or turned has rows to write, and only a tree drawn
+                        // as a mesh and lifted is one of the frame's mesh trees.
+                        let tree = d.impostor < 1.0 && p.lifts != [0.0; 2] && lod.is_tree(record);
+                        if d.fade.is_some() || d.turned.is_some() || tree {
+                            out.lod.push((*id, k, d, retail));
+                        }
                     }
                     if let (true, Some(g)) = (
                         d.impostor > 0.0,
@@ -1611,7 +2009,7 @@ impl Renderer {
             if let Some((id, _, r)) = rooms.get(cell) {
                 let o = offset(*id);
                 let c = r.walls.transform.w_axis.xyz() + o;
-                push_items(&mut out, &r.walls.levels[0], c, true, false);
+                push_items(&mut out, &r.walls.levels[0], c, (true, false), NONE);
                 // Its openings to the outdoors, stamped as a fan of triangles each.
                 if out.inside {
                     for poly in &r.openings {
@@ -1664,16 +2062,26 @@ impl Renderer {
                 }));
             for l in std::iter::once(d.level).chain(d.fade.map(|f| f.0)) {
                 if let Some(r) = p.levels.get(usize::from(l)) {
-                    push_items(&mut out, r, centre, true, false);
+                    push_items(&mut out, r, centre, (true, false), NONE);
                 }
             }
         }
         // The objects' parts the walk drew, posed as the frame has them.
+        let poses: std::collections::HashMap<crate::scene::ObjectKey, &crate::scene::ObjectPose> =
+            if frame.drawn_parts.is_empty() {
+                std::collections::HashMap::new()
+            } else {
+                let mut poses = std::collections::HashMap::with_capacity(frame.objects.len());
+                for p in &frame.objects {
+                    // The first pose of a key, as a search from the front finds it.
+                    poses.entry(p.key).or_insert(p);
+                }
+                poses
+            };
         for dp in &frame.drawn_parts {
-            let (Some(o), Some(pose)) = (
-                self.scene.objects.get(&dp.key),
-                frame.objects.iter().find(|p| p.key == dp.key),
-            ) else {
+            let (Some(o), Some(pose)) =
+                (self.scene.objects.get(&dp.key), poses.get(&dp.key).copied())
+            else {
                 continue;
             };
             let (Some(p), Some(pp)) = (
@@ -1719,7 +2127,7 @@ impl Renderer {
             ));
             if let Some(r) = p.levels.get(usize::from(pp.level)) {
                 let c = pp.transform.transform_point3(Vec3::from(p.sphere.0));
-                push_items(&mut out, r, c, !dp.outdoors, fade > 0.0);
+                push_items(&mut out, r, c, (!dp.outdoors, fade > 0.0), NONE);
             }
         }
         // The particles, each an instance and its card's draw items of its own, written this
@@ -1820,10 +2228,18 @@ impl Renderer {
                         .push([m.luminosity, m.diffusion, m.translucency, 1.0]);
                     i
                 });
+                // With the atmosphere drawn, the sky's own objects stand over the eye: as far off
+                // as the sky, they move neither as the eye walks nor when the frame's block
+                // changes. Retail stands them at the corner of the viewer's block.
+                let mut at = o.frame;
+                if self.atmosphere.settings.atmosphere && o.properties & 4 == 0 {
+                    at.w_axis.x = frame.camera.eye.x;
+                    at.w_axis.y = frame.camera.eye.y;
+                }
                 out.instances.push((
                     s.instance,
                     GpuScene::instance_bytes_scrolled(
-                        o.frame,
+                        at,
                         Vec3::ONE,
                         NONE,
                         scene::class::SKY,
@@ -1855,6 +2271,215 @@ impl Renderer {
 }
 
 impl Renderer {
+    /// Whether the blocks' parts are chosen and listed on the device (where it takes a draw count
+    /// from a buffer), or every part on the processor: every held block's parts are written again
+    /// now.
+    pub fn set_parts_on_device(&mut self, on: bool) {
+        self.instances.set_on(on);
+        if let Err(e) = self.instances.take(
+            &mut self.gfx,
+            (&self.scene, &self.tables),
+            &mut self.lod,
+            &mut self.impostors,
+            &[],
+        ) {
+            tracing::warn!(target: "dereth::remaster", "the parts were not taken: {e}");
+        }
+    }
+
+    /// Draw the frame received into targets of its own, `width` by `height`, and wait for the
+    /// device to finish it: for the checks, with no window. Whether a frame was drawn.
+    ///
+    /// # Errors
+    /// What the device refuses.
+    pub fn draw_offscreen(&mut self, width: u32, height: u32) -> Result<bool, dereth_gfx::Error> {
+        let area = dereth_gfx::Rect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        let Some(plan) = self.prepare(area, 1.0)? else {
+            return Ok(false);
+        };
+        let make = |gfx: &mut Device, format, usage| {
+            gfx.create_texture(&TextureDesc {
+                label: "remaster offscreen",
+                width,
+                height,
+                mips: 1,
+                format,
+                usage,
+            })
+        };
+        let color = make(
+            &mut self.gfx,
+            Format::Bgra8Unorm,
+            TextureUsage::COLOR_TARGET | TextureUsage::SAMPLED,
+        )?;
+        let depth = make(
+            &mut self.gfx,
+            DEPTH,
+            TextureUsage::DEPTH_TARGET | TextureUsage::SAMPLED,
+        )?;
+        let mut r = self.gfx.begin()?;
+        for b in &plan.retired {
+            r.destroy_buffer(*b);
+        }
+        let recorded = plan.record(
+            &mut r,
+            color,
+            depth,
+            dereth_gfx::Use::ColorTarget.state(),
+            dereth_gfx::Use::DepthTarget.state(),
+        );
+        let ticket = r.submit()?;
+        recorded?;
+        self.gfx.wait(ticket)?;
+        self.gfx.destroy_texture(color);
+        self.gfx.destroy_texture(depth);
+        Ok(true)
+    }
+
+    /// How many of the blocks' parts the device chooses and lists.
+    #[must_use]
+    pub fn parts_on_device(&self) -> usize {
+        self.instances.count()
+    }
+
+    /// The device's last choice for each of the parts it chooses, after it has finished: for the
+    /// checks. Empty when the device refuses.
+    pub fn part_states(&mut self) -> Vec<instances::PartState> {
+        self.instances
+            .read_states(&mut self.gfx)
+            .unwrap_or_default()
+    }
+
+    /// The draw items each cascade's list of the device's parts held when last drawn again: for
+    /// the checks.
+    pub fn part_casters(&mut self) -> [Vec<u32>; 4] {
+        self.instances
+            .read_casters(&mut self.gfx)
+            .unwrap_or_default()
+    }
+
+    /// What the last frame's choice of levels did, over every degrading part of the blocks it
+    /// drew: the processor's choices, and the device's read back after it has finished.
+    pub fn lod_stats(&mut self) -> lod::LodStats {
+        let mut stats = self.lod.stats();
+        if !self.lod.settings().on {
+            return stats;
+        }
+        for s in self.part_states() {
+            let Some(b) = self.scene.blocks.get(&s.block) else {
+                continue;
+            };
+            let Some(record) = b.parts.get(s.part as usize).and_then(|p| p.degrade) else {
+                continue;
+            };
+            if !s.drawn {
+                continue;
+            }
+            let retail = b.levels.get(record as usize).copied().unwrap_or(0);
+            stats.parts += 1;
+            stats.fading += u32::from(s.fade > 0.0);
+            stats.finer += u32::from(s.level < retail);
+            stats.coarser += u32::from(s.level > retail && s.share == 0.0);
+            stats.impostors += u32::from(s.share > 0.0);
+        }
+        stats
+    }
+
+    /// The last frame's outdoor cut-outs' edges and blended surfaces, the items in the order they
+    /// were drawn, whether the processor sorted them or the device did, after the device has
+    /// finished: for the checks.
+    pub fn blended_items(&mut self) -> [Vec<u32>; 2] {
+        let mut out = self.blended.clone();
+        if self.blended_sorted.contains(&true) {
+            let sorted = self.instances.read_lists(&mut self.gfx).unwrap_or_default();
+            for (list, (own, theirs)) in out.iter_mut().zip(sorted).enumerate() {
+                if self.blended_sorted[list] {
+                    *own = theirs;
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether the device sorts the outdoor blended surfaces' list as well as the cut-outs'
+    /// edges', where it chooses the parts.
+    #[must_use]
+    pub fn sorts_blended(&self) -> bool {
+        self.instances.sorts_forward()
+    }
+
+    /// The draw items of the G-buffer's two outdoor buckets, front faces culled away and both
+    /// drawn, in the order the last frame drew them, after the device has finished: for the
+    /// checks.
+    pub fn culled_items(&mut self) -> [Vec<u32>; 2] {
+        let words = self.gfx.indexed_command_words();
+        let read = |gfx: &mut Device, b: Buffer, offset: u64, len: u64| {
+            instances::read_back(gfx, b, offset, len).unwrap_or_default()
+        };
+        let counts = read(&mut self.gfx, self.counts, 0, 16);
+        let mut out: [Vec<u32>; 2] = Default::default();
+        for (bucket, list) in out.iter_mut().enumerate() {
+            let n = counts
+                .get(bucket * 4..bucket * 4 + 4)
+                .map_or(0, |w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+                .min(BUCKET_CAPACITY);
+            if n == 0 {
+                continue;
+            }
+            let bytes = words as usize * 4;
+            let at = bucket as u64 * u64::from(BUCKET_CAPACITY) * bytes as u64;
+            let all = read(
+                &mut self.gfx,
+                self.commands,
+                at,
+                u64::from(n) * bytes as u64,
+            );
+            // The item is each layout's last word.
+            for c in all.chunks_exact(bytes) {
+                let w = &c[c.len() - 4..];
+                list.push(u32::from_le_bytes([w[0], w[1], w[2], w[3]]));
+            }
+        }
+        out
+    }
+
+    /// What the processor chooses for each of block `block`'s parts this frame (outdoors), with the
+    /// level retail chose: the frame's own choice where the processor makes it. For the checks.
+    #[must_use]
+    pub fn part_choices(&self, block: BlockId) -> Vec<lod::PartDraw> {
+        let Some(b) = self.scene.blocks.get(&block) else {
+            return Vec::new();
+        };
+        let lod = self.lod.block(block);
+        b.parts
+            .iter()
+            .map(|p| {
+                let retail = p
+                    .degrade
+                    .and_then(|d| b.levels.get(d as usize))
+                    .copied()
+                    .unwrap_or(0);
+                lod.part(p, retail, true)
+            })
+            .collect()
+    }
+
+    /// The draw items of each level of block `block`'s part `part`. For the checks.
+    #[must_use]
+    pub fn part_items(&self, block: BlockId, part: u32) -> Vec<std::ops::Range<u32>> {
+        self.scene
+            .blocks
+            .get(&block)
+            .and_then(|b| b.parts.get(part as usize))
+            .map(|p| p.levels.clone())
+            .unwrap_or_default()
+    }
+
     /// What of an art pack is drawn, from the next blocks that come on: only models of a kind
     /// switched on are swapped in.
     pub fn set_packs(&mut self, s: crate::assets::pack::PackSettings) {

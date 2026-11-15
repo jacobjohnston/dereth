@@ -22,14 +22,34 @@
 //! **Death treasures.** A world's fixed item for a chest's template is rolled once at its chance at
 //! an opening its key paid for: a key used up on the chest pays for its next opening alone. A chest
 //! is filled anew at every opening, with no wait, so this is what holds its treasure to its chance;
-//! a chest no key opens never holds one.
+//! a chest no key opens never holds one. One that names a quest is rolled instead at every opening
+//! whose opener holds that quest where it needs it, a key or none: so a quest's item is in the chest
+//! for its opener alone at each such opening, and gone from the next once the quest has moved on
+//! (2017: a chest whose kind names a quest for taking, opened with that quest at its first phase,
+//! held the quest's item; taken, the quest moved on).
 //!
 //! **Quests.** A chest a quest keeps refuses at once a player whose quest is not at the phase it
-//! names, and again at the chest. What its kind names for its use comes on its opener as it begins
+//! names, or, for a chest whose kind needs its quest able to be given, a player who may not be given
+//! it now (the quest under way, or done and its wait not over), and again at the chest. What its kind names for its use comes on its opener as it begins
 //! to open, so a kind that completes its own quest opens once for each giving.
 //!
 //! **Closing.** Asked to close, or its opener gone more than six meters from it, the chest plays its
 //! closing for everyone; when that has played the closer is told and everyone sees it shut.
+//!
+//! **Gone once closed.** A chest of a kind that goes once closed (the script library's chest that
+//! deletes itself on closing: a prospector's corpse, a treasure map's cargo chest, a nut hoard's
+//! stump) leaves the world as its closing is told, after an opening (2017: the one such chest
+//! recorded, a prospector's corpse opened, its key taken and closed by its opener: the closing
+//! told, its mode and its open look shut, and in the same moment it was forgotten and left the
+//! world). What it still held goes with it. One the world made is gone for good; a placed one is
+//! kept from the world until the server starts again. A chest its opener left open as it left the
+//! world goes so too.
+//!
+//! **Chests the world makes.** A chest need not be placed: what an effect places at a player, or an
+//! item used on an object makes there, may be of a chest's template ([`crate::placing`]). It is a
+//! chest as a placed one is, its kind its template's: opened, filled from its profile at each
+//! opening, locked by its kind, kept by its quest. It stands until its time is up, and what it
+//! holds goes with it.
 
 use std::collections::{HashMap, HashSet};
 
@@ -42,12 +62,16 @@ use auberean_script::args::Arg;
 use yalain_net::{BlobKind, ConnId, ServerNet};
 use yalain_store::{Store, StoredPosition};
 
+use crate::holding::{self, Place, To};
 use crate::inventory::{function, id_list, look, q};
 use crate::places::{self, Use};
 use crate::{presence, progress, session, Clock, Server, Timer};
 
 /// The script package every chest derives from.
 pub const PACKAGE: &str = "ChestTemplate";
+
+/// The script package of the chests that go once closed.
+pub const GOES_ONCE_CLOSED: &str = "DeleteOnCloseChestTemplate";
 
 /// How close a player walks to a chest to open it, and to use a key on it, in meters (2017:
 /// `MoveTo` to 2.0 m, a key's to 3.0 m).
@@ -119,11 +143,14 @@ pub struct Chest {
     pub waiting: Option<Waiting>,
 }
 
-/// The chests' states, and the script packages of chests.
+/// The chests' states, the script packages of chests and of those that go once closed, and the
+/// placed chests gone so.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Chests {
     pub by_id: HashMap<u64, Chest>,
     pub packages: HashSet<u32>,
+    pub gone_once_closed: HashSet<u32>,
+    pub gone: HashSet<u64>,
 }
 
 /// A step of a chest's moving.
@@ -149,21 +176,43 @@ pub struct Kind {
     pub key: Option<u32>,
     pub profile: Option<u32>,
     pub most: Option<usize>,
+    /// It leaves the world once closed.
+    pub goes_once_closed: bool,
 }
 
-/// A chest of the world, by its id: its kind and where it stands.
+/// A chest of the world, by its id: its kind and where it stands. One the world made is a thing an
+/// effect or a use placed whose template is a chest's.
 #[must_use]
 pub fn chest<S: Store>(s: &Server<S>, id: u64) -> Option<(Kind, StoredPosition)> {
-    let i = presence::content_by_id(&s.content.objects, id)?;
-    let o = &s.content.objects[i];
-    if o.destination.is_some() || !s.chests.packages.contains(&o.description.package) {
+    if s.chests.gone.contains(&id) {
         return None;
     }
-    let props = s.catalog.get(o.template).map(|t| &t.props);
+    let (template, at, package) = match presence::content_by_id(&s.content.objects, id) {
+        Some(i) => {
+            let o = &s.content.objects[i];
+            if o.destination.is_some() || !s.chests.packages.contains(&o.description.package) {
+                return None;
+            }
+            let at = StoredPosition {
+                cell: o.cell,
+                origin: o.origin,
+                rotation: o.rotation,
+            };
+            (o.template, at, o.description.package)
+        }
+        None => {
+            let t = s.things.get(id).filter(|t| {
+                t.kind == crate::things::Kind::Placed
+                    && s.chests.packages.contains(&t.description.package)
+            })?;
+            (t.template, t.at?, t.description.package)
+        }
+    };
+    let props = s.catalog.get(template).map(|t| &t.props);
     let flag = |k: &str| props.is_some_and(|p| p.flag(k));
     let lockable = flag("Lock_Lockable");
     let kind = Kind {
-        template: o.template,
+        template,
         // A chest that opens on unlocking is locked although its kind does not say so (2017: every
         // opening of one was by its key, and its one plain use refused).
         locked: lockable && (flag("Lock_IsLocked") || flag("Lock_OpenOnUnlock")),
@@ -174,15 +223,18 @@ pub fn chest<S: Store>(s: &Server<S>, id: u64) -> Option<(Kind, StoredPosition)>
         most: props
             .and_then(|p| p.int("Container_MaxContainerSize"))
             .and_then(|m| usize::try_from(m).ok()),
+        goes_once_closed: s.chests.gone_once_closed.contains(&package),
     };
-    Some((
-        kind,
-        StoredPosition {
-            cell: o.cell,
-            origin: o.origin,
-            rotation: o.rotation,
-        },
-    ))
+    Some((kind, at))
+}
+
+/// The next visual stamp of a chest: a placed one's, or the thing's the world made.
+fn stamp<S: Store>(s: &mut Server<S>, id: u64) -> auberean_protocol::types::ObjectStamp {
+    if s.things.get(id).is_some() {
+        crate::inventory::visual(s, id)
+    } else {
+        places::object_stamp(s, id)
+    }
 }
 
 fn locked<S: Store>(s: &Server<S>, id: u64, kind: &Kind) -> bool {
@@ -201,7 +253,7 @@ pub fn contents<S: Store>(s: &Server<S>, id: u64) -> Option<Vec<u64>> {
         c.contents
             .iter()
             .copied()
-            .filter(|i| s.things.get(*i).and_then(|t| t.container).map(|c| c.0) == Some(id))
+            .filter(|i| s.things.get(*i).and_then(|t| t.container) == Some(id))
             .collect(),
     )
 }
@@ -221,7 +273,7 @@ fn to_knowers<S: Store>(s: &mut Server<S>, net: &mut ServerNet, id: u64, m: &Ser
 
 fn flash<S: Store>(s: &mut Server<S>, net: &mut ServerNet, id: u64) {
     let m = ServerMessage::DoFx(ObjectEvent {
-        sender: places::object_stamp(s, id),
+        sender: stamp(s, id),
         action: Fx {
             fx: look::OPENING_FX,
             scalar: 1.0,
@@ -232,7 +284,7 @@ fn flash<S: Store>(s: &mut Server<S>, net: &mut ServerNet, id: u64) {
 
 fn mode<S: Store>(s: &mut Server<S>, net: &mut ServerNet, id: u64, m: u32) {
     let m = ServerMessage::DoMode(ObjectEvent {
-        sender: places::object_stamp(s, id),
+        sender: stamp(s, id),
         action: Word(m),
     });
     to_knowers(s, net, id, &m);
@@ -240,7 +292,7 @@ fn mode<S: Store>(s: &mut Server<S>, net: &mut ServerNet, id: u64, m: u32) {
 
 fn shown_open<S: Store>(s: &mut Server<S>, net: &mut ServerNet, id: u64, open: bool) {
     let m = ServerMessage::UpdateBoolVisual(VisualQuality {
-        object: places::object_stamp(s, id),
+        object: stamp(s, id),
         quality: q::OPEN,
         value: i32::from(open),
     });
@@ -261,16 +313,24 @@ fn open_done(status: u32, chest: u64, contents: &[u64]) -> ServerMessage {
 }
 
 /// Does a chest's quest keep a player out: its template names a quest the player does not have under
-/// way (at the phase it names, if it names one)?
-fn quest_keeps_out<S: Store>(s: &Server<S>, world: ConnId, template: u32) -> bool {
+/// way (at the phase it names, if it names one), or, where it names its quest able to be given, one
+/// the player may not be given now?
+fn quest_keeps_out<S: Store>(s: &Server<S>, world: ConnId, template: u32, now_unix: i64) -> bool {
     let Some(props) = s.catalog.get(template).map(|t| &t.props) else {
         return false;
     };
     let Some(quest) = props.word("Usage_RequiredQuest") else {
         return false;
     };
-    let phase = props.word("Usage_RequiredQuestStatus").unwrap_or(0) & 0xFFFF;
+    let status = props.word("Usage_RequiredQuestStatus").unwrap_or(0);
+    let phase = status & 0xFFFF;
     let held = s.players.get(&world).map(|p| p.play.quests.as_slice());
+    if status & 0xF000_0000 == crate::item_use::CAN_BE_BESTOWED {
+        let retry = s.quests.quest(quest).map_or(0.0, |d| d.retry);
+        return held.is_none_or(|q| {
+            crate::item_use::quest_refusal(q, quest, status, retry, now_unix).is_some()
+        });
+    }
     // A status naming no phase asks only that the quest be under way.
     held.is_none_or(|q| {
         let at = crate::quests::phase_of(q, quest);
@@ -285,8 +345,9 @@ fn refused_by_its_quest<S: Store>(
     world: ConnId,
     u: &Use,
     template: u32,
+    clock: Clock,
 ) -> bool {
-    if !quest_keeps_out(s, world, template) {
+    if !quest_keeps_out(s, world, template, clock.unix) {
         return false;
     }
     // A hidden quest's refusal is the mysterious one.
@@ -305,13 +366,14 @@ fn refused_by_its_quest<S: Store>(
     true
 }
 
-/// What a chest's kind names for its use comes on its opener: an effect the install holds as it
-/// holds any item's, and one it names only by what it does to a quest moves that quest.
-fn effects_on_opener<S: Store>(
+/// What an object's kind names for its use comes on its user (a chest's opener, a portal door's
+/// key's user): an effect the install holds as it holds any item's, and one it names only by what
+/// it does to a quest moves that quest.
+pub(crate) fn effects_on_user<S: Store>(
     s: &mut Server<S>,
     net: &mut ServerNet,
     world: ConnId,
-    (chest, template): (u64, u32),
+    (object, template): (u64, u32),
     clock: Clock,
 ) {
     let Some(me) = s.players.get(&world).map(|p| p.character) else {
@@ -338,7 +400,7 @@ fn effects_on_opener<S: Store>(
         crate::quests::moves(s, net, world, e, true, clock);
     }
     for e in states {
-        crate::item_use::put_on(s, net, world, me, chest, e, clock);
+        crate::item_use::put_on(s, net, world, me, object, e, clock);
     }
 }
 
@@ -348,7 +410,7 @@ pub fn used<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, u: 
     let Some((kind, at)) = chest(s, u.item) else {
         return;
     };
-    if refused_by_its_quest(s, net, world, &u, kind.template) {
+    if refused_by_its_quest(s, net, world, &u, kind.template, clock) {
         return;
     }
     let Some(here) = position(s, world) else {
@@ -374,7 +436,7 @@ pub fn at_chest<S: Store>(
     let Some((kind, at)) = chest(s, id) else {
         return;
     };
-    if refused_by_its_quest(s, net, world, &u, kind.template) {
+    if refused_by_its_quest(s, net, world, &u, kind.template, clock) {
         return;
     }
     let phase = s.chests.by_id.get(&id).map(|c| c.phase).unwrap_or_default();
@@ -498,21 +560,39 @@ pub fn key_at_chest<S: Store>(
 
 /// What a chest holds at an opening: its profile's extras and its draw, at most its size; each with
 /// the worth and level it holds of its own, if its profile's row says; and, at an opening its key
-/// paid for, its death treasures, which its size never pushes out.
-fn fill<S: Store>(s: &mut Server<S>, kind: &Kind, paid: bool) -> Vec<(u32, Option<(u32, i32)>)> {
-    let mut out = profile_fill(s, kind);
-    if paid {
-        let rows: Vec<(u32, f32)> = s
-            .loot
-            .treasures_of(kind.template, None)
-            .map(|t| (t.item, t.chance))
-            .collect();
-        let mut treasures: Vec<u32> = Vec::new();
-        for (item, chance) in rows {
-            if !treasures.contains(&item) && s.rng.chance(chance) {
-                treasures.push(item);
+/// paid for, its death treasures, and at one whose opener holds a treasure's quest where it needs
+/// it, that treasure; neither is ever pushed out by its size.
+fn fill<S: Store>(
+    s: &mut Server<S>,
+    kind: &Kind,
+    paid: bool,
+    opener: ConnId,
+    clock: Clock,
+) -> Vec<(u32, Option<(u32, i32)>)> {
+    let mut out = profile_fill(s, kind.profile, kind.most);
+    let held = s
+        .players
+        .get(&opener)
+        .map_or(&[][..], |p| p.play.quests.as_slice());
+    let rows: Vec<(u32, f32)> = s
+        .loot
+        .treasures_of(kind.template, None)
+        .filter(|t| match t.requires {
+            None => paid,
+            Some(g) => {
+                let retry = s.quests.quest(g.quest).map_or(0.0, |d| d.retry);
+                crate::item_use::quest_refusal(held, g.quest, g.status, retry, clock.unix).is_none()
             }
+        })
+        .map(|t| (t.item, t.chance))
+        .collect();
+    let mut treasures: Vec<u32> = Vec::new();
+    for (item, chance) in rows {
+        if !treasures.contains(&item) && s.rng.chance(chance) {
+            treasures.push(item);
         }
+    }
+    if !treasures.is_empty() {
         let most = kind.most.unwrap_or(usize::MAX);
         out.truncate(most.saturating_sub(treasures.len()));
         out.extend(treasures.into_iter().map(|t| (t, None)));
@@ -520,10 +600,16 @@ fn fill<S: Store>(s: &mut Server<S>, kind: &Kind, paid: bool) -> Vec<(u32, Optio
     out
 }
 
-/// What a chest's profile puts in it at an opening.
-fn profile_fill<S: Store>(s: &mut Server<S>, kind: &Kind) -> Vec<(u32, Option<(u32, i32)>)> {
-    let Some(p) = kind
-        .profile
+/// What a generator profile puts in what it fills (a chest at an opening, a corpse whose kind names
+/// one as it is made): its row's draw, then its extras at their chances, at most `most`; each drawn
+/// piece with the worth and level its row gives a chest's treasure. Nothing for a profile with no
+/// row.
+pub(crate) fn profile_fill<S: Store>(
+    s: &mut Server<S>,
+    profile: Option<u32>,
+    most: Option<usize>,
+) -> Vec<(u32, Option<(u32, i32)>)> {
+    let Some(p) = profile
         .and_then(|v| s.catalog.profile_name(v))
         .and_then(|n| s.loot.profile(n))
         .cloned()
@@ -531,6 +617,7 @@ fn profile_fill<S: Store>(s: &mut Server<S>, kind: &Kind) -> Vec<(u32, Option<(u
         return Vec::new();
     };
     let count = s.rng.weighted(p.counts.iter().copied()).unwrap_or(0);
+    let count = crate::rates::loot_count(&mut s.rng, s.cfg.rates.loot, count);
     let mut out = Vec::new();
     while out.len() < count && !p.items.is_empty() {
         #[allow(clippy::cast_precision_loss)]
@@ -549,7 +636,7 @@ fn profile_fill<S: Store>(s: &mut Server<S>, kind: &Kind) -> Vec<(u32, Option<(u
             out.push((*t, None));
         }
     }
-    out.truncate(kind.most.unwrap_or(usize::MAX));
+    out.truncate(most.unwrap_or(usize::MAX));
     out
 }
 
@@ -564,7 +651,7 @@ fn open<S: Store>(
     waiting: Waiting,
     clock: Clock,
 ) {
-    effects_on_opener(s, net, waiting.world, (id, kind.template), clock);
+    effects_on_user(s, net, waiting.world, (id, kind.template), clock);
     flash(s, net, id);
     let left = s
         .chests
@@ -573,11 +660,11 @@ fn open<S: Store>(
         .map(|c| c.contents.clone())
         .unwrap_or_default();
     for item in left {
-        if s.things.get(item).and_then(|t| t.container).map(|c| c.0) != Some(id) {
+        if holding::place_of(s, item) != Some(Place::Contents(id)) {
             continue;
         }
         let m = ServerMessage::VisualObjectCall(ObjectCall {
-            object: places::object_stamp(s, id),
+            object: stamp(s, id),
             call: ClientCall {
                 function: FunctionId(DESTROY_CONTAINED),
                 args: Some(
@@ -592,31 +679,28 @@ fn open<S: Store>(
                 net.send(*conn, queue::EVENT, BlobKind::VISUAL, bytes.clone());
             }
         }
-        s.things.remove(item);
+        let _ = holding::destroy_item(s, item, Place::Contents(id));
     }
     let paid = s
         .chests
         .by_id
         .get_mut(&id)
         .is_some_and(|c| std::mem::take(&mut c.paid));
-    let mut contents = Vec::new();
-    for (slot, (template, own)) in fill(s, kind, paid).into_iter().enumerate() {
+    // What it held before is gone or elsewhere: it is filled anew, in its order.
+    s.chests.by_id.entry(id).or_default().contents.clear();
+    for (template, own) in fill(s, kind, paid, waiting.world, clock) {
         let value = own.map_or(0, |(value, _)| value);
         if let Some(item) = crate::inventory::make_item(s, template, 1, value) {
             if let Some((_, level)) = own {
                 crate::treasure::endow(s, item, level, None);
             }
-            if let Some(t) = s.things.get_mut(item) {
-                t.container = Some((id, u32::try_from(slot).unwrap_or(0)));
-            }
-            contents.push(item);
+            let _ = holding::move_item(s, item, Place::Nowhere, To::Contents(id));
         }
     }
     mode(s, net, id, look::OPEN_MODE);
     let c = s.chests.by_id.entry(id).or_default();
     c.phase = Phase::Opening;
     c.generation = c.generation.wrapping_add(1);
-    c.contents = contents;
     c.waiting = Some(waiting);
     let generation = c.generation;
     let opens = moving(s, id, look::CLOSED_MODE, look::OPEN_MODE, UNKNOWN_MOVES.0);
@@ -688,7 +772,8 @@ pub fn close<S: Store>(
 fn key_answer<S: Store>(s: &mut Server<S>, net: &mut ServerNet, id: u64, w: &Waiting) {
     let Some(key) = w.key else { return };
     let name = presence::content_by_id(&s.content.objects, id)
-        .and_then(|i| s.content.objects[i].description.name);
+        .and_then(|i| s.content.objects[i].description.name)
+        .or_else(|| s.things.get(id).and_then(|t| t.facts.name));
     let used = crate::usable::doors::fits_answer(s, &w.used, key, name);
     crate::craft::use_up(s, net, w.world, key, 1);
     let done = places::use_done(&used, 0, places::USE_FLAGS_UNLOCKED, false, w.distance);
@@ -720,12 +805,13 @@ pub(crate) fn release<S: Store>(s: &mut Server<S>, net: &mut ServerNet, id: u64)
         let Some(t) = s.things.get(item) else {
             continue;
         };
-        if t.container.map(|c| c.0) != Some(id) {
+        // Its list went with it: what it held is its own still.
+        if holding::place_of(s, item) != Some(Place::Kept(id)) {
             continue;
         }
         let instance = t.instance;
         presence::thing_gone(s, net, item, instance);
-        s.things.remove(item);
+        let _ = holding::destroy_item(s, item, Place::Kept(id));
     }
 }
 
@@ -830,7 +916,39 @@ pub fn step<S: Store>(
                 }
             }
             shown_open(s, net, id, false);
+            if kind.goes_once_closed {
+                gone(s, net, id);
+            }
         }
+    }
+}
+
+/// A chest that goes once closed leaves the world: what it still holds goes, forgotten by the
+/// clients that know it, then the chest. One the world made is gone; a placed one is kept from the
+/// world from now on.
+fn gone<S: Store>(s: &mut Server<S>, net: &mut ServerNet, id: u64) {
+    let left = s
+        .chests
+        .by_id
+        .get(&id)
+        .map(|c| c.contents.clone())
+        .unwrap_or_default();
+    for item in left {
+        if holding::place_of(s, item) != Some(Place::Contents(id)) {
+            continue;
+        }
+        let instance = s.things.get(item).map_or(0, |t| t.instance);
+        presence::thing_gone(s, net, item, instance);
+        let _ = holding::destroy_item(s, item, Place::Contents(id));
+    }
+    s.chests.by_id.remove(&id);
+    if s.things.get(id).is_some() {
+        crate::death::vanish(s, net, id);
+        return;
+    }
+    if let Some(i) = presence::content_by_id(&s.content.objects, id) {
+        s.chests.gone.insert(id);
+        presence::content_gone(s, net, i);
     }
 }
 
@@ -844,6 +962,7 @@ pub fn left<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId) {
         .map(|(id, _)| *id)
         .collect();
     for id in open {
+        let goes = chest(s, id).is_some_and(|(kind, _)| kind.goes_once_closed);
         let locks = chest(s, id).is_some_and(|(kind, _)| kind.locks_on_close);
         if let Some(c) = s.chests.by_id.get_mut(&id) {
             c.opener = None;
@@ -855,6 +974,9 @@ pub fn left<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId) {
         }
         mode(s, net, id, look::CLOSED_MODE);
         shown_open(s, net, id, false);
+        if goes {
+            gone(s, net, id);
+        }
     }
 }
 

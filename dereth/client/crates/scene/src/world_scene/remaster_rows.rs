@@ -5,6 +5,7 @@
 use dereth_client_runtime::render_prefs::{FidelityFeature as F, FidelityPreferences};
 use dereth_remaster::render::lod::LodSettings;
 use dereth_render::device::Gpu;
+use dereth_terrain::land::drawn::CliffShelves;
 
 use super::remaster_effects::{
     RemasterAo, RemasterPost, RemasterUpscale, RemasterUpscaleMode, RemasterWater,
@@ -46,10 +47,13 @@ pub struct RemasterRows {
     pub air: bool,
     pub grass: bool,
     pub flowers: bool,
+    pub sway: bool,
     /// The share of the pixels drawn each way while upscaling, in percent; 0 until one is chosen.
     pub scale: u32,
     /// How strongly the sunlit air shows shafts of light: 0 none, 1 low, 2 high.
     pub god_rays: u32,
+    /// Steep rock faces drawn far off as shelves.
+    pub cliff_shelves: bool,
     /// What of the art pack is drawn.
     pub packs: RemasterPacks,
 }
@@ -80,8 +84,10 @@ impl RemasterRows {
             air: f.remaster_feature(F::RemasterAir),
             grass: f.remaster_feature(F::RemasterGrass),
             flowers: f.remaster_feature(F::RemasterFlowers),
+            sway: f.remaster_feature(F::RemasterSway),
             scale: f.effective(F::RemasterScale),
             god_rays: f.effective(F::RemasterGodRays),
+            cliff_shelves: f.remaster_feature(F::RemasterCliffShelves),
             packs: if f.remaster_feature(F::RemasterArtPack) {
                 RemasterPacks::all()
             } else {
@@ -117,6 +123,17 @@ impl RemasterRows {
         scale
     }
 
+    /// Where the rock bands on unwalkable ground are drawn: far off only while the box is ticked,
+    /// nowhere otherwise.
+    #[must_use]
+    pub fn shelves(self) -> CliffShelves {
+        if self.cliff_shelves {
+            CliffShelves::FarOnly
+        } else {
+            CliffShelves::Off
+        }
+    }
+
     /// Whether what they ask is worked out per pixel, which only the light per pixel draws.
     #[must_use]
     pub fn per_pixel(self) -> bool {
@@ -133,15 +150,13 @@ impl RemasterRows {
 }
 
 impl SceneDraw {
-    /// Carry out what moved of the remaster's own boxes since the last poll. The lamps and the
-    /// levels are held only by the running remaster, so they are told again as it starts.
+    /// Carry out what moved of the remaster's own boxes since the last poll. The scene keeps each
+    /// setting and hands it to the remaster whenever it starts, the restart an art pack change
+    /// makes included.
     pub(super) fn apply_remaster_rows(&mut self, now: RemasterRows, gpu: &mut Gpu) {
-        let on = self.remaster_on();
         let view = self.remaster_view.get_mut();
         let was = view.rows;
-        let started = on && !view.rows_on;
         view.rows = now;
-        view.rows_on = on;
         if now.per_pixel() != was.per_pixel() {
             let light = if now.per_pixel() {
                 RemasterLight::Pixel
@@ -201,7 +216,7 @@ impl SceneDraw {
             self.set_remaster_weather(RemasterWeather { on: now.rain }, gpu);
         }
         let lamps = (now.indoor_lamps, now.outdoor_lamps);
-        if lamps != (was.indoor_lamps, was.outdoor_lamps) || (started && lamps != (false, false)) {
+        if lamps != (was.indoor_lamps, was.outdoor_lamps) {
             let l = RemasterLamps {
                 indoor: now.indoor_lamps,
                 outdoor: now.outdoor_lamps,
@@ -240,10 +255,11 @@ impl SceneDraw {
             };
             self.set_remaster_upscale(s, gpu);
         }
-        let landscape = (now.grade, now.air, now.grass, now.flowers);
-        if landscape != (was.grade, was.air, was.grass, was.flowers) {
+        let landscape = (now.grade, now.air, now.grass, now.flowers, now.sway);
+        if landscape != (was.grade, was.air, was.grass, was.flowers, was.sway) {
             let mut s = self.remaster_landscape();
             s.flowers = now.flowers;
+            s.sway = now.sway;
             s.grade = now.grade;
             s.air = now.air;
             s.grass = now.grass;
@@ -252,7 +268,10 @@ impl SceneDraw {
         if now.packs != was.packs {
             self.set_remaster_packs(now.packs, gpu);
         }
-        if now.detail != was.detail || (started && now.detail) {
+        if now.cliff_shelves != was.cliff_shelves {
+            self.set_remaster_cliff_shelves(now.shelves());
+        }
+        if now.detail != was.detail {
             let lod = if now.detail {
                 LodSettings::ON
             } else {
@@ -281,6 +300,28 @@ mod tests {
                 rain: true,
                 ..RemasterRows::default()
             }
+        );
+    }
+
+    /// Cliff shelves are drawn far off only while their box is ticked, and nowhere until it is.
+    #[test]
+    fn cliff_shelves_are_drawn_far_off_only_while_ticked_and_nowhere_at_first() {
+        let rows = |spec: &str| {
+            RemasterRows::of(&FidelityPreferences::parse_switch(spec).expect("parses")).shelves()
+        };
+        assert_eq!(rows("Remaster=1"), CliffShelves::Off);
+        assert_eq!(
+            rows("Remaster=1,RemasterCliffShelvesFar=0"),
+            CliffShelves::Off
+        );
+        assert_eq!(
+            rows("Remaster=1,RemasterCliffShelvesFar=1"),
+            CliffShelves::FarOnly
+        );
+        assert_eq!(
+            RemasterRows::default().shelves(),
+            CliffShelves::default(),
+            "the ground starts as the rows ask at first"
         );
     }
 

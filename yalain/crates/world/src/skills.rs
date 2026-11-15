@@ -7,10 +7,12 @@
 //!
 //! - **Training** a skill is refused, first failure first, when it is trained already, may not be
 //!   trained by a player, the player's level is below its minimum, it is not for the player's race,
-//!   it is a hero skill, a parent is untrained, a prerequisite is untrained or below its level, or the
-//!   credits are short of its cost. Trained, the player pays its cost in credits; each trained
-//!   parent counts one more trained child and each prerequisite one more dependent; the skill holds
-//!   no experience, and is marked trained (and the player's to untrain when the skill may be).
+//!   it is a hero skill, a parent is untrained, a prerequisite is untrained or below its level, the
+//!   player has trained a skill it names as barring it (a class's root names its race's other
+//!   roots), or the credits are short of its cost. Trained, the player pays its cost in credits;
+//!   each trained parent counts one more trained child and each prerequisite one more dependent; the
+//!   skill holds no experience, and is marked trained (and the player's to untrain when the skill
+//!   may be).
 //! - **A skill's rating** is its granted level, plus a tenth of its trained parents' ratings (each
 //!   at most 50), plus the level its experience reaches in its advancement table (the highest level
 //!   whose experience it has: none still reaches level 1), at most its cap (for an active skill of
@@ -22,7 +24,14 @@
 //!   the experience moves from the player to the skill.
 //! - **Untraining** a skill is refused while another is being untrained, when it is not trained,
 //!   may not be untrained or is not the player's to untrain, or a trained child or dependent stands
-//!   on it; nothing is trained on a skill being untrained.
+//!   on it; nothing is trained on a skill being untrained. An effect a world's rule names may
+//!   finish an untraining under way at once, as earning its experience again would (a person who
+//!   sells the finishing: a step or a give that waits on an untraining under way).
+//! - **A complete reset** of a player's skills, or of its hero skills, is held apart for each kind
+//!   (granted by an effect a world names, or by an admin) and used by asking to sell them all back:
+//!   every skill of the kind the player bought is untrained, its credits back, and the experience
+//!   in all of the kind's skills comes back at once; for an hour after, the player may do it again
+//!   without another.
 //!
 //! **The answers** are 2017's (79 trainings and 1,602 raises checked against the costs):
 //! training, the parents' and prerequisites' updated information, the repository with the credits
@@ -42,6 +51,7 @@ use yalain_net::{ConnId, ServerNet};
 use yalain_store::Store;
 
 use crate::calls::Value;
+use crate::effect_defs::Reset;
 use crate::graph::{hash, Builder, Slot};
 use crate::progress::{self, nested, text_with, word};
 use crate::session::{self, native, package, TABLE_SIZE};
@@ -63,6 +73,41 @@ pub mod function {
     /// The client's requests to untrain a skill, and to cancel an untraining under way.
     pub const UNTRAIN: u32 = 0x8214_0007;
     pub const UNTRAIN_CANCEL: u32 = 0x8214_0001;
+    /// `SellBackAllSkills`, `SellBackAllHeroSkills` and `SellBackAllCraftSkills`: the client's
+    /// `/skills reset`, `/heroskills reset` and `/craftskills reset`.
+    pub const SELL_BACK_ALL: u32 = 0x8212_0040;
+    pub const SELL_BACK_ALL_HERO: u32 = 0x8212_002E;
+    pub const SELL_BACK_ALL_CRAFT: u32 = 0x8212_0058;
+}
+
+/// What a player who hasn't been granted a reset is told when it asks to sell back all its skills,
+/// all its hero skills, or all its craft skills at once: that it may not, and to untrain each instead.
+pub mod no_reset {
+    pub const SKILLS: (u32, u32) = (0x1624_3A16, super::TEXTS);
+    pub const HERO_SKILLS: (u32, u32) = (0x5BA0_B0FC, super::TEXTS);
+    pub const CRAFT_SKILLS: (u32, u32) = (0x73EF_12D8, 0x2500_000C);
+}
+
+/// A player's complete resets of its skills and of its hero skills, each kind apart: the resets it
+/// has been granted and not used (an integer quality), and when it last used one (a time). Using
+/// one starts an hour of game time in which it may reset that kind again as often as it likes;
+/// after the hour it needs another.
+pub mod reset {
+    pub const SKILLS_HELD: u32 = 9800;
+    pub const HERO_SKILLS_HELD: u32 = 9807;
+    pub const SKILLS_LAST: u32 = 306;
+    pub const HERO_SKILLS_LAST: u32 = 308;
+    /// How long after a reset is used the player may reset again without another, in seconds.
+    pub const AGAIN_FOR: f64 = 3_600.0;
+    /// What a player granted a reset is told: that it may reset, and by which command.
+    pub const SKILLS_GRANTED: (u32, u32) = (0x10CB_9CA5, super::TEXTS);
+    pub const HERO_SKILLS_GRANTED: (u32, u32) = (0x6CDD_6D10, super::TEXTS);
+    /// What it is told as it resets: every skill untrained, its experience and credits back, and
+    /// that it may reset again within the hour.
+    pub const SKILLS_DONE: (u32, u32) = (0x32EE_F696, super::TEXTS);
+    pub const HERO_SKILLS_DONE: (u32, u32) = (0x0899_C056, super::TEXTS);
+    /// Shown as the untraining texts are.
+    pub const SHOWN_AS: u32 = super::untraining::SHOWN_AS;
 }
 
 /// The untraining texts (in [`TEXTS`]): untrained, with the credits and experience regained;
@@ -102,6 +147,7 @@ pub mod refusal {
     pub const RACE: u32 = 30_002;
     pub const PARENT: u32 = 30_003;
     pub const PREREQUISITE: u32 = 30_004;
+    pub const BARRED: u32 = 30_005;
     pub const CREDITS: u32 = 30_006;
     pub const UNTRAINED: u32 = 30_009;
     pub const BEING_UNTRAINED: u32 = 30_010;
@@ -148,6 +194,7 @@ pub const fn refusal_text(code: u32) -> u32 {
         refusal::RACE => 0x38A0_983D,
         refusal::PARENT => 0x75B4_0A93,
         refusal::PREREQUISITE => 0xD766_7171,
+        refusal::BARRED => 0xA667_5BCE,
         refusal::CREDITS => 0xC036_658E,
         refusal::UNTRAINED => 0xD14A_05D7,
         refusal::NOT_BY_PLAYER => 0x337D_77B9,
@@ -256,6 +303,9 @@ pub struct Usage {
     pub vigor_add: f32,
     pub vigor_mult: f32,
     pub min_vigor: f32,
+    /// Its focus: what a use adds to its user's focus at rating 1 and at the skill's cap
+    /// (negative: a cost), the line between them by rating.
+    pub focus_add: (f32, f32),
     /// The implements it is used with, in the right hand and the left (bits of implement kinds;
     /// negative: any).
     pub implements_right: i32,
@@ -305,6 +355,9 @@ pub struct SkillDef {
     /// Its parents and prerequisites, each with the rating it needs.
     pub parents: Vec<(u32, u32)>,
     pub prereqs: Vec<(u32, u32)>,
+    /// The skills whose holder may not train it: a class's root names its race's other roots, a
+    /// Paragon the other Paragons, a perk its opposite.
+    pub barring: Vec<u32>,
     /// The races it is for (0: all).
     pub species: u32,
     /// An active skill (one used), capped at 50 for players who are no heroes.
@@ -749,6 +802,10 @@ impl SkillDef {
             flags: nav.field(root, "m_skillFlags")?,
             parents: pairs("mParents")?,
             prereqs: pairs("mPrereqs")?,
+            barring: pairs("mBarringSkills")?
+                .into_iter()
+                .map(|(s, _)| s)
+                .collect(),
             species: nav.field(root, "mAllowedSpecies").unwrap_or(0),
             active,
             auto_attack: active
@@ -831,6 +888,10 @@ impl Usage {
             vigor_add: num("m_VigorModAdd")?,
             vigor_mult: num("m_VigorModMult")?,
             min_vigor: num("m_MinVigor")?,
+            focus_add: (
+                num("m_startFocusModAdd").unwrap_or(0.0),
+                num("m_endFocusModAdd").unwrap_or(0.0),
+            ),
             implements_right: word("m_AllowedImplementsRight")?.cast_signed(),
             implements_left: word("m_AllowedImplementsLeft")?.cast_signed(),
             valid_targets: word("m_validTargets")?,
@@ -1149,6 +1210,9 @@ impl SkillTable {
             .any(|(p, at)| !trained(*p) || self.rating(skills, *p, credits.hero.is_some()) < *at)
         {
             return Some(refusal::PREREQUISITE);
+        }
+        if d.barring.iter().any(|b| trained(*b)) {
+            return Some(refusal::BARRED);
         }
         let short = if hero_skill {
             credits.hero.unwrap_or(0) < d.hero_cost
@@ -1561,6 +1625,45 @@ pub fn bestowed(
     Some((new, changed))
 }
 
+/// Train a player a skill for good, as an effect's grant does (2017: five grants of a city's
+/// recall): trained at level 1 by the grant, which can't be raised and costs nothing, its trained
+/// parents counting one more child and its prerequisites one more dependent; the player told its
+/// repository, the skills it changed and the skill. False, and nothing told, for a skill the player
+/// holds already or the install does not have.
+pub fn trained_for_good<S: Store>(
+    s: &mut Server<S>,
+    net: &mut ServerNet,
+    world: ConnId,
+    skill: u32,
+) -> bool {
+    let Some(p) = s.players.get(&world) else {
+        return false;
+    };
+    let starting = s.start.skills.get(&p.race).cloned().unwrap_or_default();
+    let mut held = held(&starting, &p.play.skills);
+    let Some((mut new, changed)) = bestowed(&s.skill_table, &mut held, skill) else {
+        return false;
+    };
+    new.granted = 1;
+    new.mask = mask::TRAINED | mask::CANNOT_RAISE;
+    if let Some(h) = held.iter_mut().find(|h| h.skill == skill) {
+        *h = new;
+    }
+    let Some(p) = s.players.get_mut(&world) else {
+        return false;
+    };
+    p.play.skills = kept(&starting, &held);
+    let Some(p) = s.players.get(&world) else {
+        return false;
+    };
+    progress::private(net, world, &repository_of(s, p));
+    for h in changed.iter().chain(std::iter::once(&new)) {
+        progress::private(net, world, &info_update(h, None));
+    }
+    crate::world::keep_player(s, world);
+    true
+}
+
 /// A player asks to train a skill.
 pub fn train<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, v: &[Value]) {
     let Some(skill) = skill_of(v) else {
@@ -1704,19 +1807,7 @@ fn untrain_refusal_now<S: Store>(
         if last.is_some_and(|t| t + untraining::PERK_WAIT > now) {
             return Some(refusal::PERK_TOO_SOON);
         }
-        let last_bag = crate::inventory::SEGMENTS.len() - 1;
-        let places = crate::inventory::SEGMENTS[last_bag] as usize;
-        let held = p
-            .play
-            .items
-            .iter()
-            .filter(|h| {
-                h.location == 0
-                    && h.slot < crate::inventory::PACK_ROOM
-                    && crate::inventory::segment_of(h.slot) == last_bag
-            })
-            .count();
-        if perk.kind == untraining::BAGS_PERK && held >= places {
+        if perk.kind == untraining::BAGS_PERK && last_bag_full(p) {
             return Some(refusal::LAST_BAG_FULL);
         }
     }
@@ -1725,6 +1816,23 @@ fn untrain_refusal_now<S: Store>(
         .as_ref()
         .is_some_and(|u| crate::skill_use::time_left(s, world, skill, u, now) > 0.0);
     on_timer.then_some(refusal::ON_ITS_TIMER)
+}
+
+/// Is every place of the player's last bag (the one a perk gives) taken?
+fn last_bag_full(p: &crate::world::Player) -> bool {
+    let last_bag = crate::inventory::SEGMENTS.len() - 1;
+    let places = crate::inventory::SEGMENTS[last_bag] as usize;
+    let held = p
+        .play
+        .items
+        .iter()
+        .filter(|h| {
+            h.location == 0
+                && h.slot < crate::inventory::PACK_ROOM
+                && crate::inventory::segment_of(h.slot) == last_bag
+        })
+        .count();
+    held >= places
 }
 
 /// A player asks to untrain a skill it trained. With no experience put into it, it is untrained at
@@ -1897,6 +2005,311 @@ pub fn earned<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, t
     quals::set_long(&mut p.qualities, progress::q::AVAILABLE_XP, available);
     let now = s.game_now;
     untrained(s, net, world, u.skill, u.xp, now);
+}
+
+/// An effect finishes a player's untraining under way at once, as earning its experience again
+/// would: the skill untrained, its credits back and its experience given back to spend, the player
+/// told. Whether there was one to finish.
+pub fn untrained_at_once<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId) -> bool {
+    let Some(p) = s.players.get_mut(&world) else {
+        return false;
+    };
+    let Some(u) = p.untraining else {
+        return false;
+    };
+    let available = quals::long(&p.qualities, progress::q::AVAILABLE_XP).unwrap_or(0) + u.xp;
+    quals::set_long(&mut p.qualities, progress::q::AVAILABLE_XP, available);
+    progress::send_long(net, world, progress::q::AVAILABLE_XP, available);
+    let now = s.game_now;
+    untrained(s, net, world, u.skill, u.xp, now);
+    true
+}
+
+/// May a step run for a player, by an untraining it waits on: none, or one under way.
+#[must_use]
+pub fn untraining_allows_step<S: Store>(
+    s: &Server<S>,
+    world: ConnId,
+    step: &yalain_content::quests::Step,
+) -> bool {
+    let gates = &s.content.untraining_gates;
+    gates.is_empty() || !gates.of_step(step) || under_way(s, world)
+}
+
+/// May a give take its item from a player, by an untraining it waits on.
+#[must_use]
+pub fn untraining_allows_give<S: Store>(
+    s: &Server<S>,
+    world: ConnId,
+    give: &yalain_content::quests::Give,
+) -> bool {
+    let gates = &s.content.untraining_gates;
+    gates.is_empty() || !gates.of_give(give) || under_way(s, world)
+}
+
+/// Has a player an untraining under way?
+fn under_way<S: Store>(s: &Server<S>, world: ConnId) -> bool {
+    s.players
+        .get(&world)
+        .is_some_and(|p| p.untraining.is_some())
+}
+
+/// The qualities of a kind of reset: the resets held, and when one was last used.
+const fn reset_qualities(kind: Reset) -> (u32, u32) {
+    match kind {
+        Reset::Skills => (reset::SKILLS_HELD, reset::SKILLS_LAST),
+        Reset::HeroSkills => (reset::HERO_SKILLS_HELD, reset::HERO_SKILLS_LAST),
+    }
+}
+
+/// An effect grants a player one complete reset of a kind of its skills: one more held, and the
+/// player told that it may reset and by which command.
+pub fn grant_reset<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, kind: Reset) {
+    let (held_q, _) = reset_qualities(kind);
+    let Some(p) = s.players.get_mut(&world) else {
+        return;
+    };
+    let held = quals::int(&p.qualities, held_q).unwrap_or(0).max(0) + 1;
+    quals::set_int(&mut p.qualities, held_q, held);
+    progress::send_int(net, world, held_q, held);
+    let said = match kind {
+        Reset::Skills => reset::SKILLS_GRANTED,
+        Reset::HeroSkills => reset::HERO_SKILLS_GRANTED,
+    };
+    progress::private(
+        net,
+        world,
+        &crate::chat::show_text(reset::SHOWN_AS, progress::text(said)),
+    );
+    crate::world::keep_player(s, world);
+}
+
+/// A player asks to sell back all its skills, hero skills or craft skills at once. Within the hour
+/// after it last used a reset of that kind it may; otherwise it uses one it holds, which starts the
+/// hour; holding none, it is refused in the install's words and nothing is untrained. A reset of
+/// craft skills is never granted here, so that is always refused.
+pub fn sell_back_all<S: Store>(
+    s: &mut Server<S>,
+    net: &mut ServerNet,
+    world: ConnId,
+    asked: u32,
+    clock: Clock,
+) {
+    let (kind, refused) = match asked {
+        function::SELL_BACK_ALL => (Some(Reset::Skills), no_reset::SKILLS),
+        function::SELL_BACK_ALL_HERO => (Some(Reset::HeroSkills), no_reset::HERO_SKILLS),
+        _ => (None, no_reset::CRAFT_SKILLS),
+    };
+    let now = net.game_time(clock.local);
+    let may = kind.is_some_and(|kind| use_reset(s, net, world, kind, now));
+    match kind {
+        Some(kind) if may => reset_all(s, net, world, kind),
+        _ => progress::private(
+            net,
+            world,
+            &crate::chat::show_text(untraining::SHOWN_AS, progress::text(refused)),
+        ),
+    }
+}
+
+/// May the player reset this kind now: within the hour after it last used a reset of it, or by
+/// using one it holds (one fewer held, and the hour starts now)?
+fn use_reset<S: Store>(
+    s: &mut Server<S>,
+    net: &mut ServerNet,
+    world: ConnId,
+    kind: Reset,
+    now: f64,
+) -> bool {
+    let (held_q, last_q) = reset_qualities(kind);
+    let Some(p) = s.players.get_mut(&world) else {
+        return false;
+    };
+    let last = quals::timestamp(&p.qualities, last_q);
+    if last.is_some_and(|t| now < t + reset::AGAIN_FOR) {
+        return true;
+    }
+    let held = quals::int(&p.qualities, held_q).unwrap_or(0);
+    if held <= 0 {
+        return false;
+    }
+    quals::set_int(&mut p.qualities, held_q, held - 1);
+    progress::send_int(net, world, held_q, held - 1);
+    reset_started(p, net, world, last_q, now);
+    true
+}
+
+/// The hour of resets again starts now.
+fn reset_started(
+    p: &mut crate::world::Player,
+    net: &mut ServerNet,
+    world: ConnId,
+    last_q: u32,
+    now: f64,
+) {
+    quals::set_timestamp(&mut p.qualities, last_q, now);
+    progress::private(
+        net,
+        world,
+        &ServerMessage::UpdateTimestamp(auberean_protocol::quality::PrivateQuality {
+            quality: last_q,
+            value: now,
+        }),
+    );
+}
+
+/// An admin resets a player's skills, granted or not: as a reset it uses, with the hour of resets
+/// again starting now.
+pub fn force_reset<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, now: f64) {
+    let (_, last_q) = reset_qualities(Reset::Skills);
+    let Some(p) = s.players.get_mut(&world) else {
+        return;
+    };
+    reset_started(p, net, world, last_q, now);
+    reset_all(s, net, world, Reset::Skills);
+}
+
+/// A complete reset of a kind of a player's skills (those bought with skill credits, or its hero
+/// skills): each it trained itself is untrained, its cost back in the credits it was paid in; every
+/// one of the kind gives back the experience put into it, at once, to spend again, and those it
+/// keeps (its race's starting skills, skills an effect gave) are back at the level they were
+/// given at. An untraining under way of one of them ends with it. A perk that gives the last bag
+/// stays while that bag is full, as untraining it alone would, and so does whatever a skill that
+/// stays stands on (a hero skill's parent, say), as it was. The player is told, and its client is
+/// given each skill as it now stands.
+fn reset_all<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, kind: Reset) {
+    let Some(p) = s.players.get(&world) else {
+        return;
+    };
+    let starting = s.start.skills.get(&p.race).cloned().unwrap_or_default();
+    let mut skills = held(&starting, &p.play.skills);
+    let table = &s.skill_table;
+    let hero = kind == Reset::HeroSkills;
+    let of_kind = |skill: u32| {
+        table
+            .skills
+            .get(&skill)
+            .is_some_and(|d| (d.flags & flag::HERO != 0) == hero)
+    };
+    // What the reset leaves as it is: skills of the other kind, a bags perk whose bag is full, and
+    // whatever a skill it leaves stands on (a parent or a prerequisite), as untraining would.
+    let bag_full = last_bag_full(p);
+    let mut untouched: Vec<u32> = skills
+        .iter()
+        .map(|h| h.skill)
+        .filter(|&k| {
+            !of_kind(k)
+                || table.skills.get(&k).is_some_and(|d| {
+                    d.perk
+                        .is_some_and(|x| x.kind == untraining::BAGS_PERK && bag_full)
+                })
+        })
+        .collect();
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for h in &skills {
+            if untouched.contains(&h.skill) {
+                continue;
+            }
+            let stood_on = untouched.iter().any(|u| {
+                table.skills.get(u).is_some_and(|d| {
+                    d.parents
+                        .iter()
+                        .chain(&d.prereqs)
+                        .any(|(x, _)| *x == h.skill)
+                })
+            });
+            if stood_on {
+                untouched.push(h.skill);
+                grew = true;
+            }
+        }
+    }
+    let mut gone = Vec::new();
+    let mut lowered = Vec::new();
+    let (mut credits, mut xp) = (0u32, 0u64);
+    for h in &mut skills {
+        if untouched.contains(&h.skill) {
+            continue;
+        }
+        xp += h.xp;
+        if h.mask & mask::PLAYERS_TO_UNTRAIN != 0 {
+            credits += h.cost;
+            gone.push(h.skill);
+        } else if h.xp != 0 {
+            h.xp = 0;
+            lowered.push(h.skill);
+        }
+    }
+    let mut changed = lowered;
+    for skill in &gone {
+        let Some(d) = table.skills.get(skill) else {
+            continue;
+        };
+        let stood_on = d
+            .parents
+            .iter()
+            .map(|(x, _)| (*x, true))
+            .chain(d.prereqs.iter().map(|(x, _)| (*x, false)));
+        for (other, parent) in stood_on {
+            if gone.contains(&other) {
+                continue;
+            }
+            if let Some(x) = skills.iter_mut().find(|x| x.skill == other) {
+                if parent {
+                    x.children = x.children.saturating_sub(1);
+                } else {
+                    x.dependents = x.dependents.saturating_sub(1);
+                }
+                if !changed.contains(&other) {
+                    changed.push(other);
+                }
+            }
+        }
+    }
+    skills.retain(|x| !gone.contains(&x.skill));
+    for skill in &gone {
+        let call =
+            session::call(function::REMOVE_INFO, &[Arg::Int(*skill)]).expect("a skill packs");
+        progress::private(net, world, &call);
+    }
+    for skill in &changed {
+        if let Some(x) = skills.iter().find(|x| x.skill == *skill) {
+            progress::private(net, world, &info_update(x, None));
+        }
+    }
+    let Some(p) = s.players.get_mut(&world) else {
+        return;
+    };
+    if p.untraining.is_some_and(|u| gone.contains(&u.skill)) {
+        p.untraining = None;
+    }
+    if hero {
+        p.play.hero_credits += credits;
+    } else {
+        p.play.credits += credits;
+    }
+    let available = quals::long(&p.qualities, progress::q::AVAILABLE_XP).unwrap_or(0) + xp;
+    quals::set_long(&mut p.qualities, progress::q::AVAILABLE_XP, available);
+    progress::send_long(net, world, progress::q::AVAILABLE_XP, available);
+    keep(p, &starting, &skills);
+    if let Some(p) = s.players.get(&world) {
+        let untraining = p.untraining.map(|u| (u.skill, u.xp));
+        progress::private(net, world, &repository_of_untraining(s, p, untraining));
+    }
+    let said = if hero {
+        reset::HERO_SKILLS_DONE
+    } else {
+        reset::SKILLS_DONE
+    };
+    progress::private(
+        net,
+        world,
+        &crate::chat::show_text(reset::SHOWN_AS, progress::text(said)),
+    );
+    crate::effects::vitals_within_their_greatest(s, net, world);
+    crate::world::keep_player(s, world);
 }
 
 /// A player cancels its untraining under way: the repository names none, the skill is shown as it

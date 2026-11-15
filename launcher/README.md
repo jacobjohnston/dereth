@@ -84,14 +84,17 @@ a checkout never takes it over.
 
 ## The interface
 
-On first start, while the client's preferences name no interface, the launcher asks which to play
-in: **Horizon** (chosen to begin with), **Modern** or **Classic**. It writes the answer as
-`Interface=<name>` under `[UI]` in the client's `UserPreferences.ini`, keeping every other line,
-and never asks again. You can change it later in the client's options or in the Library, except
-while a Dereth client the launcher started is running.
+On first start the launcher asks which interface to play in: **Horizon** (chosen to begin with),
+**Modern** or **Classic**. The answer is the default for every world, kept in the launcher's
+state and changed under the Library's **Settings**. Each world starts in the default until you
+change the interface in game there; the client keeps that choice for that world alone, under
+`[WorldInterface]` in its `UserPreferences.ini`, and the world opens in it from then on. A world
+kept in Classic starts in the default when there are no Classic data files, and the game says so.
 
-The file is the one the client reads: in `DERETH_SETTINGS_DIR` if set, else a
-`UserPreferences.ini` beside the client, else the client's settings folder.
+An earlier launcher wrote its answer as `Interface=<name>` under `[UI]` in the client's
+preferences; a launcher whose state has no default takes that one, so it does not ask again. The
+file is the one the client reads: in `DERETH_SETTINGS_DIR` if set, else a `UserPreferences.ini`
+beside the client, else the client's settings folder.
 
 ## A pad
 
@@ -130,8 +133,7 @@ looks again every 10 seconds. The Library's **Show what I'm playing on Discord**
 | both, in one folder of your choosing | `DERETH_STATE_DIR` |
 | passwords | Windows Credential Manager, the macOS login Keychain, or the Linux desktop's keyring (Secret Service), one entry per account per world: `dereth:world/<slug>/<account>`. With no keyring, the passwords earlier launchers made up for Asheron's Call 2 accounts are in the data folder's `auberean/secrets.json`, readable by you alone, and still play those accounts; no launcher makes one now |
 
-The launcher writes nothing outside its own `launcher` folders, except the interface in the
-client's preferences.
+The launcher writes nothing outside its own `launcher` folders.
 
 **The world list** is the Dereth Network hub's (`https://hub.dereth.network/v1/servers`). The hub
 imports the community list (`Servers.xml` from
@@ -245,8 +247,19 @@ on with `--art-pack`, once each, the lowest first, and where two replace the sam
 retail picture or lighting key, the higher one wins. A new pack goes to the top. Packs are the
 player's, not a world's: every world the Dereth client plays draws them. The logic is
 `dereth-launch`'s `art` module, over `dereth-art-catalog`; the files are under the launcher's data
-folder, in `art` (`sources.json`, `installed.json` in the stack's order, a folder per pack holding
-its `current.dat`).
+folder, in `art` (`sources.json`, `installed.json` in the stack's order, `files.json`, a folder per
+pack holding its `current.dat`).
+
+**Add a pack file…**, under the installed packs, adds a packed pack from anywhere on this computer,
+chosen with the system's file picker. The launcher reads its manifest as it reads a download's: a
+file that is not a pack, names no id or version, or has an id under `network.dereth.` or one already
+on the list is refused. It goes to the top, on, and moves and turns off like any other; its row says
+**local** and gives its path. The launcher keeps the path, not a copy, so a pack rebuilt in
+place is what the client gets at the next Play, and its manifest is read again at the next start. It
+never updates, and Remove takes it off the list without deleting the file. A file that is gone shows
+**File not found** and is left out of what the client is given. These packs are kept in
+`files.json`, each with its place in the stack, so `installed.json` stays as earlier launchers read
+and write it. In the demo page, `?art=files` starts with two such packs, one of them gone.
 
 ## Updates
 
@@ -498,9 +511,10 @@ fetches the world database release the world names in its `[base]` (if it names 
 copy against the world's data set as the server will (`yalain world compile`; a world that does
 not compile is refused and the world keeps what it played), then points `[server]
 world_database_path` at it. Each publish that changes something is the next version; the three
-newest snapshots are kept, and the one the world plays always. An Athenaeum world changes only the
-server's rows (people, objects, camps, places, talk, stores, quests), which every client is told of
-as it plays, so nothing is sent to players' data files and the retail client sees it too.
+newest snapshots are kept, and the one the world plays always. The compile also builds the world's
+overlay (its clearings and shop titles) in the snapshot, from its rows against the world's data
+set; Yalain sends players what they lack of it as they log in, and a retail player needs the
+world's patching on.
 
 **Athenaeum's page** makes and opens worlds. **New world** makes one with `athenaeum new` in an
 `Athenaeum` folder in your Documents and opens the editor on it; **Open World** opens one by its
@@ -511,10 +525,11 @@ beside itself. A world's row opens to when it was saved, what it changes, **Expo
 **Export For** writes the world for a Yalain that serves it elsewhere, as a world database package,
 in a folder you choose (that folder when it is empty or an earlier export, else `<world>-yalain` in
 it): its `world.toml`, naming the release of the world database it lies over (the one it names, else
-the one Yalain pins), `world.lock` and its packs, checked with `yalain world compile` against your
-default data set, and a `README.txt` saying how to serve it (`[server] world_database_path`) and
-which release to fetch. Athenaeum changes only the server's rows, never the game's data files, so
-every client, retail too, sees its changes from the server.
+the one Yalain pins), `world.lock`, its packs and its `overlay` (its clearings and shop titles),
+checked with `yalain world compile` against your default data set, which brings the overlay up to
+the rows, and a `README.txt` saying how to serve it (`[server] world_database_path`) and which
+release to fetch. It is ready to serve with no compile step; an operator whose data files differ
+builds the overlay again with `yalain world compile`.
 
 Started with `DERETH_SETTINGS_DIR` set, the launcher gives Auberean `AUBEREAN_SETTINGS_DIR` as a
 folder `auberean` in it, so a trial run keeps away from the player's own settings.

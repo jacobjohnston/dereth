@@ -132,7 +132,7 @@ fn a_vaults_shard_completes_its_quest_as_the_player_comes_out() {
     let mut h = world();
     h.server.quests.quests = vec![yalain_content::quests::QuestDef {
         id: QUEST,
-        name: (1, 2),
+        name: yalain_content::Words::Ref(1, 2),
         description: (3, 4),
         icon: 0,
         play_fx: false,
@@ -149,9 +149,11 @@ fn a_vaults_shard_completes_its_quest_as_the_player_comes_out() {
         subquests: Vec::new(),
         min_level: 0,
         fails_on_death: false,
+        fails_on_logout: false,
+        fails_on_teleport: false,
         once: false,
         fellows: yalain_content::quests::Fellows::default(),
-        last_waits: false,
+        ranges: Vec::new(),
         hero_only: false,
         pay: yalain_content::quests::CompletionPay {
             points: 400,

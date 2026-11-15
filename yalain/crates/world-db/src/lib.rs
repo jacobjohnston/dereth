@@ -9,8 +9,9 @@
 //! (`auberean-pack`), for the world file, the pack headers, the lockfile, provenance, overrides,
 //! removals and the merge; the record decoders (`auberean-assets`) and the script library
 //! (`auberean-script`), for reading the install's templates, stores and quest definitions; the
-//! server's tables (`yalain-content`), which a compile fills; and `dereth-primitives` for its
-//! math. **Used by** the `yalain`
+//! server's tables (`yalain-content`), which a compile fills; the install's files (`dereth-dat`,
+//! `auberean-dat`) and its world records (`auberean-world`), for building a world's overlay; and
+//! `dereth-primitives` for its math. **Used by** the `yalain`
 //! program (`yalain world ...`, `--world-db`), the server's tests, and the world builder
 //! (`athenaeum`), whose worlds lie over a released database ([`layer`]).
 //!
@@ -23,11 +24,12 @@
 //! <pack>/server/landblocks/XXYY.toml   [[object]], [[camp]] standing in landblock XXYY
 //! <pack>/server/places.toml       [[place]]
 //! <pack>/server/loot.toml         [[loot]]
-//! <pack>/server/stores.toml       [[keeper]], [[sale]]
+//! <pack>/server/stores.toml       [[keeper]], [[store]], [[sale]]
 //! <pack>/server/quests/QQQQQQQQ.toml   [[quest]], [[step]] of one quest
 //! <pack>/server/gives/TTTTTTTT.toml    [[give]] of one template given to
 //! <pack>/server/talk/TTTTTTTT.toml     [[talk]] of one template
-//! <pack>/server/crafting.toml     [[craft]], [[tool]], [[spellbinding]], [[refining]]
+//! <pack>/server/crafting.toml     [[craft]], [[tool]], [[spellbinding]], [[refining]], [[recipe]],
+//!                                 [[combination]]
 //! <pack>/server/mines.toml        [[mine]]
 //! <pack>/server/maps.toml         [[map_region]], [[map_recipes]]
 //! <pack>/server/story.toml        [[scene]], [[shard]]
@@ -36,13 +38,17 @@
 //! <pack>/server/plants.toml       [[plant]], [[plant_cross]]
 //! <pack>/server/worn.toml         [[worn]]
 //! <pack>/server/effects.toml      [[effect_name]], [[effect_rule]]
+//! <pack>/server/events.toml       [[event]], [[tally]]
 //! <pack>/server/treasure.toml     [[treasure_rules]], [[treasure_sort]]
 //! <pack>/server/treasure_words.toml    [[treasure_word]]
 //! <pack>/server/treasure_looks.toml    [[treasure_look]]
 //! <pack>/server/treasure_potions.toml  [[treasure_potion]]
 //! <pack>/server/treasure_families.toml [[treasure_family]]
-//! <pack>/server/items.toml       [[item_use]], [[book]], [[start_item]]
-//! <pack>/server/creatures.toml   [[concealing]], [[npc_table]], [[friend_table]], [[creature]]
+//! <pack>/server/items.toml       [[item_use]], [[book]], [[start_item]], [[interaction]]
+//! <pack>/server/puzzles.toml     [[object_states]], [[sequence]], [[lever]], [[offering]],
+//!                                [[guarded]], [[shifting]]
+//! <pack>/server/creatures.toml   [[concealing]], [[npc_table]], [[friend_table]], [[creature]],
+//!                                [[safe_passage]], [[creature_effect]], [[defense]]
 //! <pack>/server/routes.toml       [[route]]
 //! <pack>/server/areas.toml        [[area]]
 //! ```
@@ -55,7 +61,8 @@
 //! uses only where no string reference is given, and which is said as literal text.
 //!
 //! **Must never** do I/O: the caller hands in the files ([`Files`]) and the install
-//! ([`compile::Install`]); a release is bytes out.
+//! ([`compile::Install`]); a release is bytes out. The one exception is the `fs` feature's
+//! [`overlay::write`], which reads an install on disk and writes a world's overlay folder.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -65,6 +72,7 @@ pub mod compile;
 pub mod install;
 pub mod layer;
 pub mod merge;
+pub mod overlay;
 pub mod pools_check;
 pub mod release;
 pub mod rows;

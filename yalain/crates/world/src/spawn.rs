@@ -1,7 +1,8 @@
 //! The world's step: camps keep their creatures alive, creatures act, corpses go.
 //!
 //! **Camps.** Each camp of the spawn table keeps its population alive: at the first step every camp
-//! is filled; when one of its creatures dies, a replacement appears after the camp's period.
+//! is filled; when one of its creatures dies, a replacement appears after the camp's period (at the
+//! operator's respawn rate: [`crate::rates`]).
 //! Outdoors a creature appears at a point drawn inside the camp's radius (on the ground, when the
 //! host knows the land); indoors at one of the camp's spots. A creature's greatest health is its
 //! template's, varied a little each time one appears.
@@ -10,6 +11,11 @@
 //! lying at the camp's place: once it is taken (picked up, or gone), a new one lies there after the
 //! camp's period (2017: quest items lying alone came back 20.0-20.1 s after their taking, 9 of 9
 //! timed; keys 30.0-30.1 s, 6 of 6; a dungeon's mushrooms 181-193 s, 6 of 6).
+//!
+//! **Chests.** A camp whose template is a chest's keeps one standing at its place, as an effect
+//! places one ([`crate::placing`]): anyone may open it. Once it is gone (a chest of a kind that goes
+//! once closed, closed after its opening) a new one stands there after the camp's period: a rare
+//! prospector's corpse where creatures roam, with a long period, comes back now and then.
 //!
 //! **Summons.** A camp never makes a summoned creature (a template with a pet's AI or a pet's NPC
 //! table): those were players' pets and conjurings, seen beside their owners and never made by a
@@ -21,7 +27,9 @@
 //! and the camp's way round ([`crate::ai`]).
 //!
 //! **Appearing.** A new creature is made for every client whose view holds its place, with its
-//! entry effect.
+//! entry effect. It holds the effects the world's rows give its template from that moment, at its
+//! level's spellcraft, for as long as it stands ([`holds_its_effects`]); so does a creature a death
+//! or an effect makes.
 
 use dereth_primitives::num::math;
 use yalain_net::ServerNet;
@@ -54,74 +62,63 @@ pub fn is_summon(props: &yalain_content::Props) -> bool {
             .is_some_and(|t| t.starts_with("NPCTable_Pet"))
 }
 
-/// A camp's state: its creatures alive, and when each replacement is due.
+/// A camp's state: its creatures alive, when each replacement is due, and the characters that
+/// harmed its last creature to die (a pet's harm counted as its owner's; not kept across a
+/// restart).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CampState {
     pub alive: Vec<u64>,
     pub due: Vec<f64>,
     pub filled: bool,
+    pub fought: Vec<u64>,
 }
 
-/// The kind of NPC table practice dummies that send back a share of each attack on them stand
-/// on, every level's, with a quest on its death and without (`AI_NPCTable` begins with it). The
-/// one of level 30 on another kind of table never does.
-pub const PRACTICE_DUMMY_TABLE: &str = "NPCTable_WingChunDummy";
-
-/// Is a template a practice dummy that sends back a share of each attack on it?
-#[must_use]
-pub fn is_practice_dummy(props: &yalain_content::Props) -> bool {
-    props
-        .text("AI_NPCTable")
-        .is_some_and(|t| t.starts_with(PRACTICE_DUMMY_TABLE))
-}
-/// What a practice dummy holds from its first moment: 0.01 of an attack sent back for each point of
-/// spellcraft.
-pub const PRACTICE_DUMMY_EFFECT: u32 = 0x7000_1C79;
-
-/// The spellcraft of a practice dummy's effect, by its level. 2017's shares: 0.35 at 40 (74 of 74
-/// attacks with a skill), 0.40 at 50 (10 of 10), 0.45 at 60 (1 of 1), 0.50 at 70 (28 of 28). None
-/// recorded at 30, where this gives 0.30; its effect's appearance shows in 45 of 54.
-#[must_use]
-pub fn practice_dummy_spellcraft(level: i32) -> f32 {
-    #[allow(clippy::cast_precision_loss)]
-    let level = level as f32;
-    15.0 + level / 2.0
-}
-
-/// A practice dummy holds its effect as it appears: for as long as it stands, shown at once.
-fn holds_its_effect<S: Store>(s: &mut Server<S>, net: &mut ServerNet, id: u64, clock: Clock) {
+/// A creature holds the effects the world's rows give its template from its first moment
+/// ([`yalain_content::creature_rows::CreatureEffect`]), each at the spellcraft its row gives the
+/// creature's level, for as long as it stands, shown at once. An effect the world's start never
+/// read is left off.
+pub(crate) fn holds_its_effects<S: Store>(
+    s: &mut Server<S>,
+    net: &mut ServerNet,
+    id: u64,
+    clock: Clock,
+) {
     let Some(t) = s.things.get(id) else {
         return;
     };
     let (template, level) = (t.template, t.creature.as_ref().map_or(0, |c| c.stats.level));
-    if !s
-        .catalog
-        .get(template)
-        .is_some_and(|t| is_practice_dummy(&t.props))
-    {
-        return;
+    #[allow(clippy::cast_precision_loss)]
+    let held: Vec<(u32, f32)> = s
+        .creature_rows
+        .effects_of(template)
+        .map(|e| {
+            let at = crate::effect_defs::Scale(e.spellcraft.clone()).at(level as f32);
+            (e.effect, at.unwrap_or(1.0))
+        })
+        .collect();
+    for (state, spellcraft) in held {
+        let Some(def) = s.effect_table.get(state).cloned() else {
+            continue;
+        };
+        let cast = crate::effects::Cast {
+            caster: id,
+            spellcraft,
+            ..crate::effects::Cast::default()
+        };
+        let shape = crate::effects::Shape {
+            timeout: Some(f32::MAX),
+            ..crate::effects::Shape::TIMED
+        };
+        crate::effects::add_on(
+            s,
+            net,
+            crate::effects::On::Creature(id),
+            &def,
+            cast,
+            shape,
+            clock,
+        );
     }
-    let Some(def) = s.effect_table.get(PRACTICE_DUMMY_EFFECT).cloned() else {
-        return;
-    };
-    let cast = crate::effects::Cast {
-        caster: id,
-        spellcraft: practice_dummy_spellcraft(level),
-        ..crate::effects::Cast::default()
-    };
-    let shape = crate::effects::Shape {
-        timeout: Some(f32::MAX),
-        ..crate::effects::Shape::TIMED
-    };
-    crate::effects::add_on(
-        s,
-        net,
-        crate::effects::On::Creature(id),
-        &def,
-        cast,
-        shape,
-        clock,
-    );
 }
 
 /// The side of a landblock and of a land cell, in meters.
@@ -183,6 +180,7 @@ pub fn step<S: Store>(s: &mut Server<S>, net: &mut ServerNet, clock: Clock) {
     crate::mining::expire(s, net, now);
     crate::regen::step(s, net, now);
     crate::talk::step(s, net, clock);
+    crate::world::pull_back_due(s, net, clock);
     s.step_timer.lap(Stage::Step);
 }
 
@@ -192,12 +190,12 @@ fn fill<S: Store>(s: &mut Server<S>, net: &mut ServerNet, i: usize, clock: Clock
         return;
     }
     let now = clock.local.0;
+    // Its items taken from where they lay are replaced after its period, as its dead creatures are.
+    let regen = period(s, i);
     let Some(state) = s.camps.get_mut(i) else {
         return;
     };
     let population = s.spawns.camps[i].population as usize;
-    // Its items taken from where they lay are replaced after its period, as its dead creatures are.
-    let regen = s.spawns.camps[i].regen;
     let things = &s.things;
     let taken: Vec<u64> = state
         .alive
@@ -229,7 +227,7 @@ fn fill<S: Store>(s: &mut Server<S>, net: &mut ServerNet, i: usize, clock: Clock
         if let Some(id) = spawn(s, i, now) {
             s.camps[i].alive.push(id);
             presence::thing_appears(s, net, id);
-            holds_its_effect(s, net, id, clock);
+            holds_its_effects(s, net, id, clock);
         }
     }
 }
@@ -251,6 +249,10 @@ pub fn spawn<S: Store>(s: &mut Server<S>, i: usize, now: f64) -> Option<u64> {
     )?;
     let template = s.catalog.get(camp.templates[pick].0)?.clone();
     let Some(mut stats) = yalain_content::CreatureStats::from_props(&template.props) else {
+        if s.chests.packages.contains(&template.description.package) {
+            let (at, _) = place(s, &camp, i);
+            return Some(stand(s, &template, at));
+        }
         if is_item(&template.props) {
             let (at, _) = place(s, &camp, i);
             return lay(s, template.id, at);
@@ -360,9 +362,11 @@ pub fn make<S: Store>(
         weapon_count: 1,
         patrol,
         actions: 0,
+        in_sight: Vec::new(),
     });
     s.things.insert(t);
     crate::arms::arm(s, id);
+    crate::defenses::made(s, id, template.id, now);
     id
 }
 
@@ -459,9 +463,30 @@ fn lay<S: Store>(s: &mut Server<S>, template: u32, at: StoredPosition) -> Option
     Some(id)
 }
 
+/// Stand a chest of a template where a camp keeps it, no one's. Returns its id.
+fn stand<S: Store>(
+    s: &mut Server<S>,
+    template: &yalain_content::Template,
+    at: StoredPosition,
+) -> u64 {
+    let id = s.things.new_id();
+    let mut t = Thing::of(id, template, Kind::Placed);
+    t.at = Some(at);
+    t.fresh = true;
+    s.things.insert(t);
+    id
+}
+
+/// A camp's period: how long after a death or a taking its replacement is due, at the operator's
+/// respawn rate ([`crate::rates`]).
+fn period<S: Store>(s: &Server<S>, camp: usize) -> f64 {
+    let regen = s.spawns.camps.get(camp).map_or(0.0, |c| c.regen);
+    crate::rates::period(s.cfg.rates.respawn, regen)
+}
+
 /// A camp's creature has died: a replacement is due after the camp's period.
 pub fn died<S: Store>(s: &mut Server<S>, camp: usize, id: u64, now: f64) {
-    let regen = s.spawns.camps.get(camp).map_or(0.0, |c| c.regen);
+    let regen = period(s, camp);
     if let Some(state) = s.camps.get_mut(camp) {
         state.alive.retain(|x| *x != id);
         state.due.push(now + regen);

@@ -13,6 +13,12 @@
 //! - **What stands on the ground stands on it as drawn.** The targeting ring lies on it; the
 //!   particles outdoors are drawn lifted onto it; the far trees' impostor cards stand on its mesh,
 //!   near the switch and far out.
+//! - **The water's bed lies where bodies stand.** Over the valley, a body standing in the river
+//!   where physics stands it is drawn there, on the bed the device draws. In the lake's shallows
+//!   and out where it is deep, a body is drawn where physics puts it, water drawn or not, with the
+//!   bed under its feet; a pillar standing in the water and a lily pad on it are drawn where
+//!   retail places them, and a body on a boardwalk over the water, the boardwalk and its posts
+//!   where they stand. What a body standing in the water holds is drawn in its hand.
 //!
 //! Fixture: the retail dats (`DERETH_TEST_DAT_DIR`) and a hardware Vulkan 1.3 device.
 //!
@@ -159,30 +165,12 @@ impl GroundSource for Valley {
     }
 }
 
-#[test]
-fn the_ground_beside_and_under_the_water_is_drawn_where_the_scene_stands_bodies() {
-    let _gpu = crate::common::gpu_lock();
-    let store = crate::common::dats();
-    let station = remaster_frames::stations(&store, &["holtburg"])
-        .pop()
-        .expect("the town");
-    let (mut gpu, shot) = opened(&store, &station, None, every_piece());
+/// The valley's ground as the remaster draws it with `knobs`: the valley, its water field, its
+/// block's offset and the ground for the device.
+fn valley_ground(knobs: &Knobs) -> (Valley, Vec<[f32; 2]>, drawn::BlockField, rm::DrawnGround) {
     let valley = Valley::new();
     let field = shore::held(&shore::water_field(SIDE, &valley.heights, &valley.words));
-    let mut knobs = Knobs::default();
-    // A body stands on the ground under its middle, so the two are compared exactly.
-    knobs.set(Knob::WalkLowpass, 0.0);
-    knobs.set(Knob::Far, 0.0);
-    let block = drawn::block_field(&valley, BLOCK, &[], &knobs);
-    let water = drawn::Water {
-        shore: shore::Shore {
-            side: SIDE,
-            heights: &valley.heights,
-            field: &field,
-        },
-        depth: knobs.get(Knob::WaterDepth),
-        shelf: knobs.get(Knob::WaterShelf),
-    };
+    let block = drawn::block_field(&valley, BLOCK, &[], knobs);
     let ground = rm::DrawnGround {
         world: Arc::new(rm::DrawnWorld {
             serial: 1_000_000,
@@ -198,17 +186,22 @@ fn the_ground_beside_and_under_the_water_is_drawn_where_the_scene_stands_bodies(
             generation: 1,
             offset: Arc::new(block.offset.clone()),
             weight: Arc::new(block.weight.clone()),
+            bands: Arc::new(block.bands.clone()),
         }],
         reach: 1,
         global: Vec2::ZERO,
         knobs: rm::DrawnKnobs {
             micro: (0.0, 0.7),
-            water: Some((knobs.get(Knob::WaterDepth), knobs.get(Knob::WaterShelf))),
+            water: Some(knobs.get(Knob::BedSlope)),
             ..rm::DrawnKnobs::default()
         },
         bodies: Vec::new(),
     };
-    // Across the hillside's foot, the bank, the river and the far bank, along three lines.
+    (valley, field, block, ground)
+}
+
+/// Points across the hillside's foot, the bank, the river and the far bank, along three lines.
+fn across_the_valley() -> Vec<[f32; 3]> {
     #[allow(clippy::cast_precision_loss)] // block coordinates, exact in f32
     let (ox, oy) = (BLOCK.0 as f32 * 192.0, BLOCK.1 as f32 * 192.0);
     let mut points = Vec::new();
@@ -217,12 +210,82 @@ fn the_ground_beside_and_under_the_water_is_drawn_where_the_scene_stands_bodies(
             points.push([ox + 40.0 + f32::from(k) * 1.5, oy + row, 30.0]);
         }
     }
+    points
+}
+
+/// The knobs the valley is compared under: a body stands on the ground under its middle, so the
+/// two are compared exactly, and the near ground is drawn throughout.
+fn valley_knobs() -> Knobs {
+    let mut knobs = Knobs::default();
+    knobs.set(Knob::WalkLowpass, 0.0);
+    knobs.set(Knob::Far, 0.0);
+    knobs
+}
+
+/// How far physics stands a body under retail's ground at global `(x, y)` of the valley, by its
+/// cell's water corners: 0.9 m in a cell of water corners alone, in one with some 0.45 m where
+/// the corner nearest is water and 0.1 m where it is land, and none in a cell with none.
+fn valley_sink(valley: &Valley, x: f32, y: f32) -> f32 {
+    let wet = |gx: f32, gy: f32| {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // inside the valley
+        let k = gy as usize * SIDE + gx as usize;
+        (valley.words[k] >> 2) & 0x1F == 17
+    };
+    let (cx, cy) = ((x / 24.0).floor(), (y / 24.0).floor());
+    let corners = [
+        wet(cx, cy),
+        wet(cx + 1.0, cy),
+        wet(cx, cy + 1.0),
+        wet(cx + 1.0, cy + 1.0),
+    ];
+    let nearest = wet(
+        cx + f32::from(u8::from(x / 24.0 - cx > 0.5)),
+        cy + f32::from(u8::from(y / 24.0 - cy > 0.5)),
+    );
+    if corners.iter().all(|w| *w) {
+        0.9
+    } else if !corners.iter().any(|w| *w) {
+        0.0
+    } else if nearest {
+        0.45
+    } else {
+        0.1
+    }
+}
+
+/// **The ground the device draws is the ground the scene stands bodies on, and in the water a
+/// body's feet meet the bed**: across a valley made for the test, its hillside, its banks and
+/// its river, the device draws the ground where the scene works it out; on land a body standing
+/// on retail's ground is drawn on it, and in the river a body standing where physics stands it,
+/// sunk by its cell's depth, is drawn there, on the bed the device draws under it, clear of the
+/// water's edge and of where one depth eases into the next.
+#[test]
+fn the_ground_beside_and_under_the_water_is_drawn_where_the_scene_stands_bodies() {
+    let _gpu = crate::common::gpu_lock();
+    let store = crate::common::dats();
+    let station = remaster_frames::stations(&store, &["holtburg"])
+        .pop()
+        .expect("the town");
+    let (mut gpu, shot) = opened(&store, &station, None, every_piece());
+    let knobs = valley_knobs();
+    let (valley, field, block, ground) = valley_ground(&knobs);
+    let water = drawn::Water {
+        shore: shore::Shore {
+            side: SIDE,
+            heights: &valley.heights,
+            field: &field,
+        },
+        slope: knobs.get(Knob::BedSlope),
+    };
+    #[allow(clippy::cast_precision_loss)] // block coordinates, exact in f32
+    let (ox, oy) = (BLOCK.0 as f32 * 192.0, BLOCK.1 as f32 * 192.0);
+    let points = across_the_valley();
     let shader = shot
         .scene
         .draw
         .remaster_drawn_heights(&mut gpu, Some(&ground), &points);
     assert_eq!(shader.len(), points.len(), "the probe read back");
-    let (mut dipped, mut wet, mut worst) = (0, 0, 0.0f32);
+    let (mut dipped, mut depths, mut worst) = (0, [0usize; 3], 0.0f32);
     for (q, drawn_h) in points.iter().zip(&shader) {
         let (x, y) = (q[0], q[1]);
         let p = Point::at(&valley, x, y);
@@ -236,44 +299,46 @@ fn the_ground_beside_and_under_the_water_is_drawn_where_the_scene_stands_bodies(
             scene.height
         );
         // A body standing there, where physics puts it: on retail's ground on land, sunk as
-        // retail sinks it in its water. Drawn on the ground on land; in the water never under
-        // the bed, and where the bed lies deeper than retail sinks it, as deep as retail sinks it.
-        let inside = water.shore.distance(x, y, 0.0);
-        let sink = if inside > 6.0 {
-            0.9
-        } else if inside > 0.0 {
-            0.45
-        } else {
-            0.0
-        };
+        // physics sinks it in its water. Drawn where physics puts it, and in the water on the bed.
+        let sink = valley_sink(&valley, x, y);
         let z = p.retail - sink;
-        let feet = z + drawn::shift(z, scene, 1.0);
+        let feet = z + drawn::shift(drawn::held_from(z, p.retail), scene, 1.0);
+        let inside = water.shore.distance(x, y, 0.0);
+        let seam = |v: f32| (v - (v / 12.0).round() * 12.0).abs() < shore::SINK_EASE;
         if sink == 0.0 {
-            assert!(
-                (feet - drawn_h).abs() < 2e-3,
-                "at ({x}, {y}) a body stands at {feet} on ground drawn at {drawn_h}"
-            );
+            if inside <= 0.0 {
+                assert!(
+                    (feet - drawn_h).abs() < 2e-3,
+                    "at ({x}, {y}) a body stands at {feet} on ground drawn at {drawn_h}"
+                );
+            }
             if near < -0.2 {
                 dipped += 1;
             }
         } else {
             assert!(
-                feet >= drawn_h - 2e-3,
-                "at ({x}, {y}) a body sunk {sink} m stands at {feet} under the bed at {drawn_h}"
+                (feet - z).abs() < 2e-3,
+                "at ({x}, {y}) a body sunk {sink} m is drawn at {feet} for {z}"
             );
-            if p.retail - drawn_h > sink {
-                assert!((feet - z).abs() < 2e-3, "at ({x}, {y}) {feet} for {z}");
-                wet += 1;
+            if inside > water.slope && !seam(x) && !seam(y) {
+                assert!(
+                    (feet - drawn_h).abs() < 5e-3,
+                    "at ({x}, {y}) a body sunk {sink} m stands at {feet}, the bed at {drawn_h}"
+                );
+                depths[usize::from(sink > 0.1) + usize::from(sink > 0.5)] += 1;
             }
         }
     }
     println!(
-        "{} points, worst difference {worst:e}; {dipped} where the rounding dips, {wet} in deep \
-         water",
+        "{} points, worst difference {worst:e}; {dipped} where the rounding dips; feet on the bed \
+         sunk 0.1, 0.45, 0.9 m: {depths:?}",
         points.len()
     );
     assert!(dipped > 5, "the hill's foot dips under retail's: {dipped}");
-    assert!(wet > 20, "bodies sink into deep water: {wet}");
+    assert!(
+        depths[1] > 5 && depths[2] > 20,
+        "bodies stand on the bed in the shallows and the deep: {depths:?}"
+    );
     drop(shot);
     drop(gpu);
     let errors = dereth_render::vulkan::take_validation_errors();
@@ -347,6 +412,16 @@ fn a_still_view_of_the_drawn_ground_draws_the_same_frame_again() {
         .pop()
         .expect("the town");
     let (mut gpu, mut shot) = opened(&store, &station, None, every_piece());
+    // The far trees come to the device a few models a frame, and a tree stands once its model's
+    // pictures have come: the view is still once every far tree's have.
+    for _ in 0..400 {
+        shot.step_held(&mut gpu);
+        let s = shot.scene.draw.remaster_forest_stats(&mut gpu);
+        if s.is_none_or(|s| s.wanted > 0 && s.pictures >= s.wanted) {
+            break;
+        }
+    }
+    shot.step_held(&mut gpu);
     let a = shot.scene.draw.remaster_capture(&mut gpu).expect("drew");
     shot.step_held(&mut gpu);
     let b = shot.scene.draw.remaster_capture(&mut gpu).expect("drew");
@@ -812,5 +887,367 @@ fn mesh_trees_stand_on_the_drawn_ground_near_and_just_before_the_switch() {
     assert!(
         near.mean < near.mean_unlifted && before.mean < before.mean_unlifted,
         "the lift brings them onto the ground"
+    );
+}
+
+/// The lake's shallows where a player stood: the body a little under the water's surface, a
+/// stone pillar standing in the water a meter off.
+const SHALLOWS: &str = "dereth report 1; loc 0xA9B50015 [59.258690 104.685966 27.904999] \
+                        0.723986 0.000000 0.000000 -0.689815; time 0.5; clock 306486600.0; \
+                        weather clear";
+/// The pillar's model and where it stands in the shallows' block.
+const PILLAR: (u32, [f32; 3]) = (0x0200_03CA, [60.11, 103.55, 27.9]);
+/// A lily pad's model, as the lake lays them on its surface farther along, set on the water
+/// beside the pillar.
+const LILY_PAD: (u32, [f32; 3]) = (0x0200_03D2, [61.0, 105.5, 28.0]);
+/// The same lake out where it is deep, the body standing in it.
+const DEEP: &str = "dereth report 1; loc 0xA9B5001E [85.0 125.0 27.1] 1.0 0.0 0.0 0.0; time 0.5; \
+                    clock 306486600.0; weather clear";
+/// A boardwalk over the same lake, a little over the water, a body standing on its deck.
+const BOARDWALK: &str = "dereth report 1; loc 0xABB50007 [8.40 147.43 28.35] 0.723986 0.000000 \
+                         0.000000 -0.689815; time 0.5; clock 306486600.0; weather clear";
+/// One of the boardwalk's planks, and one of the posts it stands on in the water: their models
+/// and where they stand in the boardwalk's block.
+const PLANK: (u32, [f32; 3]) = (0x0100_104C, [8.40, 147.43, 28.077]);
+const DOCK_POST: (u32, [f32; 3]) = (0x0200_03B4, [0.2, 136.9, 27.55]);
+
+/// What [`wading_at`] found.
+#[derive(Debug)]
+struct Wading {
+    /// Where physics puts the body (its cell's frame).
+    placed: dereth_primitives::Position,
+    /// Where the scene draws its feet, and the drawn ground under them (render space).
+    feet: f32,
+    ground: f32,
+    /// How far each placement asked for is drawn above where it stands, near and far, and the
+    /// drawn ground under it.
+    lifts: Vec<([f32; 2], f32)>,
+}
+
+/// The place `line` reports with every piece of the ground drawn, the water drawn where `water`,
+/// the body standing a second; and the placements `things` (model, and where it stands
+/// block-local in the body's block).
+fn wading_at(
+    store: &Arc<RetailDatStore>,
+    line: &str,
+    water: bool,
+    things: &[(u32, [f32; 3])],
+) -> Wading {
+    let report = VisualReport::parse(line).expect("the report reads");
+    let station = report_station(&report, Some(3));
+    let (mut gpu, mut shot) = opened(store, &station, Some(&report), every_piece());
+    let w = shot.scene.draw.remaster_water();
+    shot.scene.draw.set_remaster_water(
+        dereth_scene::world_scene::RemasterWater { on: water, ..w },
+        &mut gpu,
+    );
+    for _ in 0..30 {
+        shot.step_by(&mut gpu, 1.0 / 30.0);
+    }
+    shot.step_held(&mut gpu);
+    let c = shot.scene.character.as_ref().expect("a body");
+    let (placed, body) = (c.position(), c.render_frame().origin);
+    let feet = body.z + shot.scene.remaster_shift_at(body);
+    let ground = shot
+        .scene
+        .remaster_ground_at(body.x, body.y)
+        .expect("the drawn ground");
+    let local = placed.frame.origin;
+    let lifts = things
+        .iter()
+        .map(|(_, at)| {
+            let thing = dereth_primitives::Vec3::new(
+                body.x + at[0] - local.x,
+                body.y + at[1] - local.y,
+                at[2],
+            );
+            let lifts = shot.scene.remaster_lifts_at(thing);
+            let under = shot
+                .scene
+                .remaster_ground_at(thing.x, thing.y)
+                .expect("the drawn ground");
+            (lifts, under)
+        })
+        .collect();
+    drop(shot);
+    drop(gpu);
+    let errors = dereth_render::vulkan::take_validation_errors();
+    assert!(errors.is_empty(), "the validation layer: {errors:#?}");
+    Wading {
+        placed,
+        feet,
+        ground,
+        lifts,
+    }
+}
+
+/// **What stands in the water is drawn where physics and retail put it, and a body's feet meet
+/// the bed drawn under it**: in the lake's shallows, where physics stands a body a hand's breadth
+/// under the water's surface, and out where it is deep, where physics sinks it 0.9 m, the body is
+/// drawn where physics puts it, whether the water is drawn or not, and the bed is drawn under its
+/// feet; the stone pillar beside it and a lily pad on the water are drawn where retail places
+/// them. On a boardwalk over the lake a body, the boardwalk's planks and the posts it stands on
+/// are drawn where they stand.
+#[test]
+fn what_stands_in_water_is_drawn_where_it_stands_and_a_bodys_feet_meet_the_bed() {
+    let _gpu = crate::common::gpu_lock();
+    let store = crate::common::dats();
+    let level = 28.0;
+    let shallows = wading_at(&store, SHALLOWS, false, &[PILLAR, LILY_PAD]);
+    let deep = wading_at(&store, DEEP, false, &[]);
+    let deep_water = wading_at(&store, DEEP, true, &[]);
+    let deck = wading_at(&store, BOARDWALK, true, &[PLANK, DOCK_POST]);
+    println!(
+        "shallows: {shallows:?}\ndeep: {deep:?}\ndeep, the water drawn: {deep_water:?}\n\
+         boardwalk: {deck:?}"
+    );
+    assert_eq!(
+        deep.placed, deep_water.placed,
+        "physics places the body the same"
+    );
+    let z = shallows.placed.frame.origin.z;
+    assert!(
+        z > level - 0.2 && z < level - 0.05,
+        "physics stands the body a little under the surface: {z}"
+    );
+    for (body, what, sunk) in [
+        (&shallows, "in the shallows", 0.1),
+        (&deep, "out in the lake", 0.9),
+        (&deep_water, "out in the lake, the water drawn", 0.9),
+    ] {
+        let z = body.placed.frame.origin.z;
+        assert!(
+            (z - (level - sunk)).abs() < 0.02,
+            "{what}, physics sinks the body {sunk} m: {z}"
+        );
+        assert!(
+            (body.feet - z).abs() < 0.01,
+            "{what}, the feet drawn where physics puts them: {} for {z}",
+            body.feet
+        );
+        assert!(
+            (body.ground - body.feet).abs() < 0.03,
+            "{what}, the bed drawn under the feet: {} for {}",
+            body.ground,
+            body.feet
+        );
+    }
+    for ((lift, under), what) in shallows.lifts.iter().zip(["pillar", "lily pad"]) {
+        assert!(
+            lift.iter().all(|l| l.abs() < 0.01),
+            "the {what} drawn where retail places it: {lift:?} over {under}"
+        );
+    }
+    let on_deck = deck.placed.frame.origin.z;
+    assert!(
+        on_deck > level + 0.2,
+        "the body stands on the deck: {on_deck}"
+    );
+    assert!(
+        deck.feet > on_deck - 0.02,
+        "a body on the deck drawn on it: {} for {on_deck}",
+        deck.feet
+    );
+    for ((lift, _), what) in deck.lifts.iter().zip(["plank", "post"]) {
+        assert!(
+            lift.iter().all(|l| *l > -0.02),
+            "the boardwalk's {what} drawn where it stands: {lift:?}"
+        );
+    }
+}
+
+/// A human (its setup and motion table) and the sword it holds in its right hand, created as a
+/// server would create them.
+const HOLDER: (u32, u32, u32) = (0x8300_07A0, 0x0200_0001, 0x0900_0001);
+const HELD: (u32, u32) = (0x8300_07A1, 0x0200_1713);
+const RIGHT_HAND: u32 = 1;
+
+/// **What a body holds is drawn in its hand while the body stands in the water**: a human
+/// standing in the lake's shallows, holding a sword in its right hand high over the water, is
+/// drawn where physics stands it, the bed drawn under the water there, and the sword is drawn
+/// lifted as far as the body, so it stays in the hand.
+#[test]
+fn what_a_body_holds_stays_in_its_hand_while_it_stands_in_the_water() {
+    let _gpu = crate::common::gpu_lock();
+    let store = crate::common::dats();
+    let report = VisualReport::parse(SHALLOWS).expect("the report reads");
+    let station = report_station(&report, Some(3));
+    let (mut gpu, mut shot) = opened(&store, &station, Some(&report), every_piece());
+    shot.read_data_files();
+    shot.create_object(
+        HOLDER.0,
+        (HOLDER.1, Some(HOLDER.2)),
+        0xA9B5,
+        (60.5, 106.0),
+        0.0,
+    );
+    shot.step_held(&mut gpu);
+    shot.create_held(HELD.0, HELD.1, HOLDER.0, RIGHT_HAND);
+    for _ in 0..30 {
+        shot.step_by(&mut gpu, 1.0 / 30.0);
+    }
+    let holder = dereth_primitives::ObjectId(HOLDER.0);
+    let held = dereth_primitives::ObjectId(HELD.0);
+    let at = |id, what: &str| {
+        shot.scene
+            .objects
+            .get(&id)
+            .map(|o| (o.drawn, o.frame.origin))
+            .unwrap_or_else(|| panic!("the {what} is in the world"))
+    };
+    let ((holder_drawn, feet), (held_drawn, hand)) = (at(holder, "holder"), at(held, "sword"));
+    let lifts = (
+        shot.scene.remaster_object_lift(holder).expect("the holder"),
+        shot.scene.remaster_object_lift(held).expect("the sword"),
+    );
+    let ground = shot
+        .scene
+        .remaster_ground_at(feet.x, feet.y)
+        .expect("the drawn ground");
+    drop(shot);
+    drop(gpu);
+    println!(
+        "the holder at {feet:?} lifted {}, the drawn ground under it at {ground}; the sword at \
+         {hand:?} lifted {}",
+        lifts.0, lifts.1
+    );
+    assert!(holder_drawn && held_drawn, "both are drawn");
+    assert!(
+        hand.z > 28.25,
+        "the sword is held over the water: {}",
+        hand.z
+    );
+    assert!(
+        feet.z < 27.99 && ground < 27.99 && lifts.0.abs() < 0.01,
+        "the holder is drawn where physics stands it in the water, over the bed: lifted {} from \
+         {} over {ground}",
+        lifts.0,
+        feet.z
+    );
+    assert!(
+        (lifts.1 - lifts.0).abs() < 1e-4,
+        "the sword is drawn lifted with its holder: {} against {}",
+        lifts.1,
+        lifts.0
+    );
+}
+
+/// **Cliff shelves are drawn where the option says, and the device draws the face where the scene
+/// has it**: up a tall face in the mountains east of Holtburg, seen from a hundred meters off,
+/// the face drawn with its rock bands everywhere stands as high near the eye as far off, and so
+/// does the face drawn with none; with them far off only, it is drawn without them near the eye
+/// and with them past the distance they fade in over. Under each setting the device's heights at the face's own
+/// distances from the eye are the scene's, so what stands on it stands on what is drawn.
+#[test]
+fn cliff_shelves_are_drawn_everywhere_far_off_only_or_nowhere_as_the_option_says() {
+    use crate::instruments::cliff_frames::{face_ahead, far_station, Walk};
+    use crate::instruments::stations::DatGround;
+    use drawn::CliffShelves;
+    let _gpu = crate::common::gpu_lock();
+    let store = crate::common::dats();
+    let ground = DatGround::new(&store);
+    let (b, x, y, d) = Walk::TALL_FACE;
+    let walk = Walk::from(b, x, y, d);
+    let (foot, _) = face_ahead(&ground, &walk, 60.0).expect("a face ahead");
+    let back = 100.0;
+    let station = far_station("cliff", &walk, foot, back, 20.0);
+    let (mut gpu, mut shot) = opened(&store, &station, None, every_piece());
+    let knobs = shot.scene.remaster_ground_knobs().clone();
+    let (near, far) = (10.0, knobs.get(Knob::CliffFar));
+    assert!(
+        far <= knobs.get(Knob::MorphStart),
+        "both distances on the near ground"
+    );
+    // The face up from its foot, render space.
+    let eye = shot.scene.camera.position;
+    let camera = walk.along(foot - back);
+    let (ox, oy) = (camera.0 - eye.x, camera.1 - eye.y);
+    let face: Vec<(f32, f32)> = (4..60u8)
+        .map(|k| {
+            let (x, y) = walk.along(foot + f32::from(k));
+            (x - ox, y - oy)
+        })
+        .collect();
+    let at = |dist: f32| -> Vec<[f32; 3]> { face.iter().map(|&(x, y)| [x, y, dist]).collect() };
+    let mut drawn = Vec::new();
+    for shelves in [CliffShelves::Off, CliffShelves::FarOnly, CliffShelves::On] {
+        shot.scene.draw.set_remaster_cliff_shelves(shelves);
+        shot.step_held(&mut gpu);
+        shot.step_held(&mut gpu);
+        let device = |shot: &Shot, gpu: &mut Gpu, points: &[[f32; 3]]| {
+            let h = shot.scene.draw.remaster_drawn_heights(gpu, None, points);
+            assert_eq!(h.len(), points.len(), "the probe read back");
+            h
+        };
+        let (h_near, h_far) = (
+            device(&shot, &mut gpu, &at(near)),
+            device(&shot, &mut gpu, &at(far)),
+        );
+        // The scene's heights, and the device's at each point's own distance from the eye.
+        let (mut points, mut scene) = (Vec::new(), Vec::new());
+        for &(x, y) in &face {
+            let retail = Point::at(&ground, x + ox, y + oy).retail;
+            let dist =
+                ((x - eye.x).powi(2) + (y - eye.y).powi(2) + (retail - eye.z).powi(2)).sqrt();
+            points.push([x, y, dist]);
+            scene.push(
+                shot.scene
+                    .remaster_ground_at(x, y)
+                    .expect("the drawn ground"),
+            );
+        }
+        let own = device(&shot, &mut gpu, &points);
+        let worst = scene
+            .iter()
+            .zip(&own)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        println!("{shelves:?}: the scene and the device {worst:e} apart on the face");
+        // On a face this steep, the frame's rounding across is a few millimeters up and down.
+        assert!(
+            worst < 1e-2,
+            "{shelves:?}: the device's face is the scene's: {worst}"
+        );
+        drawn.push((shelves, h_near, h_far));
+    }
+    drop(shot);
+    drop(gpu);
+    let errors = dereth_render::vulkan::take_validation_errors();
+    assert!(errors.is_empty(), "the validation layer: {errors:#?}");
+    let apart = |a: &[f32], b: &[f32]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max)
+    };
+    let banded = |a: &[f32], b: &[f32]| {
+        a.iter()
+            .zip(b)
+            .filter(|(x, y)| (*x - *y).abs() > 0.5)
+            .count()
+    };
+    let (off, far_only, on) = (&drawn[0], &drawn[1], &drawn[2]);
+    println!(
+        "{} of {} points on the face moved over half a meter by the bands; the most {}",
+        banded(&on.1, &off.1),
+        face.len(),
+        apart(&on.1, &off.1)
+    );
+    assert!(banded(&on.1, &off.1) > 10, "the face is banded");
+    assert!(
+        apart(&on.1, &on.2) < 2e-3,
+        "on: the bands at every distance"
+    );
+    assert!(
+        apart(&off.1, &off.2) < 2e-3,
+        "off: no bands at any distance"
+    );
+    assert!(
+        apart(&far_only.1, &off.1) < 2e-3,
+        "far only: none near the eye"
+    );
+    assert!(
+        apart(&far_only.2, &on.2) < 2e-3,
+        "far only: all of them far off"
     );
 }

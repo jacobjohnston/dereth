@@ -56,6 +56,16 @@
 //! far the surface stands along the view from the plane through the axis (0.5 on the plane, 0
 //! and 1 half the quad's width nearer and farther).
 //!
+//! **A tree's levels far off.** A model of `category = "tree"` walks down its levels by their
+//! distances, each taking over no nearer than the distance its level names (farther on a large
+//! screen, where a coarse level would still show), fading into the next. Past its last level
+//! drawn into the view it is drawn as pictures of its nearest level, which the client makes, and
+//! is wholly those pictures before the edge of the blocks round the viewer: a tree of one level
+//! does so too. Past the blocks round the viewer, where the client grows the
+//! world's trees as pictures alone, it is drawn from its level that names `views` when it has
+//! one, and otherwise from pictures the client makes of its nearest level: a pack need not
+//! draw its own.
+//!
 //! A pack may also lay the ground: a material for each retail terrain type it covers, drawn in
 //! place of that type's ground picture wherever retail lays it, through retail's own blend
 //! masks. A type the pack names no material for keeps retail's picture.
@@ -69,6 +79,10 @@
 //! roughness = "ground/grass_roughness.png"   # red
 //! occlusion = "ground/grass_occlusion.png"   # red
 //! size = 4.0                 # metres one repeat of the pictures covers
+//! detail = "ground/grain.png"                # a fine grain over the ground close by
+//! detail_size = 1.0          # meters one repeat of the detail covers
+//! detail_strength = 1.0      # how strongly the detail changes the ground: 0 not at all
+//! pebbles = true             # whether the presentation's own pebbles lie on these grounds
 //! author = "..."
 //! tool = "..."
 //! license = "..."
@@ -77,9 +91,53 @@
 //! Only `base_color`, `size` and the credit are required. The pictures of every material are
 //! square and repeat seamlessly, seen from straight above with north up.
 //!
-//! A `[[steep]]` material, with the same keys, is laid on the steep slopes of the terrain types
-//! it names, in place of the scree and rock the presentation lays on steep ground of a type with
-//! none: an obsidian cliff, a sandstone face. A type may have one of each kind.
+//! The detail picture is a fine grain laid over the material close by, repeating every
+//! `detail_size` meters (1 unless named) and fading out over the first few tens of meters. It is
+//! multiplied in at twice its value, in display values: mid-gray (128) leaves the ground as it is,
+//! lighter brightens it and darker darkens it, so a gray picture of mean 128 keeps the ground's
+//! tone. It is part of the pack's look: drawn wherever the pack's ground is drawn, whatever the
+//! game's own detail-texture setting says (that setting is for the game's own ground), and gone
+//! with the rest of the pack's ground when that is turned off. The Asheron's Call 2 look fills it
+//! with AC2's own ground grain, which AC2 itself loaded but never drew. `detail_strength` scales
+//! how far the detail moves the ground from its own color: 1 (unless named) as the picture is
+//! made, 0 not at all, and more than 1 further.
+//!
+//! The presentation lays small pebbles of its own on bare ground, on slopes and along the
+//! road's edges. `pebbles = false` keeps them off the grounds the material names wherever the
+//! pack's ground is drawn: their flat ground and their slopes, and for the road, its edges. Only
+//! a `[[terrain]]` material names it; the slopes of its grounds follow it whatever `[[steep]]`
+//! material lies there.
+//!
+//! A `[[steep]]` material, with the same keys but `pebbles`, is laid on the steep slopes of the
+//! terrain types it names, in place of the scree and rock the presentation lays on steep ground of
+//! a type with none: an obsidian cliff, a sandstone face. A type may have one of each kind.
+//!
+//! A pack may also grow ground cover: small models of its own (flowers, ferns, reeds, litter)
+//! scattered over the terrain types each names, near the eye, beside whatever retail places there.
+//!
+//! ```toml
+//! [[cover]]
+//! ground = [1, 9]            # the retail terrain types (0 to 31) it grows on
+//! density = 4.0              # how many grow on 100 square meters of flat ground of those types
+//! scale = [0.8, 1.25]        # each drawn at a size between these, the same on every axis
+//! max_slope = 0.6            # none where the ground rises more than this a meter across
+//! foliage = true
+//! category = "plant"
+//! author = "..."
+//! tool = "..."
+//! license = "..."
+//!
+//! [[cover.lod]]
+//! file = "cover/lupins.gltf"
+//! distance = 40.0            # the last level's distance is how far from the eye it grows
+//! ```
+//!
+//! A cover's levels, `foliage`, `category` and credit are a model's, except that its last level
+//! must name a distance: past it the cover is not drawn. `scale` defaults to `[1, 1]` and
+//! `max_slope` to 0.6. Covers that name the same levels share one model, each growing it on its
+//! own types as thickly as it says. Covers of several packs in a stack all grow, unless two name
+//! the same first file: then the one above wins. Where a cover grows, a pack can thin or take away the grass and
+//! flowers the presentation grows itself through its `[lighting]`'s grass tables.
 //!
 //! A pack may also draw a picture of its own in place of a retail picture, wherever a retail
 //! object or room is drawn with it: buildings, statics, rooms, dungeon pieces and what the
@@ -109,6 +167,56 @@
 //! or `water` (growth in and by the water: lily pads, reeds). A model that names none is a tree
 //! when it has a level of pictures round it, a plant when it is foliage, and a rock otherwise; a
 //! model is a water model only when it says so.
+//!
+//! **A pack may draw a body in place of a setup's parts** (`[[skin]]`): one skinned glTF 2.0 mesh,
+//! every object built on the setup drawn with it, standing where the object stands and posed only
+//! by its own clips. Joints named `part_00`, `part_01` ... (or with `extras.part`) name the parts
+//! it is drawn in place of, by their place in the setup: those draw nothing, and any other part
+//! draws as it is. Every other joint is a bone of the body's own skeleton. Nothing else about the
+//! object changes.
+//!
+//! ```toml
+//! [[skin]]
+//! setup = "0x02000001"       # the setup whose objects it is drawn for
+//! file = "human/body.gltf"
+//! author = "..."
+//! tool = "..."
+//! license = "..."
+//! ```
+//!
+//! A setup may have several bodies, each for the objects whose look carries one of its
+//! `palettes` (palette ids, `0x04...`, as a server's description of the object lays them over
+//! its parts): the first that matches is drawn, and a body that names none is drawn for the rest.
+//!
+//! A body's clips (`clips`) name an animation of its glTF, by name, for each motion slot it
+//! fills ([`CLIP_SLOTS`]). The slots are the same for every creature: the client plays the one for
+//! what the object's motion does, and for a slot the body leaves empty, another's (a side step the
+//! walk, a run the walk, a stance's idle the peace idle, an attack the medium one, a sleep the dead
+//! pose). Idles, turns, sleep, the dead pose and a fall loop at their own pace; walks, runs and
+//! side steps go round once for each stride their object's motion asks; the rest play once, a
+//! death holding its end. A turn or a side step is to the right: to the left plays it backwards.
+//!
+//! ```toml
+//! clips = { idle = "Idle", walk = "Walk", run = "Run", melee_med = "Melee_Normal1", die = "Death" }
+//! ```
+//!
+//! A clip's glTF animation may carry `extras.stride`, the meters of the body's own space one round
+//! of a walk, run or side step carries it, so its feet hold; and `extras.hit`, the seconds from an
+//! attack's start to its blow, which the client lands when the object's own attack does. A table
+//! keyed by animation ids (`"0x03000044" = "run"`), as packs once had, still opens.
+//!
+//! A body draws nothing its object holds: the object still holds it.
+//!
+//! A pack may keep some objects as they are (`[keep]`), whatever bodies it has for their setups:
+//! those of the weenies it lists (by their class ids, as a server names them: a statue built on a
+//! creature's setup, a boss), and, with `launchers`, any that has held a bow, crossbow, sling or
+//! atlatl since it was made (a body that cannot shoot).
+//!
+//! ```toml
+//! [keep]
+//! weenies = [7, 237, 19196]
+//! launchers = true
+//! ```
 //!
 //! **A pack may say how its art wants to be lit** (`[lighting]`), with the keys and the tables
 //! of a player's look file, each kind of day a table of its own within it:
@@ -157,6 +265,16 @@ pub struct ArtPackManifest {
     pub grounds: Vec<ManifestGround>,
     /// Its materials for retail pictures, in the order the manifest lists them.
     pub materials: Vec<ManifestMaterial>,
+    /// Its ground cover, in the order the manifest lists it. Each cover's model is also in
+    /// [`Self::models`], under [`ManifestCover::id`].
+    pub covers: Vec<ManifestCover>,
+    /// Its bodies drawn in place of setups' parts, in the order the manifest lists them.
+    pub skins: Vec<ManifestSkin>,
+    /// The weenies (class ids) whose objects keep their own parts, whatever bodies it has
+    /// (`[keep]`), in the order the manifest lists them.
+    pub keep: Vec<u32>,
+    /// Whether an object that has held a launcher keeps its own parts (`[keep]`'s `launchers`).
+    pub keep_launchers: bool,
     /// Its `[lighting]` section, as the text of a look file: its keys at the top and each kind
     /// of day's table under its own name. `None` when it has none.
     pub lighting: Option<String>,
@@ -267,6 +385,44 @@ fn about(pack: &toml::Table) -> Result<About, ManifestError> {
     Ok(about)
 }
 
+/// The first id a cover's model is listed under: `COVER_ID | ` 24 bits of its first file's
+/// hash, a range no retail object uses.
+pub const COVER_ID: u32 = 0xEC00_0000;
+
+/// The id a cover whose first level is `file` is listed under ([`COVER_ID`]).
+#[must_use]
+pub fn cover_id(file: &str) -> DataId {
+    // FNV-1a: the same file, the same id, on every machine and in every build.
+    let mut h: u32 = 0x811C_9DC5;
+    for b in file.bytes() {
+        h = (h ^ u32::from(b)).wrapping_mul(0x0100_0193);
+    }
+    DataId(COVER_ID | (h ^ (h >> 24)) & 0x00FF_FFFF)
+}
+
+/// Whether `id` is a cover's ([`COVER_ID`]).
+#[must_use]
+pub fn is_cover(id: DataId) -> bool {
+    id.0 & 0xFF00_0000 == COVER_ID
+}
+
+/// One ground cover: the model it grows, the terrain types it grows on and how thickly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManifestCover {
+    /// Its model's id in [`ArtPackManifest::models`] ([`cover_id`]).
+    pub id: DataId,
+    /// The terrain types it grows on, 0 to 31.
+    pub grounds: Vec<u8>,
+    /// How many grow on 100 square meters of flat ground.
+    pub density: f32,
+    /// The least and the most it is drawn at.
+    pub scale: (f32, f32),
+    /// The steepest ground it grows on: its rise a meter across.
+    pub max_slope: f32,
+    /// How far from the eye it grows: its last level's distance.
+    pub reach: f32,
+}
+
 /// One material drawn in place of retail pictures: the pictures it stands for and its own.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManifestMaterial {
@@ -282,6 +438,58 @@ pub struct ManifestMaterial {
     pub occlusion: Option<String>,
     /// How strongly the normal picture bends the normal.
     pub normal_scale: f32,
+    /// Who made it, with what, and under which license.
+    pub credit: Credit,
+}
+
+/// The motion slots a body's clips fill ([`ManifestSkin::clips`]), as a pack names them: a
+/// stance's idle (peace, melee, missile, magic); walking, walking backwards, running, a side step
+/// and a turn; attacks high, medium and low, a special, a missile, a cast and the warning before
+/// one; a hit and a heavy hit; dying, dead and asleep; a change of stance; an emote and a cheer;
+/// falling and a jump.
+pub const CLIP_SLOTS: [&str; 26] = [
+    "idle",
+    "idle_melee",
+    "idle_missile",
+    "idle_magic",
+    "walk",
+    "walk_back",
+    "run",
+    "side_step",
+    "turn",
+    "melee_high",
+    "melee_med",
+    "melee_low",
+    "special",
+    "missile",
+    "cast",
+    "telegraph",
+    "hit",
+    "hit_heavy",
+    "die",
+    "dead",
+    "sleep",
+    "stance",
+    "emote",
+    "cheer",
+    "fall",
+    "jump",
+];
+
+/// One body drawn in place of a setup's parts: the setup and its glTF.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManifestSkin {
+    /// The setup (`0x02...`) whose objects it is drawn for.
+    pub setup: DataId,
+    /// The glTF 2.0 file, relative to the pack's folder.
+    pub file: String,
+    /// The palettes (`0x04...`) an object's look must carry one of for this body to be drawn for
+    /// it; none for the setup's other objects.
+    pub palettes: Vec<DataId>,
+    /// The body's own clips: each slot ([`CLIP_SLOTS`]) and its glTF animation's name.
+    pub clips: Vec<(String, String)>,
+    /// Clips listed by the animation (`0x03...`) they were played for, as packs once named them.
+    pub by_animation: Vec<(DataId, String)>,
     /// Who made it, with what, and under which license.
     pub credit: Credit,
 }
@@ -315,6 +523,15 @@ pub struct ManifestGround {
     pub size: f32,
     /// How strongly the normal picture bends the normal.
     pub normal_scale: f32,
+    /// The detail picture: a fine grain multiplied in at twice its value close by.
+    pub detail: Option<String>,
+    /// How many meters one repeat of the detail picture covers.
+    pub detail_size: f32,
+    /// How strongly the detail picture changes the ground: 1 as made, 0 not at all.
+    pub detail_strength: f32,
+    /// Whether the presentation's own pebbles lie on its grounds: on their flat, their slopes
+    /// and, for the road, along its edges. Only a `[[terrain]]` table names it.
+    pub pebbles: bool,
     /// Laid on the steep slopes of its grounds rather than on their flat ground: a `[[steep]]`
     /// table's.
     pub steep: bool,
@@ -485,6 +702,12 @@ impl ArtPackManifest {
                 let mut ground =
                     ground(g).map_err(|e| ManifestError(format!("{kind} {}: {}", i + 1, e.0)))?;
                 ground.steep = steep;
+                if steep && g.contains_key("pebbles") {
+                    return fail(format!(
+                        "{kind} {}: pebbles is named on the [[terrain]] material of its grounds",
+                        i + 1
+                    ));
+                }
                 for k in &ground.grounds {
                     if grounds
                         .iter()
@@ -519,6 +742,78 @@ impl ArtPackManifest {
             }
             materials.push(material);
         }
+        let listed = match table.get("cover") {
+            None => &empty,
+            Some(toml::Value::Array(a)) => a,
+            Some(_) => return fail("`cover` is not a list of [[cover]] tables"),
+        };
+        let mut covers: Vec<ManifestCover> = Vec::with_capacity(listed.len());
+        for (i, c) in listed.iter().enumerate() {
+            let Some(c) = c.as_table() else {
+                return fail(format!("cover {} is not a table", i + 1));
+            };
+            let (model, cover) =
+                cover(c).map_err(|e| ManifestError(format!("cover {}: {}", i + 1, e.0)))?;
+            // Covers that grow the same model on other types, or as thickly, share it.
+            match models.iter().find(|o| o.id == model.id) {
+                None => models.push(model),
+                Some(o) if covers.iter().any(|c| c.id == o.id) && *o == model => {}
+                Some(_) => {
+                    return fail(format!(
+                        "cover {}: another cover grows {:?} with other levels or credit",
+                        i + 1,
+                        model.lods[0].file
+                    ))
+                }
+            }
+            covers.push(cover);
+        }
+        let listed = match table.get("skin") {
+            None => &empty,
+            Some(toml::Value::Array(a)) => a,
+            Some(_) => return fail("`skin` is not a list of [[skin]] tables"),
+        };
+        let mut skins: Vec<ManifestSkin> = Vec::with_capacity(listed.len());
+        for (i, k) in listed.iter().enumerate() {
+            let Some(k) = k.as_table() else {
+                return fail(format!("skin {} is not a table", i + 1));
+            };
+            let one = skin(k).map_err(|e| ManifestError(format!("skin {}: {}", i + 1, e.0)))?;
+            if skins
+                .iter()
+                .any(|o| o.setup == one.setup && o.palettes.is_empty() && one.palettes.is_empty())
+            {
+                return fail(format!(
+                    "skin {}: {:#010X} has a skin already",
+                    i + 1,
+                    one.setup.0
+                ));
+            }
+            skins.push(one);
+        }
+        let keep_launchers = match table.get("keep").and_then(|k| k.get("launchers")) {
+            None => false,
+            Some(toml::Value::Boolean(b)) => *b,
+            Some(_) => return fail("keep: `launchers` is not true or false"),
+        };
+        let keep = match table.get("keep") {
+            None => Vec::new(),
+            Some(toml::Value::Table(k)) => match k.get("weenies") {
+                None => Vec::new(),
+                Some(toml::Value::Array(a)) => {
+                    let mut out = Vec::with_capacity(a.len());
+                    for v in a {
+                        match v.as_integer().and_then(|w| u32::try_from(w).ok()) {
+                            Some(w) if w > 0 => out.push(w),
+                            _ => return fail(format!("keep: {v} is not a weenie's class id")),
+                        }
+                    }
+                    out
+                }
+                Some(_) => return fail("keep: `weenies` is not a list of class ids"),
+            },
+            Some(_) => return fail("`keep` is not a [keep] table"),
+        };
         let lighting = match table.get("lighting") {
             None => None,
             Some(toml::Value::Table(t)) => Some(t.to_string()),
@@ -530,8 +825,29 @@ impl ArtPackManifest {
             models,
             grounds,
             materials,
+            covers,
+            skins,
+            keep,
+            keep_launchers,
             lighting,
         })
+    }
+
+    /// The body drawn in place of the parts of `setup`, if the pack has one: the one for its
+    /// objects whose look names none of the palettes the others are drawn for.
+    #[must_use]
+    pub fn skin(&self, setup: DataId) -> Option<&ManifestSkin> {
+        self.skin_for(setup, &[])
+    }
+
+    /// The body drawn in place of the parts of an object built on `setup` whose look carries
+    /// `palettes`: the first of the setup's bodies drawn for one of them, else its other one.
+    #[must_use]
+    pub fn skin_for(&self, setup: DataId, palettes: &[DataId]) -> Option<&ManifestSkin> {
+        let mut rows = self.skins.iter().filter(|k| k.setup == setup);
+        rows.clone()
+            .find(|k| k.palettes.iter().any(|p| palettes.contains(p)))
+            .or_else(|| rows.find(|k| k.palettes.is_empty()))
     }
 
     /// The material drawn in place of the retail picture `texture`, if the pack has one.
@@ -660,6 +976,23 @@ fn ground(t: &toml::Table) -> Result<ManifestGround, ManifestError> {
         Some(s) => return fail(format!("normal_scale {s} is not a number from 0")),
         None => 1.0,
     };
+    let detail_size = match number("detail_size")? {
+        Some(s) if s.is_finite() && s > 0.0 => s,
+        Some(s) => return fail(format!("detail_size {s} is not a positive number")),
+        None => 1.0,
+    };
+    let detail_strength = match number("detail_strength")? {
+        Some(s) if s.is_finite() && s >= 0.0 => s,
+        Some(s) => return fail(format!("detail_strength {s} is not a number from 0")),
+        None => 1.0,
+    };
+    let pebbles = match t.get("pebbles") {
+        None => true,
+        Some(v) => match v.as_bool() {
+            Some(b) => b,
+            None => return fail("pebbles is not true or false"),
+        },
+    };
     Ok(ManifestGround {
         grounds,
         base_color,
@@ -669,6 +1002,10 @@ fn ground(t: &toml::Table) -> Result<ManifestGround, ManifestError> {
         occlusion: picture("occlusion")?,
         size,
         normal_scale,
+        detail: picture("detail")?,
+        detail_size,
+        detail_strength,
+        pebbles,
         steep: false,
         credit: Credit {
             author: text(t, "author")?.to_owned(),
@@ -744,8 +1081,144 @@ fn material(t: &toml::Table) -> Result<ManifestMaterial, ManifestError> {
     })
 }
 
+fn skin(t: &toml::Table) -> Result<ManifestSkin, ManifestError> {
+    let setup = object_id(t.get("setup").and_then(toml::Value::as_str).unwrap_or(""))?;
+    if setup.0 >> 24 != 0x02 {
+        return fail(format!("{:#010X} is not a setup (0x02...)", setup.0));
+    }
+    let file = text(t, "file")?;
+    if !inside_the_pack(file) {
+        return fail(format!("file {file:?} is not a path inside the pack"));
+    }
+    let palettes = match t.get("palettes") {
+        None => Vec::new(),
+        Some(toml::Value::Array(a)) => {
+            let mut out = Vec::with_capacity(a.len());
+            for v in a {
+                let id = v.as_str().and_then(|v| {
+                    let d = v.trim().strip_prefix("0x")?;
+                    u32::from_str_radix(d, 16).ok()
+                });
+                match id {
+                    Some(id) if id >> 24 == 0x04 => out.push(DataId(id)),
+                    _ => return fail(format!("palette {v} is not a palette (0x04...)")),
+                }
+            }
+            out
+        }
+        Some(_) => return fail("`palettes` is not a list of palette ids"),
+    };
+    let mut clips = Vec::new();
+    let mut by_animation = Vec::new();
+    match t.get("clips") {
+        None => {}
+        Some(toml::Value::Table(c)) => {
+            for (k, v) in c {
+                let Some(name) = v.as_str() else {
+                    return fail(format!("clip {k} = {v} is not an animation's name"));
+                };
+                if let Some(d) = k.trim().strip_prefix("0x") {
+                    match u32::from_str_radix(d, 16) {
+                        Ok(id) if id >> 24 == 0x03 => {
+                            by_animation.push((DataId(id), name.to_owned()));
+                        }
+                        _ => return fail(format!("{k} is not an animation (0x03...)")),
+                    }
+                } else if CLIP_SLOTS.contains(&k.as_str()) {
+                    clips.push((k.clone(), name.to_owned()));
+                } else {
+                    return fail(format!("clip {k} is not a slot"));
+                }
+            }
+        }
+        Some(_) => return fail("`clips` is not a table of slots and animation names"),
+    }
+    Ok(ManifestSkin {
+        setup,
+        file: file.to_owned(),
+        palettes,
+        clips,
+        by_animation,
+        credit: Credit {
+            author: text(t, "author")?.to_owned(),
+            tool: text(t, "tool")?.to_owned(),
+            license: text(t, "license")?.to_owned(),
+        },
+    })
+}
+
 fn model(t: &toml::Table) -> Result<ManifestModel, ManifestError> {
     let id = object_id(t.get("id").and_then(toml::Value::as_str).unwrap_or(""))?;
+    shape(t, id, "model")
+}
+
+/// A cover's model, listed under its first file's id, and how it grows.
+fn cover(t: &toml::Table) -> Result<(ManifestModel, ManifestCover), ManifestError> {
+    if t.contains_key("id") {
+        return fail("a cover is no retail object's, and names no id");
+    }
+    let mut model = shape(t, DataId(COVER_ID), "cover")?;
+    model.id = cover_id(&model.lods[0].file);
+    let Some(reach) = model
+        .lods
+        .iter()
+        .rev()
+        .find(|l| !l.shadows_only)
+        .and_then(|l| l.distance)
+    else {
+        return fail("its last level names no distance, how far from the eye it grows");
+    };
+    if model.lods.iter().any(|l| l.views.is_some()) {
+        return fail("a cover has no level of pictures round it");
+    }
+    let grounds = grounds_of(t.get("ground"))?
+        .into_iter()
+        .map(|g| match g {
+            Ground::Type(t) => Ok(t),
+            Ground::Road => fail("a cover grows on terrain types, not on the road"),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    // Counts, sizes and slopes, well inside both types' range.
+    let number = |v: &toml::Value| match v {
+        toml::Value::Float(f) => Some(*f as f32),
+        toml::Value::Integer(i) => Some(*i as f32),
+        _ => None,
+    };
+    let density = match t.get("density").map(number) {
+        Some(Some(d)) if d.is_finite() && d > 0.0 => d,
+        Some(_) => return fail("density is not a positive number"),
+        None => return fail("no density"),
+    };
+    let scale = match t.get("scale") {
+        None => (1.0, 1.0),
+        Some(toml::Value::Array(a)) if a.len() == 2 => match (number(&a[0]), number(&a[1])) {
+            (Some(lo), Some(hi)) if lo.is_finite() && lo > 0.0 && hi.is_finite() && hi >= lo => {
+                (lo, hi)
+            }
+            _ => return fail("scale is not two positive numbers, the least first"),
+        },
+        Some(_) => return fail("scale is not two positive numbers, the least first"),
+    };
+    let max_slope = match t.get("max_slope").map(number) {
+        None => 0.6,
+        Some(Some(s)) if s.is_finite() && s >= 0.0 => s,
+        Some(_) => return fail("max_slope is not a number from 0"),
+    };
+    let cover = ManifestCover {
+        id: model.id,
+        grounds,
+        density,
+        scale,
+        max_slope,
+        reach,
+    };
+    Ok((model, cover))
+}
+
+/// A model's levels, how it is lit, which switch turns it on and its credit, from `t`, a
+/// `[[kind]]` table, listed under `id`.
+fn shape(t: &toml::Table, id: DataId, kind: &str) -> Result<ManifestModel, ManifestError> {
     let foliage = match t.get("foliage") {
         None => false,
         Some(v) => match v.as_bool() {
@@ -759,10 +1232,10 @@ fn model(t: &toml::Table) -> Result<ManifestModel, ManifestError> {
         license: text(t, "license")?.to_owned(),
     };
     let Some(levels) = t.get("lod").and_then(toml::Value::as_array) else {
-        return fail("no [[model.lod]] level of detail");
+        return fail(format!("no [[{kind}.lod]] level of detail"));
     };
     if levels.is_empty() {
-        return fail("no [[model.lod]] level of detail");
+        return fail(format!("no [[{kind}.lod]] level of detail"));
     }
     let mut lods: Vec<ManifestLod> = Vec::with_capacity(levels.len());
     for (k, l) in levels.iter().enumerate() {
@@ -946,6 +1419,175 @@ file = "rock.gltf"
     }
 
     #[test]
+    fn a_skin_names_the_setup_it_is_drawn_for_its_file_and_its_credit() {
+        let body = |setup: &str, file: &str| {
+            format!(
+                "{PILOT}
+[[skin]]
+setup = \"{setup}\"
+file = \"{file}\"
+author = \"A\"
+                 tool = \"B\"
+license = \"CC0-1.0\"
+"
+            )
+        };
+        let m = ArtPackManifest::parse(&body("0x02000001", "human/body.gltf")).expect("reads");
+        let k = m.skin(DataId(0x0200_0001)).expect("the human's body");
+        assert_eq!(k.file, "human/body.gltf");
+        assert_eq!(k.credit.tool, "B");
+        assert!(m.skin(DataId(0x0200_0002)).is_none());
+        assert!(ArtPackManifest::parse(PILOT)
+            .expect("reads")
+            .skins
+            .is_empty());
+        // Only a setup, a file inside the pack, and one skin a setup.
+        assert!(ArtPackManifest::parse(&body("0x01000001", "b.gltf")).is_err());
+        assert!(ArtPackManifest::parse(&body("0x02000001", "../b.gltf")).is_err());
+        let twice = format!(
+            "{}
+[[skin]]
+setup = \"0x02000001\"
+file = \"c.gltf\"
+author = \"A\"
+             tool = \"B\"
+license = \"C\"
+",
+            body("0x02000001", "b.gltf")
+        );
+        assert!(ArtPackManifest::parse(&twice).is_err());
+    }
+
+    #[test]
+    fn a_pack_lists_the_weenies_that_keep_their_own_parts_and_whether_launchers_do() {
+        let m = ArtPackManifest::parse(&format!("{PILOT}\n[keep]\nweenies = [7, 237, 19196]\n"))
+            .expect("reads");
+        assert_eq!(m.keep, [7, 237, 19196]);
+        assert!(!m.keep_launchers);
+        let plain = ArtPackManifest::parse(PILOT).expect("reads");
+        assert!(plain.keep.is_empty() && !plain.keep_launchers);
+        let launchers =
+            ArtPackManifest::parse(&format!("{PILOT}\n[keep]\nlaunchers = true\n")).expect("reads");
+        assert!(launchers.keep_launchers && launchers.keep.is_empty());
+        // Only class ids, in a list under [keep].
+        for bad in [
+            "[keep]\nweenies = [0]",
+            "[keep]\nweenies = [-3]",
+            "[keep]\nweenies = [\"7\"]",
+            "[keep]\nweenies = 7",
+            "[[keep]]\nweenies = [7]",
+            "[keep]\nlaunchers = 1",
+        ] {
+            assert!(
+                ArtPackManifest::parse(&format!("{PILOT}\n{bad}\n")).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_setup_s_bodies_are_chosen_by_the_palettes_an_object_carries() {
+        let m = ArtPackManifest::parse(&format!(
+            "{PILOT}
+[[skin]]
+setup = \"0x02000001\"
+file = \"red.gltf\"
+palettes = [\"0x04000010\", \"0x04000011\"]
+author = \"A\"
+tool = \"B\"
+license = \"C\"
+
+[[skin]]
+setup = \"0x02000001\"
+file = \"plain.gltf\"
+author = \"A\"
+tool = \"B\"
+license = \"C\"
+"
+        ))
+        .expect("reads");
+        let file = |p: &[u32]| {
+            let p: Vec<DataId> = p.iter().copied().map(DataId).collect();
+            m.skin_for(DataId(0x0200_0001), &p).map(|k| k.file.as_str())
+        };
+        assert_eq!(file(&[0x0400_0011, 0x0400_0099]), Some("red.gltf"));
+        assert_eq!(file(&[0x0400_0099]), Some("plain.gltf"));
+        assert_eq!(file(&[]), Some("plain.gltf"));
+        assert_eq!(
+            m.skin(DataId(0x0200_0001)).map(|k| k.file.as_str()),
+            Some("plain.gltf")
+        );
+        // A palette list names palettes only.
+        let wrong = format!(
+            "{PILOT}
+[[skin]]
+setup = \"0x02000001\"
+file = \"red.gltf\"
+palettes = [\"0x05000010\"]
+author = \"A\"
+tool = \"B\"
+license = \"C\"
+"
+        );
+        assert!(ArtPackManifest::parse(&wrong).is_err());
+    }
+
+    #[test]
+    fn a_body_lists_its_own_clips_by_slot_and_opens_a_table_by_animation_as_packs_once_had() {
+        let row = |clips: &str| {
+            format!(
+                "{PILOT}
+[[skin]]
+setup = \"0x02000001\"
+file = \"b.gltf\"
+clips = {clips}
+author = \"A\"
+tool = \"B\"
+license = \"C\"
+"
+            )
+        };
+        let m = ArtPackManifest::parse(&row(
+            "{ idle = \"Idle\", melee_high = \"Melee_Strong1\", die = \"death\" }",
+        ))
+        .expect("reads");
+        let mut clips = m.skins[0].clips.clone();
+        clips.sort();
+        assert_eq!(
+            clips,
+            vec![
+                ("die".to_owned(), "death".to_owned()),
+                ("idle".to_owned(), "Idle".to_owned()),
+                ("melee_high".to_owned(), "Melee_Strong1".to_owned())
+            ]
+        );
+        assert!(m.skins[0].by_animation.is_empty());
+        let m = ArtPackManifest::parse(&row(
+            "{ \"0x03000044\" = \"run\", \"0x03000043\" = \"attack\" }",
+        ))
+        .expect("reads");
+        let mut old = m.skins[0].by_animation.clone();
+        old.sort();
+        assert_eq!(
+            old,
+            vec![
+                (DataId(0x0300_0043), "attack".to_owned()),
+                (DataId(0x0300_0044), "run".to_owned())
+            ]
+        );
+        assert!(m.skins[0].clips.is_empty());
+        // A slot the format has not.
+        assert!(ArtPackManifest::parse(&row("{ dance = \"Dance\" }")).is_err());
+        // A key the format no longer reads is passed over.
+        let old = row("{}").replacen("clips = {}", "clips = {}\nheld = false", 1);
+        assert!(ArtPackManifest::parse(&old).is_ok());
+        // The keys are animations, the values names.
+        assert!(ArtPackManifest::parse(&row("{ \"0x05000044\" = \"run\" }")).is_err());
+        assert!(ArtPackManifest::parse(&row("{ \"0x03000044\" = 1 }")).is_err());
+        assert!(ArtPackManifest::parse(&row("[\"run\"]")).is_err());
+    }
+
+    #[test]
     fn a_level_of_pictures_round_the_model_names_its_views_and_their_rows() {
         let far = PILOT.replacen(
             "file = \"tree/lod2.gltf\"",
@@ -1084,6 +1726,10 @@ ground = "road"
 base_color = "ground/road_albedo.png"
 size = 8.5
 normal_scale = 0.5
+detail = "ground/grain.png"
+detail_size = 3
+detail_strength = 0.4
+pebbles = false
 author = "a"
 tool = "t"
 license = "CC0-1.0"
@@ -1103,9 +1749,26 @@ license = "CC0-1.0"
             (grass.normal_scale - 1.0).abs() < 1e-6,
             "a full bend unless named"
         );
+        assert_eq!(grass.detail, None);
+        assert!(
+            (grass.detail_strength - 1.0).abs() < 1e-6,
+            "the detail as made unless named"
+        );
+        assert!(grass.pebbles, "the pebbles lie unless named");
         let road = m.ground(Ground::Road).expect("the road's material");
         assert!((road.size - 8.5).abs() < 1e-6);
         assert!((road.normal_scale - 0.5).abs() < 1e-6);
+        assert_eq!(road.detail.as_deref(), Some("ground/grain.png"));
+        assert!((road.detail_size - 3.0).abs() < 1e-6);
+        assert!((road.detail_strength - 0.4).abs() < 1e-6);
+        assert!(!road.pebbles);
+        let unnamed =
+            ArtPackManifest::parse(&GROUND.replace("detail_size = 3\n", "")).expect("reads");
+        let road = unnamed.ground(Ground::Road).expect("the road's material");
+        assert!(
+            (road.detail_size - 1.0).abs() < 1e-6,
+            "a meter a repeat unless named"
+        );
         assert!(
             m.ground(Ground::Type(3)).is_none(),
             "an unnamed type keeps retail's"
@@ -1124,6 +1787,26 @@ license = "CC0-1.0"
             ),
             ("size = 4\n", "size = 0\n", "not a positive number"),
             ("size = 4\n", "", "no size"),
+            (
+                "detail_size = 3\n",
+                "detail_size = -1\n",
+                "detail_size -1 is not a positive number",
+            ),
+            (
+                "detail = \"ground/grain.png\"",
+                "detail = \"/grain.png\"",
+                "detail is not a path inside the pack",
+            ),
+            (
+                "detail_strength = 0.4\n",
+                "detail_strength = -0.5\n",
+                "detail_strength -0.5 is not a number from 0",
+            ),
+            (
+                "pebbles = false\n",
+                "pebbles = 0\n",
+                "pebbles is not true or false",
+            ),
             (
                 "base_color = \"ground/grass_albedo.png\"",
                 "",
@@ -1195,6 +1878,17 @@ license = "CC0-1.0"
         assert!(m.steep_ground(Ground::Type(1)).is_none());
         let bad = text.replace("ground = [9, 13]", "ground = [9, 40]");
         assert!(ArtPackManifest::parse(&bad).is_err());
+        let strength = text.replace("size = 8\n", "size = 8\ndetail_strength = 2\n");
+        let m = ArtPackManifest::parse(&strength).expect("reads");
+        let steep = m.steep_ground(Ground::Type(9)).expect("type 9's steep");
+        assert!((steep.detail_strength - 2.0).abs() < 1e-6);
+        let pebbles = text.replace("size = 8\n", "size = 8\npebbles = false\n");
+        let e = ArtPackManifest::parse(&pebbles).expect_err("pebbles on a steep material");
+        assert!(
+            e.0.contains("steep 1: pebbles is named on the [[terrain]]"),
+            "{}",
+            e.0
+        );
         let twice = format!(
             "{text}
 [[steep]]
@@ -1360,5 +2054,106 @@ license = \"CC0-1.0\"
                 "{bad}"
             );
         }
+    }
+
+    const COVER: &str = "[pack]\nname = \"Meadow\"\nformat = 1\n\
+        [[cover]]\nground = [1, 9]\ndensity = 4\nscale = [0.8, 1.25]\nmax_slope = 0.5\n\
+        foliage = true\nauthor = \"A\"\ntool = \"T\"\nlicense = \"CC0-1.0\"\n\
+        [[cover.lod]]\nfile = \"cover/lupins.gltf\"\ndistance = 20\n\
+        [[cover.lod]]\nfile = \"cover/lupins-far.gltf\"\ndistance = 40.0\n\
+        [[cover]]\nground = 21\ndensity = 1.5\nauthor = \"A\"\ntool = \"T\"\nlicense = \"CC0-1.0\"\n\
+        [[cover.lod]]\nfile = \"cover/fern.gltf\"\ndistance = 30\n";
+
+    #[test]
+    fn a_cover_grows_its_model_on_its_terrain_types_as_thickly_and_as_far_as_it_says() {
+        let m = ArtPackManifest::parse(COVER).expect("the covers read");
+        assert_eq!(m.covers.len(), 2);
+        let lupins = &m.covers[0];
+        assert_eq!(lupins.grounds, [1, 9]);
+        assert_eq!(lupins.density, 4.0);
+        assert_eq!(lupins.scale, (0.8, 1.25));
+        assert_eq!(lupins.max_slope, 0.5);
+        assert_eq!(lupins.reach, 40.0, "its last level's distance");
+        assert_eq!(lupins.id, cover_id("cover/lupins.gltf"));
+        assert!(is_cover(lupins.id));
+        let model = m
+            .model(lupins.id)
+            .expect("its model is listed with the models");
+        assert!(model.foliage);
+        assert_eq!(
+            model.category,
+            Category::Plant,
+            "foliage is taken for a plant"
+        );
+        assert_eq!(model.lods.len(), 2);
+        let fern = &m.covers[1];
+        assert_eq!(fern.grounds, [21]);
+        assert_eq!(
+            (fern.scale, fern.max_slope),
+            ((1.0, 1.0), 0.6),
+            "the defaults"
+        );
+        assert_ne!(fern.id, lupins.id);
+        assert!(!is_cover(DataId(0x0200_0258)));
+    }
+
+    #[test]
+    fn a_cover_that_is_incomplete_or_names_a_retail_object_or_the_road_is_refused() {
+        for (from, to) in [
+            ("ground = [1, 9]\n", ""),
+            ("ground = [1, 9]", "ground = \"road\""),
+            ("ground = [1, 9]", "ground = [32]"),
+            ("density = 4\n", ""),
+            ("density = 4", "density = 0"),
+            ("scale = [0.8, 1.25]", "scale = [1.25, 0.8]"),
+            ("scale = [0.8, 1.25]", "scale = 1"),
+            ("max_slope = 0.5", "max_slope = -1"),
+            ("distance = 40.0\n", ""),
+            (
+                "[[cover]]\nground = [1, 9]",
+                "[[cover]]\nid = \"0x02000258\"\nground = [1, 9]",
+            ),
+            ("license = \"CC0-1.0\"\n[[cover.lod]]", "[[cover.lod]]"),
+            ("file = \"cover/fern.gltf\"", "file = \"cover/lupins.gltf\""),
+            ("file = \"cover/fern.gltf\"", "file = \"../fern.gltf\""),
+        ] {
+            assert!(COVER.contains(from), "{from}");
+            assert!(
+                ArtPackManifest::parse(&COVER.replacen(from, to, 1)).is_err(),
+                "{from:?} -> {to:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn covers_of_one_model_share_it_each_on_its_own_types() {
+        let shared = format!(
+            "{COVER}[[cover]]\nground = 15\ndensity = 0.5\nauthor = \"A\"\ntool = \"T\"\n\
+             license = \"CC0-1.0\"\n[[cover.lod]]\nfile = \"cover/fern.gltf\"\ndistance = 30\n"
+        );
+        let m = ArtPackManifest::parse(&shared).expect("the shared cover reads");
+        assert_eq!(m.covers.len(), 3);
+        assert_eq!(m.covers[1].id, m.covers[2].id);
+        assert_eq!((m.covers[1].density, m.covers[2].density), (1.5, 0.5));
+        assert_eq!(m.covers[2].grounds, [15]);
+        assert_eq!(
+            m.models.len(),
+            2,
+            "one model for the two covers of the fern"
+        );
+        let other = shared.replacen("distance = 30\n", "distance = 31\n", 2);
+        assert!(
+            ArtPackManifest::parse(&other.replacen("distance = 31", "distance = 30", 1)).is_err()
+        );
+    }
+
+    #[test]
+    fn a_covers_id_is_its_first_files_whatever_else_the_manifest_holds() {
+        let one = ArtPackManifest::parse(COVER).expect("reads");
+        let moved = ArtPackManifest::parse(&COVER.replacen("density = 4", "density = 9", 1))
+            .expect("reads");
+        assert_eq!(one.covers[0].id, moved.covers[0].id);
+        assert_eq!(cover_id("cover/lupins.gltf"), cover_id("cover/lupins.gltf"));
+        assert_ne!(cover_id("cover/lupins.gltf"), cover_id("cover/lupin.gltf"));
     }
 }

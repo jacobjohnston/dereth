@@ -158,13 +158,51 @@ pub const USE_FLAGS_PERSON: u32 = 956;
 /// How close a player must be to use a person, in meters.
 pub const PERSON_REACH: f32 = 5.0;
 
-/// How far beyond a walk's range a walking player's center may be for the walk to be done (2017's
-/// servers ended walks to people with the centers a median 1.0 m beyond the range, 3,787 walks),
-/// and a player that has come to rest (its client ends the walk with the two bodies within the
-/// range: authored, wide enough for two bodies and a step).
+/// How far beyond a walk's range a walking player may be from the object's body ([`walk_gap`]) for
+/// the walk to be done (2017's servers ended walks to people with the centers a median 1.0 m
+/// beyond the range, 3,787 walks), and a player that has come to rest (authored, wide enough for
+/// a step and a report's lag).
 pub const WALK_SLACK: f32 = 1.0;
 pub const STILL_SLACK: f32 = 4.0;
 pub const USER_IS_PLAYER: u32 = 31;
+
+/// The body a walk's end measures from: the walking player's center, at a player's height.
+const WALK_FROM: crate::reach::Body = crate::reach::Body {
+    radius: 0.0,
+    height: crate::reach::PLAYER.height,
+};
+
+/// How far a walking player is from an object of a template (at its own scale, if it has one), as
+/// its client ends a walk to it: from the player's center to the side of the object's upright body
+/// (its look's radius and height) across the ground, and past the lower one's top in height; the
+/// distance between their centers where the template's body is not known. (2017: the servers ended
+/// walks to people, lifestones and doors with the player's last report a median 0.48, 0.35 and
+/// 1.32 m inside the walk's range of the object's side, 609, 247 and 137 walks; the Tumerok's
+/// lifestone, 4.46 m wide, was used from 3.0 to 12.2 m off its center, 61 of 105 walked uses
+/// farther than 6 m.)
+pub(crate) fn walk_gap<S: Store>(
+    s: &Server<S>,
+    at: &StoredPosition,
+    template: u32,
+    scale: Option<f32>,
+    cell: u32,
+    origin: [f32; 3],
+) -> Option<f32> {
+    let Some([r, h]) = s.catalog.bodies.get(&template) else {
+        return reach(at, cell, origin);
+    };
+    let scale = scale.unwrap_or(1.0);
+    let body = crate::reach::Body {
+        radius: r * scale,
+        height: h * scale,
+    };
+    let there = StoredPosition {
+        cell,
+        origin,
+        rotation: [1.0, 0.0, 0.0, 0.0],
+    };
+    crate::reach::gap(at, WALK_FROM, &there, body)
+}
 
 /// The slots of a use's description, by index (its package's layout).
 pub mod usage {
@@ -227,6 +265,9 @@ pub struct Trip {
     pub sent: bool,
     /// A recall's text on arrival ("You recall to your lifestone."), if it says one.
     pub said: Option<TextInfo>,
+    /// The quest updates told as it comes out, each its quest and the kind of update: an update
+    /// whose own recall sent the player.
+    pub updates: Vec<(u32, u32)>,
 }
 
 fn send(net: &mut ServerNet, conn: ConnId, kind: BlobKind, m: &ServerMessage) {
@@ -258,7 +299,7 @@ pub(crate) fn to_knowers<S: Store>(s: &Server<S>, net: &mut ServerNet, id: u64, 
     }
 }
 
-/// The next visual stamp of a content object (made with stamp 1).
+/// The next visual stamp of a content object (first made with stamp 1, then with its latest).
 pub fn object_stamp<S: Store>(s: &mut Server<S>, id: u64) -> ObjectStamp {
     let instance_stamp = s.placed.instance(id);
     let v = s.visuals.entry(id).or_insert(1);
@@ -435,21 +476,29 @@ fn use_thing<S: Store>(
         }
         crate::things::Kind::Corpse => crate::inventory::open(s, net, world, u.item),
         crate::things::Kind::Item => match t.container {
-            Some((c, _)) if crate::inventory::open_corpse_of(s, world) == Some(c) => {
+            Some(c) if crate::inventory::open_corpse_of(s, world) == Some(c) => {
                 // A take its quest keeps from the player is refused at once.
                 if let Some(why) = take_refused(s, world, t.template, clock) {
                     let no = use_refused(&u, 0, None, -1.0, why);
                     send(net, world, BlobKind::PRIVATE, &no);
                     return;
                 }
-                crate::inventory::take(s, net, world, u.item, clock);
+                crate::inventory::take(s, net, world, u.item, c, clock);
             }
-            Some((c, _)) if c == me => use_held(s, net, world, u, clock),
+            Some(c) if c == me => use_held(s, net, world, u, clock),
             _ => s.unhandled.note("using an item out of reach"),
         },
         crate::things::Kind::Node => crate::mining::begin(s, net, world, u, clock),
         crate::things::Kind::Portal => crate::usable::portals::at_portal(s, net, world, u, clock),
         crate::things::Kind::Plant => crate::plants::begin(s, net, world, u, clock),
+        // A chest one placed is opened as any chest; anything else it placed is no one's to use.
+        crate::things::Kind::Placed if crate::usable::chests::chest(s, u.item).is_some() => {
+            crate::usable::chests::at_chest(s, net, world, u, clock);
+        }
+        crate::things::Kind::Placed => {
+            let no = use_refused(&u, me, None, 0.0, USE_STATUS_OK);
+            send(net, world, BlobKind::PRIVATE, &no);
+        }
         crate::things::Kind::Creature => {
             let distance = s
                 .things
@@ -457,6 +506,19 @@ fn use_thing<S: Store>(
                 .and_then(|t| t.at)
                 .and_then(|at| presence::distance(&u.from, &at))
                 .unwrap_or(0.0);
+            // A player's own escort is a person used, its use running the steps it triggers.
+            let escort = s
+                .things
+                .get(u.item)
+                .filter(|_| s.escorts.follows(u.item, me))
+                .map(|t| (t.template, t.description.name));
+            if let Some((template, name)) = escort {
+                let done = use_done(&u, me, USE_FLAGS_PERSON, false, distance);
+                send(net, world, BlobKind::PRIVATE, &done);
+                let who = Some((u.item, name));
+                crate::quests::triggered(s, net, world, Trigger::Use(template), who, clock);
+                return;
+            }
             let done = use_done(&u, me, USE_FLAGS_ATTACK, false, distance);
             send(net, world, BlobKind::PRIVATE, &done);
             crate::combat::begin(s, net, world, u.item, clock);
@@ -471,8 +533,15 @@ fn in_the_pack<S: Store>(s: &Server<S>, world: ConnId, item: u64) -> bool {
         .is_some_and(|p| p.play.items.iter().any(|h| h.id == item && h.location == 0))
 }
 
+/// Does an item template name a quest its use needs?
+fn names_a_use_quest<S: Store>(s: &Server<S>, template: u32) -> bool {
+    s.catalog
+        .get(template)
+        .is_some_and(|t| t.props.word("Usage_RequiredQuest").is_some())
+}
+
 /// Why taking an item of a template is refused, if its quest keeps the player from it.
-fn take_refused<S: Store>(
+pub(crate) fn take_refused<S: Store>(
     s: &Server<S>,
     world: ConnId,
     template: u32,
@@ -485,7 +554,7 @@ fn take_refused<S: Store>(
 /// Why using an object of the world (a portal) is refused, if its quest keeps the player out: the
 /// quest its placed instance needs, else its template's (2017: the generic portals, whose
 /// templates need none, refused 40 times at 13 placed instances).
-fn quest_keeps_out<S: Store>(
+pub(crate) fn quest_keeps_out<S: Store>(
     s: &Server<S>,
     world: ConnId,
     o: &yalain_content::ContentObject,
@@ -517,7 +586,7 @@ fn under_its_level<S: Store>(
 }
 
 /// The refusal of a player a placed object is not for: of another kingdom than the one it names, or
-/// no hero when it is for heroes alone, as its examination says.
+/// no hero when it is for heroes alone, as its examination says ([`for_heroes`]).
 fn not_who_it_is_for<S: Store>(
     s: &Server<S>,
     world: ConnId,
@@ -530,20 +599,30 @@ fn not_who_it_is_for<S: Store>(
     {
         return Some(crate::item_use::refusal::WRONG_KINGDOM);
     }
-    (o.facts.hero && !crate::focus::is_hero(&p.qualities))
+    (for_heroes(s, o) && !crate::focus::is_hero(&p.qualities))
         .then_some(crate::item_use::refusal::HERO_ONLY)
 }
 
-/// Does a placed object keep some players out by what its own row says: a quest, a kingdom, heroes?
-fn keeps_players_out(o: &yalain_content::ContentObject) -> bool {
-    o.gate.is_some() || o.facts.hero || o.facts.kingdom.is_some()
+/// Is a placed object for heroes alone: its row says so, or its template does?
+fn for_heroes<S: Store>(s: &Server<S>, o: &yalain_content::ContentObject) -> bool {
+    o.facts.hero
+        || s.catalog
+            .get(o.template)
+            .is_some_and(|t| t.props.flag("Usage_HeroOnly"))
+}
+
+/// Does a placed object keep some players out by what its own row or template says: a quest, a
+/// kingdom, heroes?
+fn keeps_players_out<S: Store>(s: &Server<S>, o: &yalain_content::ContentObject) -> bool {
+    o.gate.is_some() || for_heroes(s, o) || o.facts.kingdom.is_some()
 }
 
 /// Is a template one a player talks to by using it (a storekeeper, a person or object a quest
-/// step is triggered by, or one that says something when used)?
+/// step is triggered by or an order of uses names, or one that says something when used)?
 fn is_person<S: Store>(s: &Server<S>, template: u32) -> bool {
     s.stores.keeper(template).is_some()
         || crate::books::npc_book(s, template).is_some()
+        || s.item_rows.in_a_sequence(template)
         || s.quests
             .steps
             .iter()
@@ -802,6 +881,11 @@ pub fn use_object<S: Store>(
         send(net, world, BlobKind::PRIVATE, &refused);
         return;
     }
+    // A chest the world made: walked to, then opened, as a placed one is.
+    if s.things.get(u.item).is_some() && crate::usable::chests::chest(s, u.item).is_some() {
+        crate::usable::chests::used(s, net, world, u, clock);
+        return;
+    }
     if let Some(t) = s.things.get(u.item) {
         // An item lying in the world: walked to (the order sent even when the player is there),
         // then picked up.
@@ -894,6 +978,10 @@ pub fn use_object<S: Store>(
         send(net, world, BlobKind::PRIVATE, &done);
         return;
     }
+    if crate::usable::levers::is_lever(s, u.item) {
+        crate::usable::levers::used(s, net, world, u, clock);
+        return;
+    }
     if crate::usable::doors::door(s, u.item).is_some() {
         crate::usable::doors::used(s, net, world, u, clock);
         return;
@@ -946,7 +1034,7 @@ pub fn use_object<S: Store>(
     // (2017: 2 of 2, at 13.5 and 56.9 m; the generic portals kept by their placed instance's
     // quest, 21 of 21 requests answered in 0.09-0.46 s, at 2.9-76.0 m), whether or not where it
     // leads is known.
-    if (o.destination.is_some() || keeps_players_out(o)) && !lifestone && !person && !broker {
+    if (o.destination.is_some() || keeps_players_out(s, o)) && !lifestone && !person && !broker {
         if let Some(why) = quest_keeps_out(s, world, o, clock) {
             let distance = reach(&u.from, o.cell, o.origin).unwrap_or(0.0);
             let no = use_refused(&u, 0, Some(USE_FLAGS_QUEST_KEEPS_OUT), distance, why);
@@ -1017,8 +1105,9 @@ fn use_held<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, u: 
     };
     // An item in the pack that its quest keeps from the player is used no more than taken (2017, pack
     // uses refused 10042, 10021: 13 of 15 of items whose classes name a quest for taking, 8 of 8 of
-    // 10042).
-    if u.target == 0 && in_the_pack(s, world, u.item) {
+    // 10042, none of them naming a quest for their use), unless its template names a quest for its
+    // use: that one judges its use, as it does any held item's.
+    if u.target == 0 && in_the_pack(s, world, u.item) && !names_a_use_quest(s, item) {
         if let Some(why) = take_refused(s, world, item, clock) {
             let no = use_refused(&u, 0, Some(USE_FLAGS_PACK), 0.0, why);
             send(net, world, BlobKind::PRIVATE, &no);
@@ -1249,6 +1338,7 @@ fn held_on_object<S: Store>(
         resurrect: false,
         sent: false,
         said: None,
+        updates: Vec::new(),
     });
     to_all_knowing(s, net, id, &plays);
     s.after(
@@ -1389,13 +1479,14 @@ pub fn walked<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, c
         .content
         .objects
         .iter()
-        .filter(|o| {
-            (o.destination.is_some() || keeps_players_out(o))
+        .enumerate()
+        .filter(|(i, o)| {
+            (o.destination.is_some() || keeps_players_out(s, o))
                 && s.walk_in_packages.contains(&o.description.package)
-                && !crate::events::hides(s, o)
+                && !crate::events::hides(s, *i)
         })
-        .find(|o| touches(&at, o.cell, o.origin))
-        .and_then(|o| s.placed.database_id(o));
+        .find(|(_, o)| touches(&at, o.cell, o.origin))
+        .and_then(|(_, o)| s.placed.database_id(o));
     let before = s.touching.get(&world).copied();
     match touched {
         None => {
@@ -1481,7 +1572,16 @@ pub fn arrived<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, 
         return;
     };
     let o = &s.content.objects[i];
-    if reach(&p.position, o.cell, o.origin).is_some_and(|d| d <= slack) {
+    // A placed object's body counts: the client ends a walk to it at the range from its side.
+    let gap = walk_gap(
+        s,
+        &p.position,
+        o.template,
+        o.description.scale,
+        o.cell,
+        o.origin,
+    );
+    if gap.is_some_and(|d| d <= slack) {
         if u.target == 0 {
             carry_out(s, net, world, u, true, clock);
         } else {
@@ -1506,7 +1606,7 @@ fn walk_refusal_flags<S: Store>(s: &Server<S>, u: &Use) -> u32 {
     }
     let place = presence::content_by_id(&s.content.objects, walk_goal(u)).is_some_and(|i| {
         let o = &s.content.objects[i];
-        is_lifestone(s, o.description.package) || o.destination.is_some() || keeps_players_out(o)
+        is_lifestone(s, o.description.package) || o.destination.is_some() || keeps_players_out(s, o)
     });
     if place {
         USE_FLAGS_BOUND
@@ -1620,6 +1720,39 @@ fn carry_out<S: Store>(
         let id = p.character;
         to_all_knowing(s, net, id, &stop);
     }
+    // An object a camp's living creature guards refuses the use; one carried out may take a
+    // guarded object from the world for a while.
+    if crate::guards::guarded(s, i) {
+        crate::guards::refused(s, net, world, &u, i);
+        return;
+    }
+    // One a shifting row keeps from the world does nothing; the one it stands moves on once used
+    // (a person once its step has run).
+    if crate::shifting::refused(s, net, world, &u, i) {
+        return;
+    }
+    let person = talks_to(s, &o);
+    carried_out(s, net, world, u, i, o, clock);
+    crate::guards::used(s, net, i, clock);
+    if !person {
+        crate::shifting::used(s, net, i, clock);
+    }
+}
+
+/// What a use of a placed object does, the player in reach and the use allowed.
+fn carried_out<S: Store>(
+    s: &mut Server<S>,
+    net: &mut ServerNet,
+    world: ConnId,
+    u: Use,
+    i: usize,
+    o: yalain_content::ContentObject,
+    clock: Clock,
+) {
+    if crate::usable::levers::is_lever(s, u.item) {
+        crate::usable::levers::at_lever(s, net, world, &u, clock);
+        return;
+    }
     if crate::usable::doors::door(s, u.item).is_some() {
         crate::usable::doors::at_door(s, net, world, u, clock);
         return;
@@ -1660,7 +1793,9 @@ fn carry_out<S: Store>(
             );
             return;
         }
-        crate::store::talk(s, net, world, u.item, &o, clock);
+        if crate::store::talk(s, net, world, u.item, &o, clock) {
+            crate::shifting::used(s, net, i, clock);
+        }
         return;
     }
     // A portal walked into that its quest keeps the player out of refuses as a use does (2017: 19
@@ -1725,8 +1860,10 @@ pub(crate) fn through_portal<S: Store>(
             resurrect: false,
             sent: false,
             said: None,
+            updates: Vec::new(),
         });
     }
+    crate::quests::teleported(s, net, world, clock);
     s.after(
         clock,
         IN_PORTAL_SPACE,
@@ -1801,6 +1938,7 @@ pub(crate) fn sends_on<S: Store>(
         resurrect: false,
         sent: false,
         said: None,
+        updates: Vec::new(),
     });
     s.after(
         clock,
@@ -1839,6 +1977,7 @@ fn through_door<S: Store>(
         BlobKind::PRIVATE,
         &crate::chat::show_text(8, teleporting),
     );
+    crate::effects::teleported(s, net, world);
     send(net, world, BlobKind::PRIVATE, &animation_frozen(true));
     send(
         net,
@@ -1859,7 +1998,9 @@ fn through_door<S: Store>(
         resurrect: false,
         sent: false,
         said: None,
+        updates: Vec::new(),
     });
+    crate::quests::teleported(s, net, world, clock);
     s.after(
         clock,
         IN_PORTAL_SPACE,
@@ -1885,6 +2026,7 @@ pub(crate) fn shard_portal_space<S: Store>(s: &mut Server<S>, net: &mut ServerNe
         BlobKind::PRIVATE,
         &crate::chat::show_text(8, teleporting),
     );
+    crate::effects::teleported(s, net, world);
     send(net, world, BlobKind::PRIVATE, &animation_frozen(true));
     send(
         net,
@@ -1939,6 +2081,7 @@ fn goes_into_portal_space<S: Store>(
     teleport_fx: bool,
 ) {
     walk_cut_short(s, net, world);
+    crate::effects::teleported(s, net, world);
     let Some(p) = s.players.get_mut(&world) else {
         return;
     };
@@ -2045,12 +2188,16 @@ pub fn bind_ends<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId
     to_all_knowing(s, net, id, &stop);
 }
 
-/// The place beside a lifestone where a recall lands: `BESIDE_LIFESTONE` meters from it toward
-/// where the player stood (or south of it), facing it, at the player's height.
+/// The place beside a target (a lifestone, a character) where a mover lands: `BESIDE_LIFESTONE`
+/// meters from it toward where the mover stood when in its landblock (else south of it), facing
+/// it, at the target's height. Its cell is the one it lies in, never the mover's: outdoors the
+/// land cell under it, in the landblock it falls in; inside the target's own (2017: each of 3,130
+/// arrivals on the land was placed in the land cell under it, and none of the 9 returns from
+/// another land cell of the same landblock kept the cell it left).
 #[must_use]
-pub fn beside(cell: u32, stone: [f32; 3], player: &StoredPosition) -> StoredPosition {
-    let (dx, dy) = if player.cell >> 16 == cell >> 16 {
-        (player.origin[0] - stone[0], player.origin[1] - stone[1])
+pub fn beside(cell: u32, target: [f32; 3], from: &StoredPosition) -> StoredPosition {
+    let (dx, dy) = if from.cell >> 16 == cell >> 16 {
+        (from.origin[0] - target[0], from.origin[1] - target[1])
     } else {
         (0.0, -1.0)
     };
@@ -2060,24 +2207,43 @@ pub fn beside(cell: u32, stone: [f32; 3], player: &StoredPosition) -> StoredPosi
     } else {
         (0.0, -1.0)
     };
-    let origin = [
-        stone[0] + ux * BESIDE_LIFESTONE,
-        stone[1] + uy * BESIDE_LIFESTONE,
-        player.origin[2],
-    ];
-    // Facing the stone: degrees clockwise from north (+y), from the landing back to it.
+    let (x, y) = (
+        target[0] + ux * BESIDE_LIFESTONE,
+        target[1] + uy * BESIDE_LIFESTONE,
+    );
+    let (cell, x, y) = if presence::indoors(cell) {
+        (cell, x, y)
+    } else {
+        crate::spawn::outdoor(cell >> 16, x, y)
+    };
+    // Facing the target: degrees clockwise from north (+y), from the landing back to it.
     let deg = math::atan2f(-ux, -uy).to_degrees().rem_euclid(360.0);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let byte = u8::try_from((deg * 255.0 / 360.0) as u32 % 256).unwrap_or(0);
     StoredPosition {
-        cell: if player.cell >> 16 == cell >> 16 {
-            player.cell
-        } else {
-            cell
-        },
-        origin,
+        cell,
+        origin: [x, y, target[2]],
         rotation: crate::world::rotation_of_heading(byte),
     }
+}
+
+/// [`beside`], on the ground there: outdoors at the land's height where it lands (when the ground
+/// is known), else at the target's own height.
+#[must_use]
+pub fn beside_on_ground<S: Store>(
+    s: &Server<S>,
+    cell: u32,
+    target: [f32; 3],
+    from: &StoredPosition,
+) -> StoredPosition {
+    let mut at = beside(cell, target, from);
+    if let Some(z) = (!presence::indoors(at.cell))
+        .then(|| s.ground.as_ref()?.height(at.cell, at.origin))
+        .flatten()
+    {
+        at.origin[2] = z;
+    }
+    at
 }
 
 /// A recall takes the player into portal space toward the place it lands (its powering up and
@@ -2088,6 +2254,7 @@ pub fn recall_trip<S: Store>(
     world: ConnId,
     to: StoredPosition,
     said: Option<TextInfo>,
+    clock: Clock,
 ) {
     if on_a_trip(s, world) {
         return;
@@ -2101,8 +2268,10 @@ pub fn recall_trip<S: Store>(
             resurrect: false,
             sent: false,
             said,
+            updates: Vec::new(),
         });
     }
+    crate::quests::teleported(s, net, world, clock);
 }
 
 /// A recall comes out of portal space where it lands.
@@ -2137,8 +2306,10 @@ pub fn sent_away<S: Store>(
             resurrect: false,
             sent: true,
             said: None,
+            updates: Vec::new(),
         });
     }
+    crate::quests::teleported(s, net, world, clock);
     s.after(
         clock,
         IN_PORTAL_SPACE,
@@ -2172,8 +2343,10 @@ pub fn item_trip<S: Store>(
             resurrect: false,
             sent: false,
             said,
+            updates: Vec::new(),
         });
     }
+    crate::quests::teleported(s, net, world, clock);
     s.after(
         clock,
         IN_PORTAL_SPACE,
@@ -2186,17 +2359,20 @@ pub fn item_trip<S: Store>(
 }
 
 /// Does using this portal leave its user a place to recall to (its portal flags)? A portal of the
-/// world whose flags say so, used itself (not an item used on it); a summoned portal never does.
+/// world whose flags say so, or one an item's use made whose template's do, used itself (not an
+/// item used on it); a summoned portal never does.
 fn recalled_to<S: Store>(s: &Server<S>, u: &Use) -> bool {
-    u.target == 0
-        && presence::content_by_id(&s.content.objects, u.item).is_some_and(|i| {
-            s.content.objects[i].facts.portal & yalain_content::portal::RECALL != 0
-        })
+    let flags = presence::content_by_id(&s.content.objects, u.item)
+        .map(|i| s.content.objects[i].facts.portal)
+        .or_else(|| crate::usable::portals::portal(s, u.item).map(|t| t.facts.portal));
+    u.target == 0 && flags.is_some_and(|f| f & yalain_content::portal::RECALL != 0)
 }
 
 /// Where a dead player returns: the lifestone it is bound to; never bound, beside the nearest
 /// lifestone the world has in its landblock or one beside it (authored: 2017 shows no unbound
-/// death); else where it fell.
+/// death), on the ground there, not at the height it fell from; else where it fell. Outdoors the
+/// ground is the land's height where it lands, inside the lifestone's own (2017: 136 of 137 returns
+/// were placed at the height their client then stood at).
 #[must_use]
 pub fn resurrection_place<S: Store>(s: &Server<S>, world: ConnId) -> StoredPosition {
     let Some(p) = s.players.get(&world) else {
@@ -2225,7 +2401,7 @@ pub fn resurrection_place_of<S: Store>(
         .filter(|o| is_lifestone(s, o.description.package))
         .filter_map(|o| reach(&fell, o.cell, o.origin).map(|d| (d, o)))
         .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map_or(fell, |(_, o)| beside(o.cell, o.origin, &fell))
+        .map_or(fell, |(_, o)| beside_on_ground(s, o.cell, o.origin, &fell))
 }
 
 /// A dead player goes through portal space to where it returns (its effects, frozen, portal
@@ -2247,6 +2423,7 @@ pub fn resurrection_trip<S: Store>(
             resurrect: true,
             sent: false,
             said: None,
+            updates: Vec::new(),
         });
     }
     s.after(
@@ -2301,6 +2478,7 @@ pub fn step<S: Store>(
                 &crate::chat::show_text(8, teleporting),
             );
             enter_portal_space(s, net, world, true);
+            crate::quests::teleported(s, net, world, clock);
             s.after(
                 clock,
                 IN_PORTAL_SPACE,
@@ -2309,12 +2487,24 @@ pub fn step<S: Store>(
                     step: Step::Arrive,
                 },
             );
+            // An item's use whose step takes the fellowship along sends the fellows as the user goes.
+            let carried = s
+                .players
+                .get(&world)
+                .and_then(|p| p.trip.as_ref())
+                .and_then(|t| t.step.as_ref())
+                .filter(|st| st.to_fellows)
+                .and_then(|st| st.to);
+            if let Some(place) = carried {
+                crate::quests::fellows_go(s, world, target, place, clock);
+            }
         }
         Step::Sent { by } => {
             if s.players.get(&world).is_none_or(|p| p.trip.is_none()) {
                 return;
             }
             flash_and_go(s, net, world, by);
+            crate::quests::teleported(s, net, world, clock);
             s.after(
                 clock,
                 IN_PORTAL_SPACE,
@@ -2386,6 +2576,18 @@ fn arrive<S: Store>(
         };
         p = q;
     }
+    if !trip.updates.is_empty() {
+        // The updates whose recall this trip is, told as it comes out (2017: the Gauntlets' 47 of
+        // 47 advances, in portal space's exit's tick, 1.44 to 1.67 s after the trip began).
+        s.players.insert(world, p);
+        for (quest, kind) in &trip.updates {
+            crate::quests::told_on_arrival(s, net, world, *quest, *kind, clock);
+        }
+        let Some(q) = s.players.remove(&world) else {
+            return;
+        };
+        p = q;
+    }
     let shard_quest = trip
         .used
         .as_ref()
@@ -2419,9 +2621,11 @@ fn arrive<S: Store>(
         .filter(|u| u.target == 0 && from_pack.is_none())
     {
         // The portal's own effects, put on the player as it comes out, before the use is answered
-        // (2017: 3 of 3 such portals' uses: quests given and moved on, and what they put on).
+        // (2017: 3 of 3 such portals' uses: quests given and moved on, and what they put on). A
+        // portal standing in the world carries its template's as a placed one does.
         let template = presence::content_by_id(&s.content.objects, u.item)
-            .map(|i| s.content.objects[i].template);
+            .map(|i| s.content.objects[i].template)
+            .or_else(|| crate::usable::portals::portal(s, u.item).map(|t| t.template));
         let effects = template
             .and_then(|t| s.item_uses.get(&t).cloned())
             .unwrap_or_default();
@@ -2511,6 +2715,11 @@ fn arrive<S: Store>(
         crate::death::returned(s, net, world);
         s.after(
             clock,
+            crate::death::MOVES_AFTER_RETURN,
+            crate::Timer::MovesAgain { world },
+        );
+        s.after(
+            clock,
             crate::effects::AURAS_PULSE_AFTER_RETURN,
             crate::Timer::AurasPulseAgain { world },
         );
@@ -2518,7 +2727,7 @@ fn arrive<S: Store>(
     if let Some(u) = trip.used.as_ref().filter(|u| u.target != 0) {
         // An item used on an object: the use answered, as the object's work is done (a vault's
         // glyph used up first).
-        let u = &crate::usable::vaults::arrived(s, net, world, u);
+        let u = &crate::usable::vaults::arrived(s, net, world, u, clock);
         let distance = presence::content_by_id(&s.content.objects, u.target)
             .and_then(|i| {
                 let o = &s.content.objects[i];
@@ -2545,8 +2754,19 @@ fn arrive<S: Store>(
         crate::quests::triggered(s, net, world, Trigger::Arrive(template), None, clock);
         let from = Trigger::ArriveFrom(template, object);
         crate::quests::triggered(s, net, world, from, None, clock);
+    } else if let Some(template) = trip
+        .used
+        .as_ref()
+        .filter(|u| u.target == 0 && trip.step.is_none())
+        .and_then(|u| crate::usable::portals::portal(s, u.item))
+        .map(|t| t.template)
+    {
+        // One standing in the world moves those of its template: it is no placed portal (2017: a
+        // master vault's portal, seen made at three places, gave its quest on arrival, 2 sessions).
+        crate::quests::triggered(s, net, world, Trigger::Arrive(template), None, clock);
     }
-    // Its pets come out beside it.
+    // Its pets come out beside it, but for an escort its trip fails.
+    crate::escorts::owner_arrives(s, net, world, clock);
     crate::pets::owner_arrives(s, net, world, time);
     presence::refresh(s, net, world);
     // A rider come out inside is soon off its mount.

@@ -14,7 +14,7 @@ use yalain_content::quests::{Need, Trigger, Update};
 use yalain_content::talk::{How, Role, TalkUpdate, When};
 use yalain_content::{FactIds, Kind, Words};
 use yalain_world_db::check::{check, check_read};
-use yalain_world_db::compile::{compile, Install, InstallSale, QuestDefinition};
+use yalain_world_db::compile::{compile, FailsOn, Install, InstallSale, QuestDefinition};
 use yalain_world_db::merge::merge;
 use yalain_world_db::release::{self, Host};
 use yalain_world_db::rows::{read, Row};
@@ -58,10 +58,17 @@ const STARTING_SKILL_2: u32 = 0x4100_0004;
 const DRAWABLE: u32 = 0x4000_0001;
 const MINE_OBJECT: u32 = 0x4100_0005;
 const WORN_FILE: u32 = 0x4100_0006;
+const PORTAL_DESTINATION: u32 = 0x4100_0007;
+/// A portal of the made-up install that names its destination.
+const NAMED_PORTAL: u32 = 0x4700_0C8C;
 /// A garment of the made-up install that names its own worn look.
 const GARMENT: u32 = 0x4700_0C8B;
 /// A node of the made-up install, giving a material when mined.
 const NODE: u32 = 0x4700_0C8A;
+const LEVEL: u32 = 0x4100_0008;
+const MAX_HEALTH: u32 = 0x4100_0009;
+/// A creature of the made-up install, of a level and health.
+const HOUND: u32 = 0x4700_2226;
 
 fn entity(kind: u32, object: u32, props: Vec<(u32, PropertyValue)>) -> Entity {
     Entity {
@@ -107,6 +114,8 @@ struct Fake {
     min_level: i32,
     setup_xp: u64,
     setup_pay: yalain_content::quests::CompletionPay,
+    /// What the quest's setup says fails it.
+    fails: FailsOn,
 }
 
 impl Fake {
@@ -138,6 +147,29 @@ impl Fake {
             ),
         );
         entities.insert(0x4700_2224, entity(CLASS, 0x0E00, vec![look.clone()]));
+        entities.insert(
+            HOUND,
+            entity(
+                CLASS,
+                0x0E00,
+                vec![
+                    look.clone(),
+                    (LEVEL, PropertyValue::Integer(10)),
+                    (MAX_HEALTH, PropertyValue::Integer(100)),
+                ],
+            ),
+        );
+        entities.insert(
+            NAMED_PORTAL,
+            entity(
+                CLASS,
+                0x0F12,
+                vec![(
+                    PORTAL_DESTINATION,
+                    PropertyValue::String("Lair_Landing".into()),
+                )],
+            ),
+        );
         entities.insert(
             GARMENT,
             entity(
@@ -173,6 +205,7 @@ impl Fake {
             min_level: 0,
             setup_xp: 0,
             setup_pay: yalain_content::quests::CompletionPay::default(),
+            fails: FailsOn::default(),
         }
     }
 }
@@ -201,6 +234,9 @@ impl Install for Fake {
             STARTING_SKILL_2 => Some("NPC_StartingSkill2".into()),
             MINE_OBJECT => Some("Mine_Object".into()),
             WORN_FILE => Some("Item_WornAppearanceFile1".into()),
+            PORTAL_DESTINATION => Some("PortalDestination".into()),
+            LEVEL => Some("GameplayStatistics_Level".into()),
+            MAX_HEALTH => Some("GameplayStatistics_MaxHealth".into()),
             _ => None,
         }
     }
@@ -229,9 +265,10 @@ impl Install for Fake {
     }
 
     fn quest_definition(&self, state: Option<u32>, id: u32) -> Option<QuestDefinition> {
-        (id == 0x4000_0088 && state.is_none()).then(|| QuestDefinition {
+        // The rescue's quest, and a companion of it.
+        ((id == 0x4000_0088 || id == 0x4000_0089) && state.is_none()).then(|| QuestDefinition {
             state: 0x6F00_0D3F,
-            name: (0xA860_7CEC, 0x2500_17EE),
+            name: Words::Ref(0xA860_7CEC, 0x2500_17EE),
             description: (0x6C45_9364, 0x2500_17EE),
             icon: 0x4100_034B,
             play_fx: true,
@@ -240,10 +277,11 @@ impl Install for Fake {
             subquests: Vec::new(),
             once: false,
             fellows: self.fellows,
-            last_waits: false,
+            ranges: Vec::new(),
             min_level: self.min_level,
             hero_only: false,
             monarch_only: false,
+            fails: self.fails,
             xp: self.setup_xp,
             pay: self.setup_pay,
             required: None,
@@ -253,7 +291,19 @@ impl Install for Fake {
     fn label(&self, template: u32) -> String {
         format!("template {template:08X}")
     }
+
+    fn variables(&self, string: u32, table: u32) -> Option<Vec<u32>> {
+        Some(if (string, table) == COUNT_LINE {
+            vec![COUNT_VARIABLE]
+        } else {
+            Vec::new()
+        })
+    }
 }
+
+/// A string of the made-up install that takes one variable, and that variable.
+const COUNT_LINE: (u32, u32) = (0x0378_A89C, 0x2500_2A76);
+const COUNT_VARIABLE: u32 = 0x5A17_0001;
 
 #[test]
 fn the_test_world_reads_checks_and_merges_without_problems() {
@@ -565,8 +615,8 @@ fn the_compile_takes_what_the_rows_leave_out_from_the_install() {
     // The quest's definition from the install, its numbers from the row.
     let q = &t.quests.quests[0];
     assert_eq!(
-        (q.name, q.icon, q.journals.len()),
-        ((0xA860_7CEC, 0x2500_17EE), 0x4100_034B, 2)
+        (&q.name, q.icon, q.journals.len()),
+        (&Words::Ref(0xA860_7CEC, 0x2500_17EE), 0x4100_034B, 2)
     );
     assert_eq!(
         (q.challenge, q.duration, q.retry, q.xp, q.cancellable),
@@ -623,9 +673,9 @@ fn a_row_naming_what_the_install_lacks_stops_the_compile_at_its_line() {
 fn the_release_archive_is_the_same_bytes_for_the_same_files() {
     let files = fixture();
     let db = read(&files).unwrap();
-    let carried = release::release_files(&files, &db);
+    let carried = release::release_files(&files, &db.layout());
     assert!(carried.contains_key("world.toml") && carried.contains_key("town/pack.toml"));
-    let manifest = release::manifest("v0.1.0", &db);
+    let manifest = release::manifest("v0.1.0", &db.layout());
     let a = release::archive(&carried, &manifest);
     let b = release::archive(&carried.clone(), &manifest.clone());
     assert_eq!(a, b);
@@ -1422,6 +1472,44 @@ fn a_locked_doors_key_id_is_kept_by_its_id_and_only_a_static_is_locked() {
 }
 
 #[test]
+fn a_locked_static_with_no_id_of_its_own_is_kept_by_its_cell_and_template() {
+    let mut files = fixture();
+    edit(
+        &mut files,
+        "town/server/landblocks/77B7.toml",
+        "id = 0x4077B70000000001\n",
+        "",
+    );
+    edit(
+        &mut files,
+        "town/server/landblocks/77B7.toml",
+        "to = \"inn\"\n",
+        "to = \"inn\"\nlocked = true\nlock = 0x40000090\n",
+    );
+    let merged = merge(&read(&files).unwrap()).unwrap();
+    let t = compile(&merged, &Fake::new()).unwrap();
+    let gate = t
+        .content
+        .objects
+        .iter()
+        .find(|o| o.object.is_none() && o.template == 0x4700_115B)
+        .unwrap();
+    assert!(gate.destination.is_some(), "it leads somewhere");
+    assert_eq!(
+        t.locks
+            .of_placed(gate.cell, gate.template)
+            .and_then(|l| l.key),
+        Some(0x4000_0090)
+    );
+    assert!(t.locks.objects.is_empty());
+    assert!(
+        !t.warnings.iter().any(|w| w.to_string().contains("locked:")),
+        "{:?}",
+        t.warnings
+    );
+}
+
+#[test]
 fn a_weapon_row_names_the_template_of_a_creatures_weapon_and_must_name_one_installed() {
     let mut files = fixture();
     files.insert(
@@ -1535,6 +1623,74 @@ fn an_effect_rule_row_gives_a_ward_of_classes_or_effects_at_a_chance() {
             .into(),
     );
     assert!(merge(&read(&files).unwrap()).is_err());
+}
+
+#[test]
+fn an_effect_rule_places_a_template_by_an_effects_state_or_by_a_name_with_no_state() {
+    use yalain_content::effect_rules::Placing;
+    let mut files = fixture();
+    files.insert(
+        "town/server/effects.toml".into(),
+        "[[effect_rule]]\neffect = 0x6F000E94\nplaces = 0x47002224\nprov = { from = \"authored\" }\n\n\
+         [[effect_rule]]\neffect = \"Eff_PlaceTorchFestival\"\nplaces = 0x47002224\noffset = [0.5, 2.0]\n\
+         lasts = 600\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let merged = merge(&read(&files).unwrap()).unwrap();
+    let t = compile(&merged, &Fake::new()).unwrap();
+    assert_eq!(
+        t.effect_rules.places.get(&0x6F00_0E94),
+        Some(&Placing {
+            template: 0x4700_2224,
+            offset: [0.0, 0.0],
+            lasts: None,
+            name: None,
+        })
+    );
+    assert_eq!(
+        t.effect_rules.places_named.get("Eff_PlaceTorchFestival"),
+        Some(&Placing {
+            template: 0x4700_2224,
+            offset: [0.5, 2.0],
+            lasts: Some(600),
+            name: None,
+        })
+    );
+    // The item a named rule sets is named by the name.
+    assert!(merged
+        .rows
+        .iter()
+        .filter_map(yalain_world_db::merge::item)
+        .any(|i| i.to_string() == "effect_rule Eff_PlaceTorchFestival"));
+    // What it places must be the install's.
+    files.insert(
+        "town/server/effects.toml".into(),
+        "[[effect_rule]]\neffect = \"Eff_PlaceTorchFestival\"\nplaces = 0x47009999\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    let problems = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new())
+        .err()
+        .unwrap_or_default();
+    assert!(
+        problems.iter().any(|p| p.message.contains("places")),
+        "{problems:?}"
+    );
+    // A rule by name only places; an offset and a time go only with what it places.
+    for bad in [
+        "effect = \"Eff_PlaceTorchFestival\"\nward = { classes = [93], chance = 1.0 }",
+        "effect = \"Eff_PlaceTorchFestival\"\nplaces = 0x47002224\nward = { classes = [93], chance = 1.0 }",
+        "effect = 0x6F000E94\noffset = [0.0, 1.0]\nskill = 925",
+        "effect = 0x6F000E94\nplaces = 0x47002224\noffset = [1.0]",
+        "effect = 0x6F000E94\nplaces = 0x47002224\nlasts = 0",
+        "effect = \"not a name\"\nplaces = 0x47002224",
+    ] {
+        files.insert(
+            "town/server/effects.toml".into(),
+            format!("[[effect_rule]]\n{bad}\nprov = {{ from = \"authored\" }}\n"),
+        );
+        assert!(read(&files).is_err(), "{bad}");
+    }
 }
 
 /// A mine row's fields, as the iron mine of 2017 writes them, with the template it may name.
@@ -2170,6 +2326,61 @@ fn a_person_holds_no_kingdom_or_heroes_alone() {
         .any(|p| p.to_string().contains("hero, kingdom: a person")));
 }
 
+/// A static object whose template a quest step is triggered by using answers a use as a person
+/// does, so a kingdom, heroes alone, a quest gate or a least level on it would keep no one out: the
+/// check refuses each.
+#[test]
+fn a_static_a_step_uses_holds_no_kingdom_heroes_gate_or_least_level() {
+    for (field, row) in [
+        ("hero", "hero = true"),
+        ("kingdom", "kingdom = 2"),
+        ("requires", "requires = { quest = 0x40000088, done = true }"),
+        ("min_level", "min_level = 6"),
+    ] {
+        let mut files = fixture();
+        edit(
+            &mut files,
+            "town/server/landblocks/77B7.toml",
+            "to = \"inn\"\nprov = { from = \"authored\" }",
+            &format!("to = \"inn\"\n{row}\nprov = {{ from = \"authored\" }}"),
+        );
+        files
+            .get_mut("town/server/quests/40000088.toml")
+            .unwrap()
+            .push_str(
+                "\n[[step]]\nkey = \"s1-gate\"\nquest = 0x40000088\nneeds = 0\n\
+                 trigger = { use = 0x4700115B }\nupdate = \"bestow\"\nprov = { from = \"authored\" }\n",
+            );
+        let problems = check(&files);
+        assert!(
+            problems.iter().any(|p| {
+                let p = p.to_string();
+                p.contains("77B7.toml")
+                    && p.contains(&format!("{field}: a person is talked to"))
+                    && p.contains("0x4700115B")
+            }),
+            "{field}: {problems:?}"
+        );
+    }
+}
+
+/// A static object no step uses keeps its kingdom, heroes alone, quest gate and least level, even
+/// when a step uses another object on it or arrives through it.
+#[test]
+fn a_static_no_step_uses_keeps_its_kingdom_heroes_gate_and_least_level() {
+    let mut files = fixture();
+    edit(
+        &mut files,
+        "town/server/landblocks/77B7.toml",
+        "to = \"inn\"\nprov = { from = \"authored\" }",
+        "to = \"inn\"\nhero = true\nkingdom = 2\nrequires = { quest = 0x40000088, done = true }\n\
+         min_level = 6\nprov = { from = \"authored\" }",
+    );
+    let quest = &files["town/server/quests/40000088.toml"];
+    assert!(quest.contains("on = 0x4700115B") && quest.contains("arrive = 0x4700115B"));
+    assert_eq!(check(&files), Vec::new());
+}
+
 /// A placed object's least level reads and compiles over its template's, and the content's text
 /// keeps it; left out, the object has its template's.
 /// Behaviour: server.places.portal-least-level-row
@@ -2316,6 +2527,65 @@ fn a_quests_least_level_is_its_setups_unless_its_row_names_one() {
     );
     let t = compile(&merge(&read(&files).unwrap()).unwrap(), &install).unwrap();
     assert_eq!(t.quests.quests[0].min_level, 3);
+}
+
+/// What fails a quest (its player's death, leaving the world, a trip through portal space) is its
+/// setup's, each unless its row says; and it survives the tables' text.
+/// Behaviour: server.quests.fails-as-its-setup-says
+#[test]
+fn what_fails_a_quest_is_its_setups_unless_its_row_says() {
+    use yalain_content::quests::QuestTable;
+    let install = Fake {
+        fails: FailsOn {
+            death: true,
+            logout: true,
+            teleport: true,
+        },
+        ..Fake::new()
+    };
+    let fails = |install: &Fake, extra: &str| {
+        let mut files = fixture();
+        edit(
+            &mut files,
+            "town/server/quests/40000088.toml",
+            "duration = 72000",
+            &format!(
+                "duration = 72000
+{extra}"
+            ),
+        );
+        let t = compile(&merge(&read(&files).unwrap()).unwrap(), install).unwrap();
+        let back = QuestTable::from_text(&t.quests.to_text()).expect("reads");
+        let q = &back.quests[0];
+        (q.fails_on_death, q.fails_on_logout, q.fails_on_teleport)
+    };
+    assert_eq!(
+        fails(&install, ""),
+        (true, true, true),
+        "left out: the setup's"
+    );
+    assert_eq!(
+        fails(&install, "fails_on_teleport = false"),
+        (true, true, false),
+        "the row's"
+    );
+    assert_eq!(
+        fails(
+            &install,
+            "fails_on_death = false
+fails_on_logout = false"
+        ),
+        (false, false, true)
+    );
+    assert_eq!(
+        fails(&Fake::new(), ""),
+        (false, false, false),
+        "a setup that says none"
+    );
+    assert_eq!(
+        fails(&Fake::new(), "fails_on_logout = true"),
+        (false, true, false)
+    );
 }
 
 /// What a quest adds to a quest rating is its setup's, unless its row says, whatever else the row
@@ -2540,6 +2810,51 @@ fn a_give_s_step_may_want_a_count_and_no_other_step_may() {
     );
 }
 
+/// Behaviour: server.quests.a-step-runs-by-its-chance
+#[test]
+fn a_steps_chance_is_read_compiled_and_kept_above_0_and_at_most_1() {
+    let use_ = yalain_content::quests::Trigger::Use(0x4700_33D0);
+    let with = |chance: &str| {
+        let mut files = fixture();
+        edit(
+            &mut files,
+            "town/server/quests/40000088.toml",
+            "needs = 0\ntrigger = { use = 0x470033D0 }\n",
+            &format!("needs = 0\ntrigger = {{ use = 0x470033D0 }}\nchance = {chance}\n"),
+        );
+        files
+    };
+    let files = with("0.67");
+    assert_eq!(check(&files), Vec::new());
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let chance = t
+        .quests
+        .steps
+        .iter()
+        .find(|s| s.trigger == use_)
+        .and_then(|s| s.chance);
+    assert_eq!(chance, Some(0.67));
+    assert_eq!(
+        yalain_content::QuestTable::from_text(&t.quests.to_text()).unwrap(),
+        t.quests,
+        "it reads back as written"
+    );
+    let plain = compile(&merge(&read(&fixture()).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert!(
+        plain.quests.steps.iter().all(|s| s.chance.is_none()),
+        "a step naming none runs every time"
+    );
+    for bad in ["0.0", "1.5", "-0.2"] {
+        let messages: Vec<String> = check(&with(bad)).iter().map(ToString::to_string).collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("chance") && m.contains("above 0, at most 1")),
+            "{bad}: {messages:?}"
+        );
+    }
+}
+
 /// Behaviour: server.quests.cancel-waits-as-rows-say
 #[test]
 fn a_quest_row_may_name_its_wait_after_a_cancel() {
@@ -2699,6 +3014,246 @@ fn an_effect_rule_row_may_take_a_share_of_vitae_with_or_without_a_ward() {
     assert!(read(&files).is_ok(), "the whole of it");
 }
 
+/// Behaviour: server.skills.an-effect-trains-a-skill-for-good
+#[test]
+fn an_effect_rule_row_may_name_the_skill_an_effect_trains() {
+    let mut files = fixture();
+    files.insert(
+        "town/server/effects.toml".into(),
+        "[[effect_rule]]\neffect = 0x6F001A98\nskill = 925\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert_eq!(check(&files), Vec::new());
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert_eq!(
+        t.effect_rules.skills,
+        std::collections::BTreeMap::from([(0x6F00_1A98, 925)])
+    );
+    for skill in ["0", "-1", "\"recall\"", "1.5"] {
+        files.insert(
+            "town/server/effects.toml".into(),
+            format!(
+                "[[effect_rule]]\neffect = 0x6F001A98\nskill = {skill}\nprov = {{ from = \"authored\" }}\n"
+            ),
+        );
+        assert!(read(&files).is_err(), "{skill}");
+    }
+}
+
+/// An `[[effect_rule]]` row may name what an effect gives, a template of the install and a count (1
+/// when left out); a template the install lacks is a problem, and a count needs `gives` and is
+/// above 0.
+/// Behaviour: server.effects.a-rule-names-what-an-effect-gives
+#[test]
+fn an_effect_rule_row_may_name_the_items_an_effect_gives() {
+    use yalain_content::effect_rules::Grant;
+    let mut files = fixture();
+    files.insert(
+        "town/server/effects.toml".into(),
+        "[[effect_rule]]\neffect = 0x6F000D90\ngives = 0x4700115B\nprov = { from = \"authored\" }\n\n\
+         [[effect_rule]]\neffect = 0x6F000D98\ngives = 0x47002224\ncount = 3\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert_eq!(check(&files), Vec::new());
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert_eq!(
+        t.effect_rules.grants,
+        std::collections::BTreeMap::from([
+            (
+                0x6F00_0D90,
+                Grant {
+                    template: 0x4700_115B,
+                    count: 1
+                }
+            ),
+            (
+                0x6F00_0D98,
+                Grant {
+                    template: 0x4700_2224,
+                    count: 3
+                }
+            ),
+        ])
+    );
+    files.insert(
+        "town/server/effects.toml".into(),
+        "[[effect_rule]]\neffect = 0x6F000D90\ngives = 0x47009999\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    let problems = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap_err();
+    assert!(
+        problems.iter().any(|p| p
+            .to_string()
+            .contains("gives: template 47009999 is not in the install")),
+        "{problems:?}"
+    );
+    for bad in [
+        "gives = 0x4700115B\ncount = 0",
+        "gives = 0x4700115B\ncount = -1",
+        "gives = [0x4700115B]",
+        "gives = \"hide\"",
+        "count = 2",
+    ] {
+        files.insert(
+            "town/server/effects.toml".into(),
+            format!(
+                "[[effect_rule]]\neffect = 0x6F000D90\n{bad}\nprov = {{ from = \"authored\" }}\n"
+            ),
+        );
+        assert!(read(&files).is_err(), "{bad}");
+    }
+}
+
+/// A step's `requires` may name an act that must be whole: the step is served with it, an act no
+/// served scene is of is a problem, and a give names none.
+/// Behaviour: server.quests.a-step-waits-for-its-act-whole
+#[test]
+fn a_steps_requires_may_name_an_act_and_the_act_must_have_scenes() {
+    let mut files = fixture();
+    edit(
+        &mut files,
+        "town/server/quests/40000088.toml",
+        "update = \"bestow\"\n",
+        "update = \"bestow\"\nrequires = [{ act = 0x4000000C }]\n",
+    );
+    let merged = merge(&read(&files).unwrap()).unwrap();
+    let problems = compile(&merged, &Fake::new()).unwrap_err();
+    let messages: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(
+        messages[0].contains("requires: no scene of act 4000000C is served"),
+        "{messages:?}"
+    );
+    files.insert(
+        "town/server/story.toml".into(),
+        "[[scene]]\nid = 0x4000005A\nact = 0x4000000C\nnumber = 28\n\
+         name = { table = 0x250018A7, string = 0xD2F7ECB9 }\n\
+         keyframes = [{ seconds = 12.0, picture = 0x41004BD7, tracks = 0x01 }]\n\
+         prov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert_eq!(t.story.step_acts.len(), 1);
+    let (step, act) = &t.story.step_acts[0];
+    assert_eq!(*act, 0x4000_000C);
+    assert_eq!(step.trigger, Trigger::Use(0x4700_33D0));
+    assert!(t.quests.steps.contains(step), "the step itself is served");
+    assert!(step.requires.is_empty(), "no quest required");
+    // An act alone in its table, by its id; a give names none.
+    for bad in [
+        "requires = [{ act = 0x4000000C, quest = 0x40000016 }]",
+        "requires = [{ act = \"Osteth\" }]",
+    ] {
+        let mut f = files.clone();
+        edit(
+            &mut f,
+            "town/server/quests/40000088.toml",
+            "requires = [{ act = 0x4000000C }]",
+            bad,
+        );
+        assert!(read(&f).is_err(), "{bad}");
+    }
+    let mut f = files.clone();
+    f.insert(
+        "town/server/gives/470033D0.toml".into(),
+        "[[give]]\nkey = \"gem\"\nto = 0x470033D0\nitem = 0x470020BB\n\
+         requires = [{ act = 0x4000000C }]\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    let problems = check(&f);
+    assert!(
+        problems.iter().any(|p| p.message.contains("requires")),
+        "a give's act: {problems:?}"
+    );
+}
+
+/// A step's or a give's `requires` may name a quest failed, read back as written; failed beside
+/// another status, or not true, is not a requirement.
+/// Behaviour: server.quests.a-step-requires-a-quest-failed
+#[test]
+fn a_requires_may_name_a_quest_failed() {
+    let mut files = fixture();
+    edit(
+        &mut files,
+        "town/server/quests/40000088.toml",
+        "update = \"bestow\"\n",
+        "update = \"bestow\"\nrequires = [{ quest = 0x40000016, failed = true }]\n",
+    );
+    files.insert(
+        "town/server/gives/470033D0.toml".into(),
+        "[[give]]\nkey = \"gem\"\nto = 0x470033D0\nitem = 0x470020BB\n\
+         requires = [{ quest = 0x40000016, failed = true }]\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let step = t
+        .quests
+        .steps
+        .iter()
+        .find(|s| s.trigger == Trigger::Use(0x4700_33D0))
+        .expect("the step");
+    assert_eq!(step.requires, [(0x4000_0016, Need::Failed)]);
+    let give = t
+        .quests
+        .gives
+        .iter()
+        .find(|g| g.to == 0x4700_33D0)
+        .expect("the give");
+    assert_eq!(give.requires, [(0x4000_0016, Need::Failed)]);
+    assert_eq!(
+        yalain_content::QuestTable::from_text(&t.quests.to_text()).unwrap(),
+        t.quests,
+        "it reads back as written"
+    );
+    for bad in [
+        "requires = [{ quest = 0x40000016, failed = true, done = true }]",
+        "requires = [{ quest = 0x40000016, failed = false }]",
+        "requires = [{ quest = 0x40000016, failed = 1 }]",
+    ] {
+        let mut f = files.clone();
+        edit(
+            &mut f,
+            "town/server/quests/40000088.toml",
+            "requires = [{ quest = 0x40000016, failed = true }]",
+            bad,
+        );
+        assert!(read(&f).is_err() || !check(&f).is_empty(), "{bad}");
+    }
+}
+
+/// Behaviour: server.skills.an-effect-grants-a-reset
+#[test]
+fn an_effect_rule_row_may_name_the_reset_of_skills_an_effect_grants() {
+    use yalain_content::effect_rules::Reset;
+    let mut files = fixture();
+    files.insert(
+        "town/server/effects.toml".into(),
+        "[[effect_rule]]\neffect = 0x6F001911\nreset = \"skills\"\nprov = { from = \"authored\" }\n\n\
+         [[effect_rule]]\neffect = 0x6F001912\nreset = \"hero-skills\"\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert_eq!(check(&files), Vec::new());
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert_eq!(
+        t.effect_rules.resets,
+        std::collections::BTreeMap::from([
+            (0x6F00_1911, Reset::Skills),
+            (0x6F00_1912, Reset::HeroSkills)
+        ])
+    );
+    for word in ["\"craft-skills\"", "\"Skills\"", "1"] {
+        files.insert(
+            "town/server/effects.toml".into(),
+            format!(
+                "[[effect_rule]]\neffect = 0x6F001911\nreset = {word}\nprov = {{ from = \"authored\" }}\n"
+            ),
+        );
+        assert!(read(&files).is_err(), "{word}");
+    }
+}
+
 /// Behaviour: server.effects.immunities-as-rows-say
 #[test]
 fn an_effect_rule_row_may_name_what_an_immunity_leaves_as_it_ends() {
@@ -2839,6 +3394,120 @@ fn a_give_moving_no_quest_compiles_and_reads_back_as_written() {
     );
 }
 
+/// A step's or a give's `effects_quiet` is read, compiled and kept through the quest table's text;
+/// a world that says nothing keeps every row's effects telling their lines, and a row with no
+/// effects to keep quiet is a problem.
+/// Behaviour: server.effects.a-quiet-rows-effects-tell-no-line
+#[test]
+fn a_steps_or_a_gives_quiet_effects_are_read_compiled_and_need_effects() {
+    let plain = compile(&merge(&read(&fixture()).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert!(
+        plain.quests.steps.iter().all(|s| !s.effects_quiet),
+        "a world that says nothing: no step quiet"
+    );
+    let use_ = yalain_content::quests::Trigger::Use(0x4700_33D0);
+    let step = |extra: &str| {
+        let mut files = fixture();
+        edit(
+            &mut files,
+            "town/server/quests/40000088.toml",
+            "needs = 0\ntrigger = { use = 0x470033D0 }\n",
+            &format!("needs = 0\ntrigger = {{ use = 0x470033D0 }}\n{extra}"),
+        );
+        files
+    };
+    let files = step("effects = [0x6F0019F0]\neffects_quiet = true\n");
+    assert_eq!(check(&files), Vec::new());
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let quiet = t
+        .quests
+        .steps
+        .iter()
+        .find(|s| s.trigger == use_)
+        .map(|s| s.effects_quiet);
+    assert_eq!(quiet, Some(true));
+    assert_eq!(
+        yalain_content::QuestTable::from_text(&t.quests.to_text()).unwrap(),
+        t.quests,
+        "it reads back as written"
+    );
+
+    let mut files = fixture();
+    files.insert(
+        "town/server/gives/470033D0.toml".into(),
+        GIVE_ROW.replace("fx = ", "effects_quiet = true\nfx = "),
+    );
+    assert_eq!(check(&files), Vec::new());
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert!(t.quests.gives[0].effects_quiet);
+    assert_eq!(
+        yalain_content::QuestTable::from_text(&t.quests.to_text()).unwrap(),
+        t.quests,
+        "it reads back as written"
+    );
+    let mut files = fixture();
+    files.insert("town/server/gives/470033D0.toml".into(), GIVE_ROW.into());
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert!(!t.quests.gives[0].effects_quiet, "a give that says nothing");
+
+    let quiet_problem = |files: &Files| {
+        check(files)
+            .iter()
+            .map(ToString::to_string)
+            .any(|m| m.contains("effects_quiet") && m.contains("only a row with effects"))
+    };
+    assert!(quiet_problem(&step("effects_quiet = true\n")), "a step");
+    let mut files = fixture();
+    files.insert(
+        "town/server/gives/470033D0.toml".into(),
+        GIVE_ROW.replace("effects = [0x6F0019F0]\n", "effects_quiet = true\n"),
+    );
+    assert!(quiet_problem(&files), "a give");
+    assert!(read(&step("effects = [0x6F0019F0]\neffects_quiet = 1\n")).is_err());
+}
+
+/// A step's `to_fellows` is read, compiled and kept through the quest table's text; a world that
+/// says nothing takes no fellowship along, and a step that takes its player nowhere can't take the
+/// fellows.
+/// Behaviour: server.quests.a-step-takes-the-fellowship-along
+#[test]
+fn a_steps_fellowship_trip_is_read_compiled_and_needs_a_place() {
+    let plain = compile(&merge(&read(&fixture()).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert!(plain.quests.steps.iter().all(|s| !s.to_fellows));
+    let use_ = yalain_content::quests::Trigger::Use(0x4700_33D0);
+    let step = |extra: &str| {
+        let mut files = fixture();
+        edit(
+            &mut files,
+            "town/server/quests/40000088.toml",
+            "needs = 0\ntrigger = { use = 0x470033D0 }\n",
+            &format!("needs = 0\ntrigger = {{ use = 0x470033D0 }}\n{extra}"),
+        );
+        files
+    };
+    let files = step("to = \"inn\"\nto_fellows = true\n");
+    assert_eq!(check(&files), Vec::new());
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let s = t
+        .quests
+        .steps
+        .iter()
+        .find(|s| s.trigger == use_)
+        .expect("the step");
+    assert!(s.to_fellows && s.to.is_some());
+    assert_eq!(
+        yalain_content::QuestTable::from_text(&t.quests.to_text()).unwrap(),
+        t.quests,
+        "it reads back as written"
+    );
+    let nowhere = check(&step("to_fellows = true\n"))
+        .iter()
+        .map(ToString::to_string)
+        .any(|m| m.contains("to_fellows") && m.contains("takes its player somewhere"));
+    assert!(nowhere, "no place, no fellows taken");
+    assert!(read(&step("to = \"inn\"\nto_fellows = 1\n")).is_err());
+}
+
 /// Behaviour: server.gives.row-wants-a-count
 #[test]
 fn a_give_moving_no_quest_is_checked_for_what_it_wants_and_names() {
@@ -2920,6 +3589,231 @@ fn a_step_on_a_quest_given_compiles_and_reads_back_as_written() {
         t.quests,
         "it reads back as written"
     );
+}
+
+/// A `[[combination]]` row names a recipe that works out its own product, the templates its
+/// slots hold and what they make; it compiles into crafting's rows in their order, its product
+/// among what crafting makes, a template the install lacks is a problem, a key is set once, and
+/// a row with no templates or a count of 0 is refused.
+/// Behaviour: server.craft.combination-rows
+#[test]
+fn combination_rows_compile_in_order_and_hold_their_templates_to_the_install() {
+    use yalain_content::crafts::Combination;
+    let row = |body: &str| {
+        format!(
+            "[[combination]]\n{body}\nprov = {{ from = \"authored\", by = \"a test\", note = \"a test\" }}\n"
+        )
+    };
+    let good = format!(
+        "{}\n{}",
+        row("key = \"pair\"\nrecipe = 0x6F001ABB\nitems = [0x4700115B, 0x47002224]\nproduct = 0x47002224"),
+        row("key = \"twice\"\nrecipe = 0x6F001ABB\nitems = [0x4700115B, 0x4700115B]\nproduct = 0x4700115B\ncount = 2"),
+    );
+    let mut files = fixture();
+    files.insert("town/server/crafting.toml".into(), good.clone());
+    assert_eq!(check(&files), Vec::new());
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert_eq!(
+        t.crafts.combinations,
+        [
+            Combination {
+                key: "pair".into(),
+                recipe: 0x6F00_1ABB,
+                items: vec![0x4700_115B, 0x4700_2224],
+                product: 0x4700_2224,
+                count: 1,
+            },
+            Combination {
+                key: "twice".into(),
+                recipe: 0x6F00_1ABB,
+                items: vec![0x4700_115B, 0x4700_115B],
+                product: 0x4700_115B,
+                count: 2,
+            },
+        ]
+    );
+    assert!(
+        t.crafts.templates().any(|x| x == 0x4700_2224),
+        "its product is made"
+    );
+    let c = &t.crafts;
+    assert_eq!(
+        c.combination(0x6F00_1ABB, &[0x4700_2224, 0x4700_115B])
+            .map(|c| c.key.as_str()),
+        Some("pair"),
+        "in any order"
+    );
+    assert!(
+        c.combination(0x6F00_1ABB, &[0x4700_115B]).is_none(),
+        "one short"
+    );
+    assert!(
+        c.combination(0x6F00_1ABD, &[0x4700_115B, 0x4700_2224])
+            .is_none(),
+        "another recipe"
+    );
+
+    // A template the install lacks is a problem, a slot's or the product's.
+    for (from, to) in [
+        ("0x47002224]", "0x47009999]"),
+        ("product = 0x47002224", "product = 0x47009999"),
+    ] {
+        let mut lost = fixture();
+        lost.insert("town/server/crafting.toml".into(), good.replace(from, to));
+        let problems = compile(&merge(&read(&lost).unwrap()).unwrap(), &Fake::new()).unwrap_err();
+        assert!(
+            problems.iter().any(|p| p
+                .to_string()
+                .contains("template 47009999 is not in the install")),
+            "{to}: {problems:?}"
+        );
+    }
+
+    // One row a key.
+    let mut twice = files.clone();
+    twice.insert(
+        "town/server/more.toml".into(),
+        good.replace("count = 2", "count = 3"),
+    );
+    assert!(
+        check(&twice)
+            .iter()
+            .any(|p| p.message.contains("set twice")),
+        "{:?}",
+        check(&twice)
+    );
+
+    // Their shapes.
+    let base = "key = \"pair\"\nrecipe = 0x6F001ABB\nproduct = 0x47002224";
+    for bad in [
+        base.to_string(),
+        format!("{base}\nitems = []"),
+        format!("{base}\nitems = [0x47002224]\ncount = 0"),
+    ] {
+        let mut f = fixture();
+        f.insert("town/server/crafting.toml".into(), row(&bad));
+        assert!(!check(&f).is_empty(), "{bad}");
+    }
+}
+
+/// A recipe row names its id, the install recipe it is made from, its name, its slots (each one or
+/// more templates, how many, and what the slot says) and its product; it compiles into crafting's
+/// rows by its id, and a step names the recipes it teaches, which read back as written.
+/// Behaviour: server.craft.world-recipe-rows
+#[test]
+fn recipe_rows_compile_by_their_ids_and_a_step_names_the_recipes_it_teaches() {
+    use yalain_content::crafts::{Recipe, RecipeIngredient};
+    let row = |body: &str| {
+        format!(
+            "[[recipe]]\n{body}\nprov = {{ from = \"authored\", by = \"a test\", note = \"a test\" }}\n"
+        )
+    };
+    let good = row(
+        "recipe = 0x6F7E0001\nlike = 0x6F0002BE\nname = { table = 0x25002007, string = 0x00DD730E }\n\
+         ingredients = [{ items = [0x4700115B, 0x47002224], count = 2, name = { table = 0x25002007, string = 0x2FF03B27 } }, { items = [0x47002224] }]\n\
+         product = 0x47002224\ncount = 3\ncategory = 605",
+    );
+    let mut files = fixture();
+    files.insert("town/server/crafting.toml".into(), good.clone());
+    let quest = files["town/server/quests/40000088.toml"].clone();
+    files.insert(
+        "town/server/quests/40000088.toml".into(),
+        format!(
+            "{quest}\n[[step]]\nkey = \"teaches\"\nquest = 0x40000088\nneeds = 2\ntrigger = {{ use = 0x47002224 }}\nupdate = \"none\"\nrecipes = [0x6F7E0001, 0x6F0002BE]\nprov = {{ from = \"authored\", by = \"a test\", note = \"a test\" }}\n"
+        ),
+    );
+    assert_eq!(check(&files), Vec::new());
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert_eq!(
+        t.crafts.recipes.values().collect::<Vec<_>>(),
+        [&Recipe {
+            recipe: 0x6F7E_0001,
+            like: 0x6F00_02BE,
+            name: (0x00DD_730E, 0x2500_2007),
+            description: None,
+            ingredients: vec![
+                RecipeIngredient {
+                    items: vec![0x4700_115B, 0x4700_2224],
+                    count: 2,
+                    name: Some((0x2FF0_3B27, 0x2500_2007)),
+                },
+                RecipeIngredient {
+                    items: vec![0x4700_2224],
+                    count: 1,
+                    name: None,
+                },
+            ],
+            product: 0x4700_2224,
+            count: 3,
+            skill: None,
+            category: Some(605),
+        }]
+    );
+    assert!(
+        t.crafts.templates().any(|x| x == 0x4700_2224),
+        "its product is made"
+    );
+    let step = t
+        .quests
+        .steps
+        .iter()
+        .find(|s| s.recipes == [0x6F7E_0001, 0x6F00_02BE])
+        .expect("the step teaching them");
+    assert_eq!(step.update, yalain_content::quests::Update::Nothing);
+    assert_eq!(
+        yalain_content::QuestTable::from_text(&t.quests.to_text()).unwrap(),
+        t.quests,
+        "it reads back as written"
+    );
+
+    // A template the install lacks is a problem, a slot's or the product's.
+    for (from, to) in [
+        ("[0x47002224] }", "[0x47009999] }"),
+        ("product = 0x47002224", "product = 0x47009999"),
+    ] {
+        let mut lost = fixture();
+        lost.insert("town/server/crafting.toml".into(), good.replace(from, to));
+        let problems = compile(&merge(&read(&lost).unwrap()).unwrap(), &Fake::new()).unwrap_err();
+        assert!(
+            problems.iter().any(|p| p
+                .to_string()
+                .contains("template 47009999 is not in the install")),
+            "{to}: {problems:?}"
+        );
+    }
+
+    // One row an id.
+    let mut twice = files.clone();
+    twice.insert(
+        "town/server/more.toml".into(),
+        good.replace("count = 3", "count = 4"),
+    );
+    assert!(
+        check(&twice)
+            .iter()
+            .any(|p| p.message.contains("set twice")),
+        "{:?}",
+        check(&twice)
+    );
+
+    // Their shapes.
+    let base = "recipe = 0x6F7E0001\nlike = 0x6F0002BE\nname = { table = 0x25002007, string = 0x00DD730E }\nproduct = 0x47002224";
+    for bad in [
+        base.to_string(),
+        format!("{base}\ningredients = []"),
+        format!("{base}\ningredients = [{{ items = [] }}]"),
+        format!("{base}\ningredients = [{{ items = [0x47002224], count = 0 }}]"),
+        format!("{base}\ningredients = [{{ items = [0x47002224], what = 1 }}]"),
+        format!("{base}\ningredients = [{{ items = [0x47002224] }}]\ncount = 0"),
+        format!("{base}\ningredients = [{{ items = [0x47002224], name = 3 }}]"),
+        base.replace("like = 0x6F0002BE\n", "") + "\ningredients = [{ items = [0x47002224] }]",
+        base.replace("name = { table = 0x25002007, string = 0x00DD730E }\n", "")
+            + "\ningredients = [{ items = [0x47002224] }]",
+    ] {
+        let mut f = fixture();
+        f.insert("town/server/crafting.toml".into(), row(&bad));
+        assert!(read(&f).is_err(), "{bad}");
+    }
 }
 
 /// A death treasure row names a template or a camp (in another pack by `pack:key@XXYY`), an item and
@@ -3021,6 +3915,87 @@ fn a_death_treasure_row_names_a_template_or_a_camp_and_compiles_into_the_loot_ta
             "{bad}: {problems:?}"
         );
     }
+}
+
+/// A chest's death treasure row may name the quest its opener must hold, and where (`requires`, as
+/// an object's): it compiles into the loot table with that gate, which reads back as written; a
+/// camp's may not; one whose quest has no row is warned of.
+/// Behaviour: server.content.death-treasure-for-a-quest-row
+#[test]
+fn a_death_treasure_row_may_name_the_quest_a_chests_opener_must_hold() {
+    use yalain_content::{LootTable, QuestGate};
+    let row = |dropper: &str, requires: &str| {
+        format!(
+            "[[death_treasure]]\nkey = \"piece\"\n{dropper}\nitem = 0x47000001\nchance = 1.0\n\
+             requires = {requires}\nprov = {{ from = \"authored\", note = \"a test\" }}\n"
+        )
+    };
+    let with = |text: String| {
+        let mut files = fixture();
+        files.insert("town-fixes/server/death_treasures.toml".into(), text);
+        files
+    };
+    for (requires, status) in [
+        ("{ quest = 0x40000088, phase = 1 }", 0x1000_0001),
+        ("{ quest = 0x40000088, underway = true }", 0x1000_0000),
+        ("{ quest = 0x40000088, done = true }", 0x3000_0000),
+    ] {
+        let files = with(row("template = 0x47002224", requires));
+        assert_eq!(check(&files), Vec::new(), "{requires}");
+        let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+        assert_eq!(
+            t.loot
+                .treasures
+                .iter()
+                .map(|d| d.requires)
+                .collect::<Vec<_>>(),
+            [Some(QuestGate {
+                quest: 0x4000_0088,
+                status
+            })],
+            "{requires}"
+        );
+        assert!(
+            !t.warnings
+                .iter()
+                .any(|w| w.to_string().contains("requires")),
+            "{:?}",
+            t.warnings
+        );
+        assert_eq!(
+            LootTable::from_text(&t.loot.to_text()).unwrap(),
+            t.loot,
+            "it reads back as written"
+        );
+    }
+    let problems = check(&with(row(
+        "camp = \"town:beetles@77B7\"",
+        "{ quest = 0x40000088, phase = 1 }",
+    )));
+    assert!(
+        problems.iter().any(|p| p.to_string().contains("a chest's")),
+        "{problems:?}"
+    );
+    let problems = check(&with(row(
+        "template = 0x47002224",
+        "{ quest = 0x40000088 }",
+    )));
+    assert!(
+        problems.iter().any(|p| p.to_string().contains("requires")),
+        "a gate with no status: {problems:?}"
+    );
+    let files = with(row(
+        "template = 0x47002224",
+        "{ quest = 0x40009999, phase = 1 }",
+    ));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert!(
+        t.warnings
+            .iter()
+            .any(|w| w.to_string().contains("quest 40009999 has no row")),
+        "{:?}",
+        t.warnings
+    );
 }
 
 #[test]
@@ -3129,6 +4104,49 @@ fn an_effect_name_row_compiles_to_the_state_its_name_stands_for() {
     }
 }
 
+/// Two objects of one template at one place, each naming its own event, compile to gates of their
+/// own.
+#[test]
+fn objects_alike_at_one_place_compile_to_their_own_event_gates() {
+    let mut files = fixture();
+    files.insert(
+        "town/server/events.toml".into(),
+        "[[event]]\nkey = \"fair\"\nwhen = [{ days = [\"sat\"], from = \"10:00\", until = \"12:00\" }]\n\
+         prov = { from = \"authored\" }\n\n\
+         [[event]]\nkey = \"market\"\nwhen = [{ days = [\"sun\"], from = \"10:00\", until = \"12:00\" }]\n\
+         prov = { from = \"authored\" }\n"
+            .into(),
+    );
+    for (key, id, event) in [("booth-a", 3, "fair"), ("booth-b", 4, "market")] {
+        files
+            .get_mut("town/server/landblocks/77B7.toml")
+            .unwrap()
+            .push_str(&format!(
+                "\n[[object]]\nkey = \"{key}\"\nkind = \"static\"\nid = 0x4077B7000000000{id}\n\
+                 template = 0x4700115B\nat = [118.0, 114.0, 250.0]\nevent = \"{event}\"\n\
+                 prov = {{ from = \"authored\" }}\n"
+            ));
+    }
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let at = |id: u64| {
+        t.content
+            .objects
+            .iter()
+            .position(|o| o.object == Some(id))
+            .unwrap()
+    };
+    let (fair, market) = (at(0x4077_B700_0000_0003), at(0x4077_B700_0000_0004));
+    let (a, b) = (&t.content.objects[fair], &t.content.objects[market]);
+    assert_eq!(
+        (a.template, a.cell, a.origin),
+        (b.template, b.cell, b.origin)
+    );
+    let ev = &t.content.events;
+    assert_eq!(ev.of_object(fair), Some("fair"));
+    assert_eq!(ev.of_object(market), Some("market"));
+}
+
 #[test]
 fn an_event_row_reads_its_windows_and_gates_compile_to_the_event_table() {
     use yalain_content::events::Window;
@@ -3195,6 +4213,13 @@ fn an_event_row_reads_its_windows_and_gates_compile_to_the_event_table() {
     assert_eq!(ev.events.len(), 1);
     assert_eq!(ev.of_camp("beetles"), Some("fair"));
     assert_eq!(ev.objects.len(), 1);
+    let gate = t
+        .content
+        .objects
+        .iter()
+        .position(|o| o.object == Some(0x4077_B700_0000_0001))
+        .unwrap();
+    assert_eq!(ev.of_object(gate), Some("fair"));
     assert_eq!(ev.steps.len(), 1);
     assert_eq!(
         ev.steps[0].0.requires.len(),
@@ -3224,6 +4249,323 @@ fn an_event_row_reads_its_windows_and_gates_compile_to_the_event_table() {
         );
         assert!(read(&f).is_err(), "{bad}");
     }
+}
+
+/// The test world with a tally of supplies that starts and resets on an event with no windows of
+/// its own, the bestowing step waiting on it not yet full and adding to it, a give adding to it,
+/// the greeting said only while it is full and a line saying its count.
+fn tally_world() -> Files {
+    let mut files = fixture();
+    files.insert(
+        "town/server/events.toml".into(),
+        "[[event]]\nkey = \"festival\"\nprov = { from = \"authored\" }\n\n\
+         [[tally]]\nkey = \"supplies\"\nfull = 100\n\
+         starts = { event = \"festival\", after = 120, lasts = 1800 }\n\
+         resets = { event = \"festival\" }\nclears = [0x470020B9]\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    edit(
+        &mut files,
+        "town/server/quests/40000088.toml",
+        "update = \"bestow\"\n",
+        "update = \"bestow\"\nrequires = [{ tally = \"supplies\", full = false }]\n\
+         adds = { tally = \"supplies\", by = 25 }\n",
+    );
+    files.insert(
+        "town/server/gives/470033D0.toml".into(),
+        "[[give]]\nkey = \"wood\"\nto = 0x470033D0\nitem = 0x470020BB\n\
+         requires = [{ tally = \"supplies\", full = false }]\n\
+         adds = { tally = \"supplies\", by = 10 }\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    edit(
+        &mut files,
+        "town/server/talk/470033D0.toml",
+        "role = \"near\"\n",
+        "role = \"near\"\nrequires = [{ tally = \"supplies\", full = true }]\n",
+    );
+    let talk = files.get_mut("town/server/talk/470033D0.toml").unwrap();
+    talk.push_str(
+        "\n[[talk]]\nkey = \"count\"\nwho = 0x470033D0\n\
+         line = { table = 0x25002A76, string = 0x0378A89C }\nrole = \"use\"\nwhen = \"use\"\n\
+         fills = \"supplies\"\nfull_line = { table = 0x25002A76, string = 0x5B21F83D }\n\
+         prov = { from = \"authored\" }\n",
+    );
+    files
+}
+
+#[test]
+fn a_tally_row_reads_and_its_gates_adds_and_counted_lines_compile_to_the_tally_table() {
+    use yalain_content::tallies::{Adds, Gate, Holds, Reset, Start};
+    let files = tally_world();
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let db = read(&files).unwrap();
+    let tally = db
+        .rows()
+        .find_map(|l| match &l.row {
+            Row::Tally(t) => Some(t.tally.clone()),
+            _ => None,
+        })
+        .expect("the tally");
+    assert_eq!(tally.full, 100);
+    assert_eq!(
+        tally.starts,
+        Some(Start {
+            event: "festival".into(),
+            after: 120,
+            lasts: 1800
+        })
+    );
+    assert_eq!(tally.resets, Reset::Ends("festival".into()));
+    assert_eq!(tally.clears, vec![0x4700_20B9]);
+    let t = compile(&merge(&db).unwrap(), &Fake::new()).unwrap();
+    let ev = &t.content.events;
+    assert!(
+        ev.event("festival").is_some_and(|e| e.windows.is_empty()),
+        "an event with no windows"
+    );
+    let x = &t.content.tallies;
+    assert_eq!(x.tallies, vec![tally]);
+    let not_full = Gate {
+        tally: "supplies".into(),
+        holds: Holds::NotFull,
+    };
+    assert_eq!(x.steps.len(), 1);
+    assert_eq!(x.steps[0].0.update, Update::Bestow);
+    assert_eq!(x.steps[0].1, not_full);
+    assert_eq!(
+        x.step_adds
+            .iter()
+            .map(|(_, a)| a.clone())
+            .collect::<Vec<_>>(),
+        vec![Adds {
+            tally: "supplies".into(),
+            by: 25
+        }]
+    );
+    assert_eq!(x.gives.len(), 1);
+    assert_eq!(x.gives[0].0.item, Some(0x4700_20BB));
+    assert_eq!(x.give_adds[0].1.by, 10);
+    assert_eq!(x.lines.len(), 1);
+    assert_eq!(x.lines[0].0.role, Some(Role::Near));
+    assert_eq!(x.lines[0].1.holds, Holds::Full);
+    // A count at least and below so many is two gates; one the tally never reaches is a problem.
+    let mut f = files.clone();
+    edit(
+        &mut f,
+        "town/server/talk/470033D0.toml",
+        "{ tally = \"supplies\", full = true }",
+        "{ tally = \"supplies\", at_least = 20, below = 40 }",
+    );
+    let t = compile(&merge(&read(&f).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let held: Vec<Holds> = t
+        .content
+        .tallies
+        .lines
+        .iter()
+        .map(|(_, g)| g.holds)
+        .collect();
+    assert_eq!(held, vec![Holds::AtLeast(20), Holds::Below(40)]);
+    edit(
+        &mut f,
+        "town/server/talk/470033D0.toml",
+        "at_least = 20, below = 40",
+        "at_least = 120",
+    );
+    assert!(
+        check(&f)
+            .iter()
+            .any(|p| p.message.contains("never reaches 120")),
+        "{:?}",
+        check(&f)
+    );
+    let f = x
+        .fill_of(&Words::Ref(COUNT_LINE.0, COUNT_LINE.1))
+        .expect("the count line");
+    assert_eq!(f.tally, "supplies");
+    assert_eq!(f.variable, COUNT_VARIABLE, "the line's one variable");
+    assert_eq!(f.full, Some(Words::Ref(0x5B21_F83D, 0x2500_2A76)));
+    // A tally a row names and no row is, and an event no tally starts or a tally's start names,
+    // are problems.
+    for (path, from, to, problem) in [
+        (
+            "town/server/quests/40000088.toml",
+            "tally = \"supplies\", full",
+            "tally = \"stores\", full",
+            "requires: no [[tally]] stores",
+        ),
+        (
+            "town/server/quests/40000088.toml",
+            "adds = { tally = \"supplies\"",
+            "adds = { tally = \"stores\"",
+            "adds: no [[tally]] stores",
+        ),
+        (
+            "town/server/talk/470033D0.toml",
+            "fills = \"supplies\"",
+            "fills = \"stores\"",
+            "fills: no [[tally]] stores",
+        ),
+        (
+            "town/server/events.toml",
+            "starts = { event = \"festival\"",
+            "starts = { event = \"fair\"",
+            "starts: no [[event]] fair",
+        ),
+    ] {
+        let mut f = files.clone();
+        edit(&mut f, path, from, to);
+        let problems = check(&f);
+        assert!(
+            problems.iter().any(|p| p.message.contains(problem)),
+            "{problem}: {problems:?}"
+        );
+    }
+    let mut f = files.clone();
+    edit(
+        &mut f,
+        "town/server/events.toml",
+        "starts = { event = \"festival\", after = 120, lasts = 1800 }\n",
+        "",
+    );
+    assert!(
+        check(&f)
+            .iter()
+            .any(|p| p.message.contains("an event with no windows")),
+        "{:?}",
+        check(&f)
+    );
+    // The count fills one variable of the install's text: a literal, or a string of none, is a
+    // problem; and a full line goes only with a count.
+    for (from, to, problem) in [
+        (
+            "line = { table = 0x25002A76, string = 0x0378A89C }\nrole = \"use\"",
+            "line_text = \"Ready: |\"\nrole = \"use\"",
+            "fills: the count fills a variable",
+        ),
+        (
+            "line = { table = 0x25002A76, string = 0x0378A89C }\nrole = \"use\"",
+            "line = { table = 0x25002A76, string = 0x0378A89D }\nrole = \"use\"",
+            "takes 0 variables",
+        ),
+        (
+            "fills = \"supplies\"\n",
+            "",
+            "full_line: a line says another",
+        ),
+    ] {
+        let mut f = files.clone();
+        edit(&mut f, "town/server/talk/470033D0.toml", from, to);
+        let problems = compile(&merge(&read(&f).unwrap()).unwrap(), &Fake::new())
+            .err()
+            .unwrap_or_default();
+        assert!(
+            problems.iter().any(|p| p.message.contains(problem)),
+            "{problem}: {problems:?}"
+        );
+    }
+    // Rows that break the schema.
+    for (path, from, to) in [
+        ("town/server/events.toml", "full = 100", "full = 0"),
+        ("town/server/events.toml", "lasts = 1800", "lasts = 0"),
+        (
+            "town/server/events.toml",
+            "resets = { event = \"festival\" }",
+            "resets = { every = 0 }",
+        ),
+        (
+            "town/server/events.toml",
+            "resets = { event = \"festival\" }",
+            "resets = { event = \"festival\", every = 86400 }",
+        ),
+        ("town/server/quests/40000088.toml", "by = 25", "by = 0"),
+        (
+            "town/server/quests/40000088.toml",
+            "{ tally = \"supplies\", full = false }",
+            "{ tally = \"supplies\" }",
+        ),
+        (
+            "town/server/talk/470033D0.toml",
+            "{ tally = \"supplies\", full = true }",
+            "{ quest = 0x40000088, done = true }",
+        ),
+        (
+            "town/server/talk/470033D0.toml",
+            "full = true",
+            "at_least = 0",
+        ),
+        (
+            "town/server/talk/470033D0.toml",
+            "full = true",
+            "at_least = 30, below = 30",
+        ),
+        (
+            "town/server/talk/470033D0.toml",
+            "full = true",
+            "full = true, at_least = 30",
+        ),
+    ] {
+        let mut f = files.clone();
+        edit(&mut f, path, from, to);
+        assert!(read(&f).is_err(), "{to}");
+    }
+}
+
+/// Two steps alike but for their tally gates and adds keep their own, by their keys: the bestowing
+/// step waits on the supplies not full and adds 25; its twin, which waits on them full, adds
+/// nothing.
+#[test]
+fn steps_alike_but_for_their_tallies_keep_their_own_gates_and_adds() {
+    use yalain_content::tallies::{Adds, Gate, Holds};
+    let mut files = tally_world();
+    let quest = files.get_mut("town/server/quests/40000088.toml").unwrap();
+    quest.push_str(
+        "\n[[step]]\nkey = \"s1-full\"\nquest = 0x40000088\nneeds = 0\ntrigger = { use = 0x470033D0 }\n\
+         tell = { table = 0x25002881, string = 0x2824FD4C }\nupdate = \"bestow\"\n\
+         requires = [{ tally = \"supplies\", full = true }]\nprov = { from = \"authored\" }\n",
+    );
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let step = |key: &str| {
+        t.quests
+            .steps
+            .iter()
+            .find(|s| s.key == key)
+            .unwrap_or_else(|| panic!("step {key}"))
+    };
+    let (short, full) = (step("s1"), step("s1-full"));
+    assert_eq!(
+        yalain_content::quests::Step {
+            key: String::new(),
+            ..short.clone()
+        },
+        yalain_content::quests::Step {
+            key: String::new(),
+            ..full.clone()
+        },
+        "alike but for their keys"
+    );
+    let x = &t.content.tallies;
+    let gate = |holds| Gate {
+        tally: "supplies".into(),
+        holds,
+    };
+    assert_eq!(
+        x.of_step(short).cloned().collect::<Vec<_>>(),
+        [gate(Holds::NotFull)]
+    );
+    assert_eq!(
+        x.of_step(full).cloned().collect::<Vec<_>>(),
+        [gate(Holds::Full)]
+    );
+    assert_eq!(
+        x.step_adds(short).cloned().collect::<Vec<_>>(),
+        [Adds {
+            tally: "supplies".into(),
+            by: 25
+        }]
+    );
+    assert_eq!(x.step_adds(full).count(), 0);
 }
 
 #[test]
@@ -3412,6 +4754,278 @@ fn item_use_book_and_start_item_rows_compile_and_bad_ones_are_problems() {
 }
 
 #[test]
+fn interaction_rows_compile_and_bad_ones_are_problems() {
+    use yalain_content::item_rows::{Interaction, On};
+    let mut files = fixture();
+    files.insert(
+        "town/server/items.toml".into(),
+        "[[interaction]]\nkey = \"by-class\"\nitem = 0x4700115B\non_class = 4441\ngives = 0x47002224\ngated_gives = 0x4700115B\nprov = { from = \"authored\" }\n\n\
+         [[interaction]]\nkey = \"by-template\"\nitem = 0x4700115B\non = 0x47002224\ngives = 0x47002224\ncount = 2\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    let db = read(&files).unwrap();
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&db).unwrap(), &Fake::new()).unwrap();
+    assert_eq!(
+        t.items.interactions,
+        [
+            Interaction {
+                item: 0x4700_115B,
+                on: On::Class(4441),
+                gives: vec![(0x4700_2224, 1)],
+                count: 1,
+                gated_gives: vec![(0x4700_115B, 1)],
+                places: Vec::new(),
+            },
+            Interaction {
+                item: 0x4700_115B,
+                on: On::Template(0x4700_2224),
+                gives: vec![(0x4700_2224, 1)],
+                count: 2,
+                gated_gives: Vec::new(),
+                places: Vec::new(),
+            },
+        ],
+        "in the rows' order, one when the count is left out"
+    );
+    assert_eq!(
+        (
+            t.items.interactions[0].gives_where(true),
+            t.items.interactions[0].gives_where(false),
+            t.items.interactions[1].gives_where(true),
+        ),
+        (
+            &[(0x4700_115B, 1)][..],
+            &[(0x4700_2224, 1)][..],
+            &[(0x4700_2224, 1)][..]
+        ),
+        "a row's gated_gives where the interaction met is for some characters only"
+    );
+    assert!(
+        t.items.given().any(|g| g == 0x4700_2224),
+        "what they give is made"
+    );
+
+    // A template the install lacks is a problem, the item's, what it is used on or what it gives.
+    for field in [
+        "item = 0x47009999\non_class = 4441\ngives = 0x47002224",
+        "item = 0x4700115B\non = 0x47009999\ngives = 0x47002224",
+        "item = 0x4700115B\non_class = 4441\ngives = 0x47009999",
+        "item = 0x4700115B\non_class = 4441\ngives = 0x47002224\ngated_gives = 0x47009999",
+    ] {
+        let mut lost = fixture();
+        lost.insert(
+            "town/server/items.toml".into(),
+            format!("[[interaction]]\nkey = \"lost\"\n{field}\nprov = {{ from = \"authored\" }}\n"),
+        );
+        let problems = compile(&merge(&read(&lost).unwrap()).unwrap(), &Fake::new()).unwrap_err();
+        assert!(
+            problems.iter().any(|p| p
+                .to_string()
+                .contains("template 47009999 is not in the install")),
+            "{field}: {problems:?}"
+        );
+    }
+
+    // One row a key.
+    let mut twice = files.clone();
+    twice.insert(
+        "town/server/more.toml".into(),
+        "[[interaction]]\nkey = \"by-class\"\nitem = 0x4700115B\non_class = 4442\ngives = 0x47002224\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert!(
+        check(&twice)
+            .iter()
+            .any(|p| p.message.contains("set twice")),
+        "{:?}",
+        check(&twice)
+    );
+
+    // Their shapes.
+    for bad in [
+        "key = \"x\"\nitem = 0x4700115B\ngives = 0x47002224",
+        "key = \"x\"\nitem = 0x4700115B\non = 0x47002224\non_class = 4441\ngives = 0x47002224",
+        "key = \"x\"\nitem = 0x4700115B\non_class = 4441",
+        "key = \"x\"\non_class = 4441\ngives = 0x47002224",
+        "item = 0x4700115B\non_class = 4441\ngives = 0x47002224",
+        "key = \"x\"\nitem = 0x4700115B\non_class = 4441\ngives = 0x47002224\ncount = 0",
+        "key = \"x\"\nitem = 0x4700115B\non_class = 4441\ngives = [0x47002224]",
+        "key = \"x\"\nitem = 0x4700115B\non_class = 4441\ngives = 0x47002224\ngated_gives = \"no\"",
+    ] {
+        let mut f = fixture();
+        f.insert(
+            "town/server/items.toml".into(),
+            format!("[[interaction]]\n{bad}\nprov = {{ from = \"authored\" }}\n"),
+        );
+        assert!(read(&f).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn interaction_rows_may_name_what_they_make_at_their_object() {
+    use yalain_content::effect_rules::Placing;
+    let mut files = fixture();
+    files.insert(
+        "town/server/items.toml".into(),
+        "[[interaction]]\nkey = \"cache\"\nitem = 0x4700115B\non = 0x47002224\n\
+         places = [{ template = 0x470020B9, lasts = 1200 }, { template = 0x470020BB, offset = [3, -1.5] }]\n\
+         prov = { from = \"authored\" }\n"
+            .into(),
+    );
+    let db = read(&files).unwrap();
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&db).unwrap(), &Fake::new()).unwrap();
+    let made = &t.items.interactions[0];
+    assert!(made.gives.is_empty(), "nothing given with places alone");
+    assert_eq!(
+        made.places,
+        [
+            Placing {
+                template: 0x4700_20B9,
+                offset: [0.0, 0.0],
+                lasts: Some(1200),
+                name: None,
+            },
+            Placing {
+                template: 0x4700_20BB,
+                offset: [3.0, -1.5],
+                lasts: None,
+                name: None,
+            },
+        ]
+    );
+
+    // A template the install lacks is a problem.
+    let mut lost = fixture();
+    lost.insert(
+        "town/server/items.toml".into(),
+        "[[interaction]]\nkey = \"lost\"\nitem = 0x4700115B\non = 0x47002224\n\
+         places = [{ template = 0x47009999 }]\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    let problems = compile(&merge(&read(&lost).unwrap()).unwrap(), &Fake::new()).unwrap_err();
+    assert!(
+        problems.iter().any(|p| p
+            .to_string()
+            .contains("template 47009999 is not in the install")),
+        "{problems:?}"
+    );
+
+    // Their shapes.
+    for bad in [
+        "places = []",
+        "places = [{ offset = [0, 1] }]",
+        "places = [{ template = 0x470020B9, lasts = 0 }]",
+        "places = [{ template = 0x470020B9, offset = [1] }]",
+        "places = [{ template = 0x470020B9, count = 2 }]",
+        "places = 0x470020B9",
+    ] {
+        let mut f = fixture();
+        f.insert(
+            "town/server/items.toml".into(),
+            format!(
+                "[[interaction]]\nkey = \"x\"\nitem = 0x4700115B\non = 0x47002224\n{bad}\nprov = {{ from = \"authored\" }}\n"
+            ),
+        );
+        assert!(read(&f).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn rows_giving_one_of_several_items_compile_and_bad_ones_are_problems() {
+    let mut files = fixture();
+    files.insert(
+        "town/server/items.toml".into(),
+        "[[interaction]]\nkey = \"fortune\"\nitem = 0x4700115B\non_class = 4441\n\
+         gives_one_of = [{ template = 0x47002224, weight = 1 }, { template = 0x470020B9, weight = 1 }]\n\
+         gated_gives_one_of = [{ template = 0x4700115B, weight = 3 }, { template = 0x470020BB, weight = 1 }]\n\
+         prov = { from = \"authored\" }\n"
+            .into(),
+    );
+    edit(
+        &mut files,
+        "town/server/quests/40000088.toml",
+        "xp = 40\ngives = [0x470020B9]\n",
+        "xp = 40\ngives = [0x470020B9]\ngives_one_of = [{ template = 0x47002224, weight = 2 }, { template = 0x4700115B, weight = 1 }]\n",
+    );
+    files.insert(
+        "town/server/gives/470033D0.toml".into(),
+        "[[give]]\nkey = \"gem\"\nto = 0x470033D0\nitem = 0x470020BB\n\
+         gives_one_of = [{ template = 0x470020B9, weight = 1 }, { template = 0x4700115B, weight = 1 }]\n\
+         prov = { from = \"authored\" }\n"
+            .into(),
+    );
+    let db = read(&files).unwrap();
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&db).unwrap(), &Fake::new()).unwrap();
+    let made = &t.items.interactions[0];
+    assert_eq!(made.gives, [(0x4700_2224, 1), (0x4700_20B9, 1)]);
+    assert_eq!(made.gated_gives, [(0x4700_115B, 3), (0x4700_20BB, 1)]);
+    assert_eq!(t.items.step_picks.len(), 1);
+    let (step, pick) = &t.items.step_picks[0];
+    assert_eq!(step.key, "s3");
+    assert_eq!(step.gives, [0x4700_20B9], "its own gives kept beside it");
+    assert_eq!(pick, &[(0x4700_2224, 2), (0x4700_115B, 1)]);
+    assert_eq!(t.items.step_pick(step), Some(&pick[..]));
+    assert_eq!(t.items.give_picks.len(), 1);
+    let (give, pick) = &t.items.give_picks[0];
+    assert!(t.quests.gives.contains(give), "the give itself is served");
+    assert_eq!(pick, &[(0x4700_20B9, 1), (0x4700_115B, 1)]);
+    let given: Vec<u32> = t.items.given().collect();
+    for g in [0x4700_2224, 0x4700_20B9, 0x4700_115B, 0x4700_20BB] {
+        assert!(given.contains(&g), "{g:08X} is made");
+    }
+
+    // A template the install lacks is a problem.
+    let mut lost = files.clone();
+    lost.insert(
+        "town/server/gives/470033D0.toml".into(),
+        "[[give]]\nkey = \"gem\"\nto = 0x470033D0\nitem = 0x470020BB\n\
+         gives_one_of = [{ template = 0x47009999, weight = 1 }, { template = 0x4700115B, weight = 1 }]\n\
+         prov = { from = \"authored\" }\n"
+            .into(),
+    );
+    let problems = compile(&merge(&read(&lost).unwrap()).unwrap(), &Fake::new()).unwrap_err();
+    assert!(
+        problems.iter().any(|p| p
+            .to_string()
+            .contains("gives_one_of: template 47009999 is not in the install")),
+        "{problems:?}"
+    );
+
+    // At least two, each weight above 0, each { template, weight } alone; gives or gives_one_of,
+    // not both, and the gated likewise.
+    let two = "[{ template = 0x47002224, weight = 1 }, { template = 0x470020B9, weight = 1 }]";
+    for bad in [
+        "gives_one_of = [{ template = 0x47002224, weight = 1 }]".to_string(),
+        "gives_one_of = [{ template = 0x47002224, weight = 0 }, { template = 0x470020B9, weight = 1 }]".into(),
+        "gives_one_of = [{ template = 0x47002224 }, { template = 0x470020B9, weight = 1 }]".into(),
+        "gives_one_of = [{ template = 0x47002224, weight = 1, count = 2 }, { template = 0x470020B9, weight = 1 }]".into(),
+        "gives_one_of = [0x47002224, 0x470020B9]".into(),
+        format!("gives = 0x47002224\ngives_one_of = {two}"),
+        format!("gives = 0x47002224\ngated_gives = 0x47002224\ngated_gives_one_of = {two}"),
+    ] {
+        let mut f = fixture();
+        f.insert(
+            "town/server/items.toml".into(),
+            format!(
+                "[[interaction]]\nkey = \"x\"\nitem = 0x4700115B\non_class = 4441\n{bad}\nprov = {{ from = \"authored\" }}\n"
+            ),
+        );
+        assert!(read(&f).is_err(), "interaction: {bad}");
+    }
+    let mut f = fixture();
+    f.insert(
+        "town/server/gives/470033D0.toml".into(),
+        "[[give]]\nkey = \"gem\"\nto = 0x470033D0\nitem = 0x470020BB\n\
+         gives_one_of = [{ template = 0x470020B9, weight = 1 }]\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert!(read(&f).is_err(), "a give's single pick");
+}
+
+#[test]
 fn points_bonus_rows_and_kingdom_requirements_compile_and_bad_ones_are_problems() {
     use yalain_content::kingdoms::{kingdom, PointsBonus};
     let mut files = fixture();
@@ -3522,6 +5136,370 @@ fn points_bonus_rows_and_kingdom_requirements_compile_and_bad_ones_are_problems(
 }
 
 #[test]
+fn craft_skill_requirements_compile_beside_their_steps_and_gives_and_bad_ones_are_problems() {
+    use yalain_content::crafts::CraftGate;
+    let mut files = fixture();
+    edit(
+        &mut files,
+        "town/server/quests/40000088.toml",
+        "update = \"bestow\"\n",
+        "update = \"bestow\"\nrequires = [{ craft = 0x6F000695, at_least = 200 }]\n",
+    );
+    files.insert(
+        "town/server/gives/470033D0.toml".into(),
+        "[[give]]\nkey = \"gem\"\nto = 0x470033D0\nitem = 0x470020BB\neffects = [0x6F00188E]\n\
+         requires = [{ quest = 0x40000016, done = true }, { craft = [0x6F000691, 0x6F000693], at_least = 100 }]\n\
+         prov = { from = \"authored\" }\n"
+            .into(),
+    );
+    let db = read(&files).unwrap();
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&db).unwrap(), &Fake::new()).unwrap();
+    let gates = &t.content.craft_gates;
+    assert_eq!(gates.steps.len(), 1);
+    assert_eq!(gates.steps[0].0.trigger, Trigger::Use(0x4700_33D0));
+    assert_eq!(
+        gates.steps[0].1,
+        CraftGate {
+            skills: vec![0x6F00_0695],
+            at_least: 200
+        }
+    );
+    assert!(
+        t.quests.steps.contains(&gates.steps[0].0),
+        "the step itself is served"
+    );
+    assert_eq!(gates.gives.len(), 1);
+    let (give, gate) = &gates.gives[0];
+    assert_eq!(
+        *gate,
+        CraftGate {
+            skills: vec![0x6F00_0691, 0x6F00_0693],
+            at_least: 100
+        }
+    );
+    assert_eq!(
+        give.requires,
+        [(0x4000_0016, Need::Done)],
+        "the quest it requires is kept beside the craft skill"
+    );
+    assert!(t.quests.gives.contains(give), "the give itself is served");
+
+    // A skill or a list of them and a level above 0, alone in their table.
+    for bad in [
+        "requires = [{ craft = 0x6F000695 }]",
+        "requires = [{ craft = 0x6F000695, at_least = 0 }]",
+        "requires = [{ craft = [], at_least = 200 }]",
+        "requires = [{ craft = \"armor\", at_least = 200 }]",
+        "requires = [{ craft = 0x6F000695, at_least = 200, below = 300 }]",
+        "requires = [{ craft = 0x6F000695, at_least = 200, quest = 0x40000016 }]",
+    ] {
+        let mut f = files.clone();
+        f.insert(
+            "town/server/gives/470033D0.toml".into(),
+            format!(
+                "[[give]]\nkey = \"gem\"\nto = 0x470033D0\nitem = 0x470020BB\n{bad}\nprov = {{ from = \"authored\" }}\n"
+            ),
+        );
+        let problems = check(&f);
+        assert!(
+            problems.iter().any(|p| p.message.contains("requires")),
+            "{bad}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn hero_requirements_compile_beside_their_steps_and_gives() {
+    let mut files = fixture();
+    edit(
+        &mut files,
+        "town/server/quests/40000088.toml",
+        "update = \"bestow\"\n",
+        "update = \"bestow\"\n\
+         requires = [{ hero = true }]\n",
+    );
+    files.insert(
+        "town/server/gives/470033D0.toml".into(),
+        "[[give]]\n\
+         key = \"medal\"\n\
+         to = 0x470033D0\n\
+         item = 0x470020BB\n\
+         requires = [{ quest = 0x40000016, done = true }, { hero = true }]\n\
+         prov = { from = \"authored\" }\n\
+         \n\
+         [[give]]\n\
+         key = \"plain\"\n\
+         to = 0x470033D0\n\
+         item = 0x470020B9\n\
+         prov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let gates = &t.content.hero_gates;
+    assert_eq!(gates.steps.len(), 1);
+    assert_eq!(gates.steps[0].trigger, Trigger::Use(0x4700_33D0));
+    assert!(
+        t.quests.steps.contains(&gates.steps[0]),
+        "the step itself is served"
+    );
+    assert_eq!(gates.gives.len(), 1, "only the give for heroes");
+    let give = &gates.gives[0];
+    assert_eq!(give.item, Some(0x4700_20BB));
+    assert_eq!(
+        give.requires,
+        [(0x4000_0016, Need::Done)],
+        "the quest it requires is kept beside the hero"
+    );
+    assert!(t.quests.gives.contains(give), "the give itself is served");
+    assert!(
+        t.content.untraining_gates.is_empty(),
+        "nothing else is gated"
+    );
+
+    // `true` alone in its table.
+    for bad in [
+        "requires = [{ hero = false }]",
+        "requires = [{ hero = 1 }]",
+        "requires = [{ hero = true, quest = 0x40000016 }]",
+    ] {
+        let mut f = files.clone();
+        f.insert(
+            "town/server/gives/470033D0.toml".into(),
+            format!(
+                "[[give]]\n\
+                 key = \"medal\"\n\
+                 to = 0x470033D0\n\
+                 item = 0x470020BB\n\
+                 {bad}\n\
+                 prov = {{ from = \"authored\" }}\n"
+            ),
+        );
+        let problems = check(&f);
+        assert!(
+            problems.iter().any(|p| p.message.contains("requires")),
+            "{bad}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn never_completed_requirements_compile_on_steps_and_gives() {
+    let mut files = fixture();
+    edit(
+        &mut files,
+        "town/server/quests/40000088.toml",
+        "update = \"bestow\"\n",
+        "update = \"bestow\"\n\
+         requires = [{ quest = 0x40000016, done = false }]\n",
+    );
+    files.insert(
+        "town/server/gives/470033D0.toml".into(),
+        "[[give]]\n\
+         key = \"medal\"\n\
+         to = 0x470033D0\n\
+         item = 0x470020BB\n\
+         requires = [{ quest = 0x40000016, done = false }]\n\
+         prov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let step = t
+        .quests
+        .steps
+        .iter()
+        .find(|s| s.quest == 0x4000_0088 && s.trigger == Trigger::Use(0x4700_33D0))
+        .expect("the step");
+    assert_eq!(step.requires, [(0x4000_0016, Need::NeverDone)]);
+    let give = t
+        .quests
+        .gives
+        .iter()
+        .find(|g| g.item == Some(0x4700_20BB))
+        .expect("the give");
+    assert_eq!(give.requires, [(0x4000_0016, Need::NeverDone)]);
+
+    // A boolean, alone beside its quest.
+    for bad in [
+        "requires = [{ quest = 0x40000016, done = 0 }]",
+        "requires = [{ quest = 0x40000016, done = false, free = true }]",
+    ] {
+        let mut f = files.clone();
+        f.insert(
+            "town/server/gives/470033D0.toml".into(),
+            format!(
+                "[[give]]\n\
+                 key = \"medal\"\n\
+                 to = 0x470033D0\n\
+                 item = 0x470020BB\n\
+                 {bad}\n\
+                 prov = {{ from = \"authored\" }}\n"
+            ),
+        );
+        let problems = check(&f);
+        assert!(
+            problems.iter().any(|p| p.message.contains("requires")),
+            "{bad}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn fight_requirements_compile_with_their_camps_rows_beside_their_steps_and_gives() {
+    let mut files = fixture();
+    edit(
+        &mut files,
+        "town/server/quests/40000088.toml",
+        "update = \"bestow\"\n",
+        "update = \"bestow\"\n\
+         requires = [{ fought = \"beetles\" }]\n",
+    );
+    files.insert(
+        "town/server/gives/470033D0.toml".into(),
+        "[[give]]\n\
+         key = \"medal\"\n\
+         to = 0x470033D0\n\
+         item = 0x470020BB\n\
+         requires = [{ fought = \"beetles@77B7\" }]\n\
+         prov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let row = t
+        .spawns
+        .camps
+        .iter()
+        .position(|c| c.id == "beetles")
+        .map(|r| u32::try_from(r).unwrap())
+        .unwrap();
+    let gates = &t.content.fought_gates;
+    assert_eq!(gates.steps.len(), 1);
+    assert_eq!(gates.steps[0].0.trigger, Trigger::Use(0x4700_33D0));
+    assert_eq!(gates.steps[0].1, [row]);
+    assert!(t.quests.steps.contains(&gates.steps[0].0));
+    assert_eq!(gates.gives.len(), 1);
+    assert_eq!(gates.gives[0].0.item, Some(0x4700_20BB));
+    assert_eq!(gates.gives[0].1, [row]);
+    assert!(t.quests.gives.contains(&gates.gives[0].0));
+
+    // A camp the world serves, named alone in its table.
+    let mut f = files.clone();
+    edit(
+        &mut f,
+        "town/server/quests/40000088.toml",
+        "fought = \"beetles\"",
+        "fought = \"wasps\"",
+    );
+    let problems: Vec<String> = check(&f).iter().map(ToString::to_string).collect();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("requires: no camp wasps")),
+        "{problems:?}"
+    );
+    for bad in [
+        "requires = [{ fought = 3 }]",
+        "requires = [{ fought = \"beetles\", quest = 0x40000016 }]",
+    ] {
+        let mut f = files.clone();
+        f.insert(
+            "town/server/gives/470033D0.toml".into(),
+            format!(
+                "[[give]]\n\
+                 key = \"medal\"\n\
+                 to = 0x470033D0\n\
+                 item = 0x470020BB\n\
+                 {bad}\n\
+                 prov = {{ from = \"authored\" }}\n"
+            ),
+        );
+        let problems = check(&f);
+        assert!(
+            problems.iter().any(|p| p.message.contains("requires")),
+            "{bad}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn untraining_requirements_compile_beside_their_steps_and_gives_and_an_effect_rule_may_finish_one()
+{
+    let mut files = fixture();
+    edit(
+        &mut files,
+        "town/server/quests/40000088.toml",
+        "update = \"bestow\"\n",
+        "update = \"bestow\"\nrequires = [{ untraining = true }]\n",
+    );
+    files.insert(
+        "town/server/gives/470033D0.toml".into(),
+        "[[give]]\nkey = \"token\"\nto = 0x470033D0\nitem = 0x470020BB\nwants = 1\neffects = [0x6F00248D]\n\
+         requires = [{ quest = 0x40000016, done = true }, { untraining = true }]\n\
+         prov = { from = \"authored\" }\n\n\
+         [[give]]\nkey = \"plain\"\nto = 0x470033D0\nitem = 0x470020B9\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    files.insert(
+        "town/server/effects.toml".into(),
+        "[[effect_rule]]\neffect = 0x6F00248D\nuntrains = true\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let gates = &t.content.untraining_gates;
+    assert_eq!(gates.steps.len(), 1);
+    assert_eq!(gates.steps[0].trigger, Trigger::Use(0x4700_33D0));
+    assert!(
+        t.quests.steps.contains(&gates.steps[0]),
+        "the step itself is served"
+    );
+    assert_eq!(gates.gives.len(), 1, "only the give that waits on one");
+    let give = &gates.gives[0];
+    assert_eq!(give.item, Some(0x4700_20BB));
+    assert_eq!(
+        give.requires,
+        [(0x4000_0016, Need::Done)],
+        "the quest it requires is kept beside the untraining"
+    );
+    assert!(t.quests.gives.contains(give), "the give itself is served");
+    assert_eq!(
+        t.effect_rules.untrains,
+        std::collections::BTreeSet::from([0x6F00_248D])
+    );
+
+    // `true` alone in its table.
+    for bad in [
+        "requires = [{ untraining = false }]",
+        "requires = [{ untraining = 1 }]",
+        "requires = [{ untraining = true, quest = 0x40000016 }]",
+    ] {
+        let mut f = files.clone();
+        f.insert(
+            "town/server/gives/470033D0.toml".into(),
+            format!(
+                "[[give]]\nkey = \"token\"\nto = 0x470033D0\nitem = 0x470020BB\n{bad}\nprov = {{ from = \"authored\" }}\n"
+            ),
+        );
+        let problems = check(&f);
+        assert!(
+            problems.iter().any(|p| p.message.contains("requires")),
+            "{bad}: {problems:?}"
+        );
+    }
+    // An effect named by its name alone can only place something.
+    let mut f = files.clone();
+    f.insert(
+        "town/server/effects.toml".into(),
+        "[[effect_rule]]\neffect = \"Eff_FinishIt\"\nuntrains = true\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert!(read(&f).is_err(), "a name with no saved state");
+}
+
+#[test]
 fn treasure_values_compile_by_level_and_bad_ones_are_problems() {
     let with = |rows: &str| {
         let mut files = fixture();
@@ -3604,6 +5582,10 @@ fn treasure_rows(t: &yalain_content::treasure_tables::TreasureTables) -> String 
         r.look.round_from,
         r.look.round_tenths,
     );
+    if let Some(w) = &r.above_base_override {
+        let at = out.find("most_level").expect("its rules row");
+        out.insert_str(at, &format!("above_base_override = {}\n", floats(w)));
+    }
     for sort in Sort::ALL {
         let s = t.sort(sort);
         let _ = write!(
@@ -3805,6 +5787,7 @@ fn a_worlds_treasure_rows_replace_the_kinds_they_give_whole() {
     let mut own = defaults.clone();
     own.rules.most_level = 40;
     own.rules.above_base = vec![0.0, 1.0];
+    own.rules.above_base_override = Some(vec![148.0, 183.0, 60.0]);
     own.weapon.vigor[0].most = 2;
     own.shield.slot_chance = 0.25;
     own.jewelry.counts = vec![yalain_content::treasure_tables::CountBand {
@@ -3843,6 +5826,14 @@ fn treasure_rows_that_break_their_rules_are_problems() {
         (
             good.replace("above_base = [436.0, 519.0, 220.0, 39.0]", "above_base = [0.0, 0.0]"),
             "above_base: weights",
+        ),
+        (
+            good.replace("most_level = 50", "above_base_override = [0.0, -1.0]\nmost_level = 50"),
+            "above_base_override: weights",
+        ),
+        (
+            good.replace("most_level = 50", "above_base_override = 3\nmost_level = 50"),
+            "above_base_override",
         ),
         (
             good.replace("potion_tiers = [0, 16, 30, 40, 45]", "potion_tiers = [0, 16, 30, 45, 40]"),
@@ -4102,7 +6093,7 @@ fn crafting_work_rows_compile_to_map_recipes_totems_and_refinings() {
                 [[spellbinding]]\nsort = \"shield\"\ntemplate = 0x4700115B\nword = 0x3B284FFE\n\
                 prov = { from = \"authored\" }\n\n\
                 [[refining]]\nrecipe = \"SteelRefiningRecipe\"\nproduct = 0x47002224\nfull_at = 150\n\
-                prov = { from = \"authored\" }\n\n\
+                start = 34\nprov = { from = \"authored\" }\n\n\
                 [[refining]]\nrecipe = \"BrickRefiningRecipe\"\nproduct = 0x47002224\n\
                 prov = { from = \"authored\" }\n";
     files.insert("town/server/crafting2.toml".into(), rows.to_string());
@@ -4133,6 +6124,8 @@ fn crafting_work_rows_compile_to_map_recipes_totems_and_refinings() {
     assert_eq!(c.totem_word(0x4700_115B), Some(0x3B28_4FFE));
     assert_eq!(c.refining["SteelRefiningRecipe"].full_at, Some(150));
     assert_eq!(c.refining["BrickRefiningRecipe"].full_at, None);
+    assert_eq!(c.refining["SteelRefiningRecipe"].start, Some(34));
+    assert_eq!(c.refining["BrickRefiningRecipe"].start, None);
     assert_eq!(c.refining["BrickRefiningRecipe"].product, 0x4700_2224);
     // Templates the install lacks.
     for (from, said) in [
@@ -4159,10 +6152,12 @@ fn crafting_work_rows_compile_to_map_recipes_totems_and_refinings() {
         assert_eq!(messages.len(), 1, "{messages:?}");
         assert!(messages[0].contains(said), "{messages:?}");
     }
-    // A sort of weapon, armor or shield; a level from 2; a wait from 0; recipes, a found effect.
+    // A sort of weapon, armor or shield; a level from 2; a percent to 100; a wait from 0; recipes, a
+    // found effect.
     for (from, to) in [
         ("sort = \"shield\"", "sort = \"jewelry\""),
         ("full_at = 150", "full_at = 1"),
+        ("start = 34", "start = 101"),
         ("wait = 300.0", "wait = -1.0"),
         ("recipes = [0x6F001091]", "recipes = []"),
         ("found = \"Eff_ResetOstethResetTimers\"\n", ""),
@@ -4275,6 +6270,140 @@ fn a_worlds_creature_rows_read_compile_and_are_held_to_their_shape() {
     );
 }
 
+/// A creature's row may give the effect its creatures put on a player that comes within their
+/// perception, with their lines for that by race (one with no race for any other), and that they take
+/// on only the players they hate, with no rhythm; lines with no mark, two for one race, a race no
+/// player is of and a row that gives none of these are refused.
+#[test]
+fn a_creatures_row_reads_its_mark_and_whom_it_takes_on() {
+    use yalain_content::creature_rows::Mark;
+    const ROWS: &str = "[[creature]]\ntemplate = 0x47002224\nmarks = 0x6F001F31\n\
+        mark_lines = [{ race = 2, line = { table = 0x2500261D, string = 0x4DE50D1C } }, \
+        { line = { table = 0x2500261D, string = 0x8BF6E13F } }]\nprov = { from = \"authored\" }\n\n\
+        [[creature]]\ntemplate = 0x4700115B\nonly_hated = true\nprov = { from = \"authored\" }\n";
+    let mut files = fixture();
+    files.insert("town/server/creatures.toml".into(), ROWS.into());
+    assert_eq!(check(&files), Vec::new());
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let c = &t.creatures;
+    let mark = c.marks.get(&0x4700_2224).expect("a mark");
+    assert_eq!(
+        *mark,
+        Mark {
+            effect: 0x6F00_1F31,
+            lines: vec![
+                (Some(2), (0x4DE5_0D1C, 0x2500_261D)),
+                (None, (0x8BF6_E13F, 0x2500_261D)),
+            ],
+        }
+    );
+    assert_eq!(mark.line_for(2), Some((0x4DE5_0D1C, 0x2500_261D)));
+    assert_eq!(
+        mark.line_for(16),
+        Some((0x8BF6_E13F, 0x2500_261D)),
+        "any other"
+    );
+    assert!(c.only_hated.contains(&0x4700_115B) && !c.only_hated.contains(&0x4700_2224));
+    assert!(c.rhythms.is_empty());
+    for (from, to) in [
+        ("marks = 0x6F001F31\n", ""),
+        ("{ line = {", "{ race = 2, line = {"),
+        ("race = 2", "race = 3"),
+        ("only_hated = true", "only_hated = false"),
+        ("only_hated = true", "only_hated = 1"),
+        ("string = 0x8BF6E13F", "string = 0x8BF6E13F, how = 1"),
+    ] {
+        let mut files = fixture();
+        files.insert(
+            "town/server/creatures.toml".into(),
+            ROWS.replacen(from, to, 1),
+        );
+        assert!(read(&files).is_err(), "{to:?} for {from:?}");
+    }
+}
+
+/// A friend table's row may give the tables its creatures fight with or without its first attacks,
+/// and a creature's row that players may not harm it, with the line their attack is told; a friend
+/// table's row giving neither, tables that are no numbers and a line without the creatures kept from
+/// players are refused.
+#[test]
+fn a_friend_tables_row_reads_whom_it_fights_and_a_creatures_row_whom_players_may_not_harm() {
+    const ROWS: &str = "[[friend_table]]\ntable = 0x4B\nfights = [0x16, 0x4C]\nprov = { from = \"authored\" }\n\n\
+        [[friend_table]]\ntable = 0x4C\nattacks_first = true\nfights = [0x4B]\nprov = { from = \"authored\" }\n\n\
+        [[creature]]\ntemplate = 0x47002224\nplayers_kept_out = true\n\
+        kept_out_line = { table = 0x250025F5, string = 0x383D0528 }\nprov = { from = \"authored\" }\n\n\
+        [[creature]]\ntemplate = 0x4700115B\nplayers_kept_out = true\nprov = { from = \"authored\" }\n";
+    let mut files = fixture();
+    files.insert("town/server/creatures.toml".into(), ROWS.into());
+    assert_eq!(check(&files), Vec::new());
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let c = &t.creatures;
+    assert!(c.fights(Some(0x4B), Some(0x16)) && c.fights(Some(0x4B), Some(0x4C)));
+    assert!(c.fights(Some(0x4C), Some(0x4B)) && !c.fights(Some(0x4C), Some(0x16)));
+    assert!(!c.fights(Some(0x16), Some(0x4B)) && !c.fights_any(Some(0x16)));
+    assert!(c.may_attack_first(Some(0x4C)));
+    assert!(
+        !c.attacks_first.contains_key(&0x4B),
+        "no first attacks given"
+    );
+    assert_eq!(
+        c.kept_out.get(&0x4700_2224),
+        Some(&Some((0x383D_0528, 0x2500_25F5)))
+    );
+    assert_eq!(c.kept_out.get(&0x4700_115B), Some(&None));
+    for (from, to) in [
+        ("fights = [0x16, 0x4C]\n", ""),
+        ("fights = [0x16, 0x4C]", "fights = 0x16"),
+        ("fights = [0x16, 0x4C]", "fights = [\"loner\"]"),
+        ("players_kept_out = true\nkept_out_line", "kept_out_line"),
+        (
+            "players_kept_out = true\nprov",
+            "players_kept_out = 1\nprov",
+        ),
+        ("string = 0x383D0528 }", "string = 0x383D0528, how = 1 }"),
+    ] {
+        let mut files = fixture();
+        files.insert(
+            "town/server/creatures.toml".into(),
+            ROWS.replacen(from, to, 1),
+        );
+        assert!(read(&files).is_err(), "{to:?} for {from:?}");
+    }
+}
+
+/// A step may be moved by a death of a creature of a template within some meters; it reads back as
+/// written, and no meters, 0 and a reach that is no number are refused.
+#[test]
+fn a_step_may_be_moved_by_a_death_within_some_meters() {
+    const BEETLE: u32 = 0x4700_2224;
+    let quests = "town/server/quests/40000088.toml";
+    let mut files = fixture();
+    edit(
+        &mut files,
+        quests,
+        "trigger = { arrive = 0x4700115B }",
+        "trigger = { kill = 0x47002224, within = 150 }",
+    );
+    assert_eq!(check(&files), []);
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert_eq!(t.quests.steps[2].trigger, Trigger::KillNear(BEETLE, 150));
+    assert_eq!(
+        yalain_content::QuestTable::from_text(&t.quests.to_text()).unwrap(),
+        t.quests,
+        "the quest table reads back as written"
+    );
+    for within in ["within = 0", "within = 1.5", "within = \"near\""] {
+        let mut files = fixture();
+        edit(
+            &mut files,
+            quests,
+            "trigger = { arrive = 0x4700115B }",
+            &format!("trigger = {{ kill = 0x47002224, {within} }}"),
+        );
+        assert!(read(&files).is_err(), "{within}");
+    }
+}
+
 #[test]
 fn plant_rows_compile_to_species_and_crosses() {
     let mut files = fixture();
@@ -4355,6 +6484,256 @@ fn plant_rows_compile_to_species_and_crosses() {
             format!("{rows}\n{twice}"),
         );
         assert!(merge(&read(&files).unwrap()).is_err(), "{twice}");
+    }
+}
+
+#[test]
+fn a_plant_row_reads_how_many_one_seed_plants_its_ripening_its_care_and_its_lines() {
+    let mut files = fixture();
+    let rows = "[[plant]]\nplant = 0x47002224\nseed = 0x4700115B\nharvest = 0x470020BB\n\
+                count = 4\nripe = 300.0\ntended = false\n\
+                texts = { table = 0x25002B42, maturity_in = 0xA0BEB96C, mature = 0x9D2622AC, \
+                harvest = 0x39D21C3D }\nprov = { from = \"authored\" }\n\n\
+                [[plant]]\nplant = 0x470020B9\nseed = 0x470033D0\nharvest = 0x47000001\n\
+                prov = { from = \"authored\" }\n";
+    files.insert("town/server/plants.toml".into(), rows.to_string());
+    let merged = merge(&read(&files).unwrap()).unwrap();
+    let t = compile(&merged, &Fake::new()).unwrap();
+    let own = t.plants.sown_by(0x4700_115B).expect("a seed");
+    assert_eq!((own.count, own.ripe, own.tended), (4, 300.0, false));
+    assert_eq!(
+        own.texts,
+        Some(yalain_content::plants::Texts {
+            table: 0x2500_2B42,
+            maturity_in: Some(0xA0BE_B96C),
+            mature: 0x9D26_22AC,
+            harvest: 0x39D2_1C3D,
+            not_mature: None,
+            not_yours: None,
+            withers: None,
+            stages: None,
+            conditions: None,
+        })
+    );
+    // Left out: one a seed, the dye plants' ripening, care and lines.
+    let dye = t.plants.sown_by(0x4700_33D0).expect("a seed");
+    assert_eq!(
+        (dye.count, dye.ripe, dye.tended, dye.texts),
+        (1, yalain_content::plants::RIPE_SECONDS, true, None)
+    );
+    for (from, to) in [
+        ("count = 4", "count = 0"),
+        ("ripe = 300.0", "ripe = 0.0"),
+        ("tended = false", "tended = 0"),
+        ("mature = 0x9D2622AC, ", ""),
+        ("harvest = 0x39D21C3D }", "harvest = 0x39D21C3D, said = 1 }"),
+    ] {
+        assert!(rows.contains(from), "{from}");
+        files.insert("town/server/plants.toml".into(), rows.replacen(from, to, 1));
+        assert!(read(&files).is_err(), "{from} to {to}");
+    }
+}
+
+#[test]
+fn a_plant_row_reads_its_care_items_its_garden_and_its_own_lines_of_how_it_fares() {
+    let mut files = fixture();
+    let rows = "[[plant]]\nplant = 0x47002224\nseed = 0x4700115B\nharvest = 0x470020BB\n\
+                water = 0x47000846\nfertilizer = 0x47000001\n\
+                garden = { template = 0x470033D0, \
+                planted = { table = 0x25002ADA, string = 0xC84AF9AA }, \
+                busy = { table = 0x25002ADA, string = 0x75BB918D } }\n\
+                texts = { table = 0x25002ADF, mature = 0x979A5B8B, harvest = 0x54AC9502, \
+                not_mature = 0xA544694A, not_yours = 0xA544694A, withers = 0x200C71DD, \
+                stages = [0xA8AE7D4D, 0x2B64913D, 0xAFA119CC], \
+                conditions = { healthy = 0xF312FCF9, dry = 0xCD52FC4E, \
+                overwatered = 0x99448784, hungry = 0x28A10E7C, overfed = 0xFCA8EFAF } }\n\
+                prov = { from = \"authored\" }\n";
+    files.insert("town/server/plants.toml".into(), rows.to_string());
+    let merged = merge(&read(&files).unwrap()).unwrap();
+    let t = compile(&merged, &Fake::new()).unwrap();
+    assert!(
+        t.plants.sown_by(0x4700_115B).is_none(),
+        "a garden's seed plants nothing where it is used"
+    );
+    let sp = t
+        .plants
+        .sown_in(0x4700_115B, 0x4700_33D0)
+        .expect("given to its garden");
+    assert_eq!((sp.water, sp.fertilizer), (0x4700_0846, 0x4700_0001));
+    assert_eq!(
+        sp.garden,
+        Some(yalain_content::plants::Garden {
+            template: 0x4700_33D0,
+            planted: Some((0xC84A_F9AA, 0x2500_2ADA)),
+            busy: Some((0x75BB_918D, 0x2500_2ADA)),
+        })
+    );
+    let texts = sp.texts.expect("its lines");
+    assert_eq!(texts.maturity_in, None, "no countdown");
+    assert_eq!(
+        (texts.not_mature, texts.not_yours, texts.withers),
+        (Some(0xA544_694A), Some(0xA544_694A), Some(0x200C_71DD))
+    );
+    assert_eq!(texts.stages, Some([0xA8AE_7D4D, 0x2B64_913D, 0xAFA1_19CC]));
+    assert_eq!(
+        texts.conditions,
+        Some(yalain_content::plants::Conditions {
+            healthy: 0xF312_FCF9,
+            dry: 0xCD52_FC4E,
+            overwatered: 0x9944_8784,
+            hungry: 0x28A1_0E7C,
+            overfed: 0xFCA8_EFAF,
+        })
+    );
+    // Left out, a species' care is the dye plants' can and bag.
+    let dye = yalain_content::plants::Species::new(1, 2, None, 3, 0);
+    assert_eq!(
+        (dye.water, dye.fertilizer, dye.garden),
+        (
+            yalain_content::plants::WATERING_CAN,
+            yalain_content::plants::FERTILIZER,
+            None
+        )
+    );
+    for (from, to) in [
+        ("stages = [0xA8AE7D4D, ", "stages = ["),
+        ("overfed = 0xFCA8EFAF ", ""),
+        (
+            "busy = { table = 0x25002ADA, string = 0x75BB918D }",
+            "busy = 1",
+        ),
+        ("garden = { template", "garden = { place"),
+        (
+            "harvest = 0x470020BB\n",
+            "harvest = 0x470020BB\ntended = false\n",
+        ),
+    ] {
+        assert!(rows.contains(from), "{from}");
+        files.insert("town/server/plants.toml".into(), rows.replacen(from, to, 1));
+        assert!(read(&files).is_err(), "{from} to {to}");
+    }
+    // A care item or a garden the install lacks.
+    for (from, to) in [
+        ("water = 0x47000846", "water = 0x47009999"),
+        ("template = 0x470033D0", "template = 0x47009999"),
+    ] {
+        files.insert("town/server/plants.toml".into(), rows.replacen(from, to, 1));
+        let merged = merge(&read(&files).unwrap()).unwrap();
+        assert!(compile(&merged, &Fake::new()).is_err(), "{from} to {to}");
+    }
+}
+
+#[test]
+fn a_death_spawn_row_making_a_portal_reads_its_kingdom_and_is_warned_where_nothing_is_its_destination(
+) {
+    const PATH: &str = "town/server/death_spawns.toml";
+    const PLACES: &str = "town/server/lairs.toml";
+    let mut files = fixture();
+    let row = "[[death_spawn]]\neffect = \"Eff_OpensTheLair\"\ntemplate = 0x47000C8C\n\
+               offset = [0.0, 2.0, 0.0]\nkingdom = 1\nprov = { from = \"authored\" }\n";
+    files.insert(PATH.into(), row.to_string());
+    let leads_nowhere = |t: &yalain_world_db::compile::Tables| -> Vec<String> {
+        t.warnings
+            .iter()
+            .map(ToString::to_string)
+            .filter(|w| w.contains("where its portal leads"))
+            .collect()
+    };
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let made = &t.death_spawns["Eff_OpensTheLair"];
+    assert_eq!(
+        (made.template, made.kingdom, made.lasts, made.offset),
+        (NAMED_PORTAL, Some(1), None, [0.0, 2.0])
+    );
+    assert_eq!(leads_nowhere(&t).len(), 1, "no place: {:?}", t.warnings);
+    // A place named for the portal, or one of its destination's name in any case.
+    let place = |by: &str| {
+        format!(
+            "[[place]]\nkey = \"lair\"\ncell = 0x77B80003\nat = [2.0, 50.0, 183.8]\n{by}\n\
+             prov = {{ from = \"authored\" }}\n"
+        )
+    };
+    for by in ["named_by = [0x47000C8C]", "destination = \"lair_landing\""] {
+        files.insert(PLACES.into(), place(by));
+        let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+        assert!(leads_nowhere(&t).is_empty(), "{by}: {:?}", t.warnings);
+    }
+    // A kingdom on a row that makes a creature keeps nobody out.
+    files.insert(PATH.into(), row.replacen("0x47000C8C", "0x47002224", 1));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert!(
+        t.warnings
+            .iter()
+            .any(|w| w.to_string().contains("only a portal it makes")),
+        "{:?}",
+        t.warnings
+    );
+    for no in ["kingdom = 3", "kingdom = 0"] {
+        files.insert(PATH.into(), row.replacen("kingdom = 1", no, 1));
+        assert!(read(&files).is_err(), "{no}");
+    }
+}
+
+#[test]
+fn a_death_spawn_row_of_a_creature_reads_its_place_and_where_its_portal_leads() {
+    const PATH: &str = "town/server/death_spawns.toml";
+    const PLACES: &str = "town/server/lairs.toml";
+    let mut files = fixture();
+    files.insert(
+        PLACES.into(),
+        "[[place]]\nkey = \"platform\"\ncell = 0x77B80003\nat = [2.0, 50.0, 183.8]\n\
+         prov = { from = \"authored\" }\n\n\
+         [[place]]\nkey = \"crypt\"\ncell = 0x77B80003\nat = [9.0, 40.0, 183.8]\n\
+         prov = { from = \"authored\" }\n"
+            .to_string(),
+    );
+    let row = "[[death_spawn]]\ncreature = 0x47002224\ntemplate = 0x47000C8C\nat = \"platform\"\n\
+               to = \"crypt\"\nlasts = 300.0\nprov = { from = \"authored\" }\n";
+    files.insert(PATH.into(), row.to_string());
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let made = &t.death_spawns[&yalain_content::DeathSpawn::of_creature(0x4700_2224)];
+    assert_eq!(made.template, NAMED_PORTAL);
+    assert_eq!(made.lasts, Some(300.0));
+    assert_eq!(made.at.map(|p| p.origin), Some([2.0, 50.0, 183.8]));
+    assert_eq!(made.to.map(|p| p.origin), Some([9.0, 40.0, 183.8]));
+    assert!(
+        !t.warnings
+            .iter()
+            .any(|w| w.to_string().contains("where its portal leads")),
+        "its own place to lead to: {:?}",
+        t.warnings
+    );
+    // Without a place, it stands at its offset from where the creature died; none given, there.
+    files.insert(PATH.into(), row.replacen("at = \"platform\"\n", "", 1));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let made = &t.death_spawns[&yalain_content::DeathSpawn::of_creature(0x4700_2224)];
+    assert_eq!((made.at, made.offset), (None, [0.0, 0.0]));
+    // Both an effect and a creature; a place with an offset; a place on an effect's row.
+    for (from, to) in [
+        (
+            "creature = 0x47002224\n",
+            "creature = 0x47002224\neffect = \"Eff_X\"\n",
+        ),
+        (
+            "at = \"platform\"\n",
+            "at = \"platform\"\noffset = [0.0, 2.0, 0.0]\n",
+        ),
+        (
+            "creature = 0x47002224\n",
+            "effect = \"Eff_X\"\noffset = [0.0, 2.0, 0.0]\n",
+        ),
+    ] {
+        files.insert(PATH.into(), row.replacen(from, to, 1));
+        assert!(read(&files).is_err(), "{from} to {to}");
+    }
+    // A place the world lacks; a destination for what is no portal.
+    for (from, to) in [
+        ("to = \"crypt\"", "to = \"nowhere\""),
+        ("template = 0x47000C8C", "template = 0x47002224"),
+    ] {
+        files.insert(PATH.into(), row.replacen(from, to, 1));
+        let merged = merge(&read(&files).unwrap()).unwrap();
+        assert!(compile(&merged, &Fake::new()).is_err(), "{from} to {to}");
     }
 }
 
@@ -4465,4 +6844,1485 @@ fn worn_rows_compile_to_each_templates_looks_in_their_order() {
         format!("{rows}{}", row("0x47002224", "0x1", "0x2000", "0x20000099")),
     );
     assert!(merge(&read(&files).unwrap()).is_err(), "set twice");
+}
+
+/// A `[[store]]` row is a shop of the world's own: its keeper sells the store template's sales,
+/// and the shop window names the copy, whose id the lockfile gives it or, for a shop it gives
+/// none, is the lowest of the shops' copies' saved states it does not hold, by key. The keepers'
+/// table keeps the copy's id.
+#[test]
+fn a_shop_row_names_a_copy_of_its_store_template_its_keepers_sell_the_templates_sales() {
+    let mut files = fixture();
+    edit(
+        &mut files,
+        "town/server/stores.toml",
+        "[[keeper]]\ntemplate = 0x470033D0\n",
+        "[[store]]\nkey = \"bobs-shop\"\nfrom = 0x6F0016F6\nname_text = \"Bob's Fine Goods\"\nprov = { from = \"authored\" }\n\n\
+         [[store]]\nkey = \"another\"\nfrom = 0x6F0016F6\nname_text = \"Another\"\ndescription_text = \"A line\"\nprov = { from = \"authored\" }\n\n\
+         [[keeper]]\ntemplate = 0x470033D0\nshop = \"bobs-shop\"\n",
+    );
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let shops: Vec<(&str, u32, u32, bool)> = t
+        .shops
+        .iter()
+        .map(|s| (s.key.as_str(), s.from, s.id, s.pinned))
+        .collect();
+    assert_eq!(
+        shops,
+        [
+            ("another", 0x6F00_16F6, 0x6F10_0000, false),
+            ("bobs-shop", 0x6F00_16F6, 0x6F10_0001, false)
+        ]
+    );
+    assert_eq!(t.shops[0].description_text.as_deref(), Some("A line"));
+    let k = &t.stores.keepers[0];
+    assert_eq!((k.store, k.shown), (0x6F00_16F6, Some(0x6F10_0001)));
+    assert_eq!(
+        yalain_content::StoreTable::from_text(&t.stores.to_text()).unwrap(),
+        t.stores
+    );
+    // The lockfile keeps a shop's id; one it gives none takes the lowest free.
+    files.insert(
+        "world.lock".into(),
+        "[store]\n\"bobs-shop\" = 0x6F100000\n".into(),
+    );
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let ids: Vec<(&str, u32, bool)> = t
+        .shops
+        .iter()
+        .map(|s| (s.key.as_str(), s.id, s.pinned))
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            ("another", 0x6F10_0001, false),
+            ("bobs-shop", 0x6F10_0000, true)
+        ]
+    );
+    assert_eq!(t.stores.keepers[0].shown, Some(0x6F10_0000));
+}
+
+/// A keeper naming no shop, a shop copying what is no store template, and a lockfile giving a shop
+/// an id outside the shops' copies' saved states are problems.
+#[test]
+fn a_shop_must_name_a_store_template_and_its_keeper_a_shop() {
+    let mut files = fixture();
+    edit(
+        &mut files,
+        "town/server/stores.toml",
+        "[[keeper]]\ntemplate = 0x470033D0\n",
+        "[[keeper]]\ntemplate = 0x470033D0\nshop = \"nowhere\"\n",
+    );
+    let problems: Vec<String> = check(&files).iter().map(ToString::to_string).collect();
+    assert_eq!(
+        problems,
+        ["town/server/stores.toml:1: shop: no [[store]] nowhere"]
+    );
+    let mut files = fixture();
+    edit(
+        &mut files,
+        "town/server/stores.toml",
+        "[[keeper]]\ntemplate = 0x470033D0\n",
+        "[[store]]\nkey = \"bad\"\nfrom = 0x6F009999\nname_text = \"Bad\"\nprov = { from = \"authored\" }\n\n\
+         [[store]]\nkey = \"pinned\"\nfrom = 0x6F0016F6\nname_text = \"Pinned\"\nprov = { from = \"authored\" }\n\n\
+         [[keeper]]\ntemplate = 0x470033D0\n",
+    );
+    files.insert(
+        "world.lock".into(),
+        "[store]\n\"pinned\" = 0x6F0016F7\n".into(),
+    );
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let problems: Vec<String> = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new())
+        .unwrap_err()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        problems,
+        [
+            "town/server/stores.toml:1: from: 6F009999 is no store template",
+            "town/server/stores.toml:7: world.lock gives store pinned 0x6F0016F7, outside the shops' copies (0x6F100000 to 0x6F7DFFFF)",
+        ]
+    );
+}
+
+/// A shop's copy and a world recipe each take an id of a range of their own, which share none: a
+/// lockfile pins a shop from the first of the world's own saved states up to the last below the
+/// recipes', and a recipe row takes one of the recipes' own. An id past an edge of either is a
+/// problem, and so is one two shops or two packs' recipe rows share. A new shop never takes a
+/// recipe's id, however many shops the world has.
+#[test]
+fn shop_copies_and_world_recipes_each_take_ids_of_a_range_of_their_own() {
+    let recipe = |id: u32| {
+        format!(
+            "[[recipe]]\nrecipe = {id:#010X}\nlike = 0x6F0002BE\nname = {{ table = 0x25002007, string = 0x00DD730E }}\n\
+             ingredients = [{{ items = [0x47002224] }}]\nproduct = 0x47002224\n\
+             prov = {{ from = \"authored\", by = \"a test\", note = \"a test\" }}\n"
+        )
+    };
+    let with = |lock: &str, recipes: &str| {
+        let mut files = fixture();
+        edit(
+            &mut files,
+            "town/server/stores.toml",
+            "[[keeper]]\ntemplate = 0x470033D0\n",
+            "[[store]]\nkey = \"pinned\"\nfrom = 0x6F0016F6\nname_text = \"Pinned\"\nprov = { from = \"authored\" }\n\n\
+             [[store]]\nkey = \"other\"\nfrom = 0x6F0016F6\nname_text = \"Other\"\nprov = { from = \"authored\" }\n\n\
+             [[keeper]]\ntemplate = 0x470033D0\nshop = \"pinned\"\n",
+        );
+        files.insert("world.lock".into(), lock.into());
+        files.insert("town/server/crafting.toml".into(), recipes.into());
+        files
+    };
+    let compiled = |files: &Files| {
+        compile(&merge(&read(files).unwrap()).unwrap(), &Fake::new())
+            .map_err(|p| p.iter().map(ToString::to_string).collect::<Vec<String>>())
+    };
+
+    // A shop pinned at either edge of its range, a recipe at either edge of its own.
+    let (first, last) = auberean_pack::SHOP_COPIES;
+    assert_eq!((first, last), (0x6F10_0000, 0x6F7D_FFFF));
+    assert_eq!(auberean_pack::WORLD_RECIPES, (0x6F7E_0000, 0x6F7E_FFFF));
+    for (shop, made) in [(first, 0x6F7E_0000), (last, 0x6F7E_FFFF)] {
+        let files = with(
+            &format!("[store]\n\"pinned\" = {shop:#010X}\n"),
+            &recipe(made),
+        );
+        assert!(check(&files).is_empty(), "{:?}", check(&files));
+        let t = compiled(&files).unwrap();
+        let pinned = t.shops.iter().find(|s| s.key == "pinned").unwrap();
+        assert_eq!((pinned.id, pinned.pinned), (shop, true));
+        let other = t.shops.iter().find(|s| s.key == "other").unwrap();
+        assert!((first..=last).contains(&other.id) && other.id != shop);
+        assert_eq!(t.crafts.recipes.keys().copied().collect::<Vec<_>>(), [made]);
+    }
+
+    // A shop pinned past an edge of its range, or at a recipe's id, is a problem.
+    for shop in [0x6F0F_FFFF, 0x6F7E_0000, 0x6F7E_1601, 0x6FFF_FFFF] {
+        let files = with(
+            &format!("[store]\n\"pinned\" = {shop:#010X}\n"),
+            &recipe(0x6F7E_1601),
+        );
+        let problems = compiled(&files).unwrap_err();
+        assert_eq!(
+            problems[0],
+            format!(
+                "town/server/stores.toml:1: world.lock gives store pinned {shop:#010X}, outside the shops' copies (0x6F100000 to 0x6F7DFFFF)"
+            ),
+            "{problems:?}"
+        );
+    }
+
+    // Two shops one id.
+    let files = with(
+        "[store]\n\"other\" = 0x6F100005\n\"pinned\" = 0x6F100005\n",
+        &recipe(0x6F7E_0000),
+    );
+    assert!(
+        compiled(&files)
+            .unwrap_err()
+            .contains(&"world.lock: store: other and pinned are both given 0x6F100005".to_string()),
+        "{:?}",
+        compiled(&files)
+    );
+
+    // A recipe row past an edge of its range, or among the shops' copies or the install's own
+    // states, is a problem.
+    for made in [0x6F7D_FFFF, 0x6F7F_0000, 0x6F10_0000, 0x6F00_02BF] {
+        let files = with("", &recipe(made));
+        assert_eq!(
+            check(&files)
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            [format!(
+                "town/server/crafting.toml:1: recipe: {made:#010X} is outside the world's recipes (0x6F7E0000 to 0x6F7EFFFF)"
+            )],
+        );
+    }
+
+    // Two packs' recipe rows one id: a conflict, unless the world says which wins (one pack's row
+    // twice is too, as `recipe_rows_compile_by_their_ids_and_a_step_names_the_recipes_it_teaches`
+    // shows).
+    let mut files = with("", &recipe(0x6F7E_0000));
+    files.insert(
+        "town-fixes/server/crafting.toml".into(),
+        recipe(0x6F7E_0000).replace("product = 0x47002224", "product = 0x4700115B"),
+    );
+    let t = compiled(&files).unwrap();
+    assert_eq!(
+        t.crafts.recipes[&0x6F7E_0000].product, 0x4700_115B,
+        "the fixes win"
+    );
+    edit(
+        &mut files,
+        "world.toml",
+        "[[override]]\npack = \"town-fixes\"\nover = \"town\"\n",
+        "",
+    );
+    assert!(
+        check(&files).iter().any(|p| p
+            .message
+            .starts_with("recipe 0x6f7e0000 is set by pack town ")),
+        "{:?}",
+        check(&files)
+    );
+
+    // However many shops the world holds, a new one takes the next of the shops' copies, and none
+    // of the recipes'.
+    use yalain_world_db::compile::next_shop_id;
+    assert_eq!(next_shop_id(&|_| false), Some(first));
+    assert_eq!(next_shop_id(&|id| id < last), Some(last));
+    assert_eq!(next_shop_id(&|id| id <= last), None);
+}
+
+/// An object states row names the templates whose objects hold a state, each with its first, the
+/// states, when an object goes back and the changes items given make; a sequence row names a quest
+/// and its uses in order, each a template and the state its object must be in, the lines said at a
+/// right use and a wrong one, and the place its last right use takes the player to. Both compile
+/// into the item rows; a state no row of the template names, a template of two rows, a template
+/// the install lacks and a place the world lacks are problems.
+/// Behaviour: server.puzzles.rows
+#[test]
+fn object_states_and_sequence_rows_compile_into_the_item_rows() {
+    use yalain_content::item_rows::{ObjectStates, Sequence, StateChange};
+    let prov = "prov = { from = \"authored\", by = \"a test\", note = \"a test\" }";
+    let states = format!(
+        "[[object_states]]\nkey = \"tiles\"\ntemplates = [{{ template = 0x4700115B, start = \"red\" }}]\n\
+         states = [\"red\", \"white\"]\nreverts = 90\n\
+         changes = [{{ item = 0x47002224, from = \"red\", to = \"white\" }}]\n{prov}\n"
+    );
+    let sequence = format!(
+        "[[sequence]]\nkey = \"one\"\nquest = 0x40000088\n\
+         uses = [{{ use = 0x4700115B, state = \"white\" }}, {{ use = 0x47002224 }}]\n\
+         right = {{ table = 0x250029AC, string = 0x257C1464 }}\nwrong = {{ table = 0x250029AC, string = 0xFFFB8534 }}\nto = \"inn\"\n{prov}\n"
+    );
+    let mut files = fixture();
+    files.insert(
+        "town/server/puzzles.toml".into(),
+        format!("{states}\n{sequence}"),
+    );
+    assert_eq!(check(&files), Vec::new());
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert_eq!(
+        t.items.object_states,
+        [ObjectStates {
+            key: "tiles".into(),
+            templates: vec![(0x4700_115B, "red".into())],
+            states: vec!["red".into(), "white".into()],
+            reverts: Some(90.0),
+            changes: vec![StateChange {
+                item: 0x4700_2224,
+                from: "red".into(),
+                to: "white".into(),
+            }],
+        }]
+    );
+    assert_eq!(
+        t.items.sequences,
+        [Sequence {
+            key: "one".into(),
+            quest: Some(0x4000_0088),
+            forgets_after: None,
+            uses: vec![(0x4700_115B, Some("white".into())), (0x4700_2224, None)],
+            objects: Vec::new(),
+            wrong_starts_over: true,
+            right: Some((0x257C_1464, 0x2500_29AC)),
+            wrong: Some((0xFFFB_8534, 0x2500_29AC)),
+            to: Some(yalain_content::quests::Place {
+                cell: 0x77B8_0003,
+                origin: [1.18, 53.42, 183.82],
+                heading: yalain_world_db::compile::heading_byte(
+                    yalain_world_db::compile::rotation_heading(
+                        yalain_world_db::compile::heading_rotation(320.5),
+                    ),
+                ),
+            }),
+        }]
+    );
+
+    // A state the template's row doesn't name, a template of two rows, a template the install
+    // lacks, a place the world lacks.
+    for (what, files, wanted) in [
+        (
+            "an unknown place",
+            format!(
+                "{states}\n{}",
+                sequence.replace("to = \"inn\"", "to = \"nowhere\"")
+            ),
+            "no place nowhere",
+        ),
+        (
+            "an unknown state",
+            format!(
+                "{states}\n{}",
+                sequence.replace("state = \"white\"", "state = \"blue\"")
+            ),
+            "holds no state blue",
+        ),
+        (
+            "a template of two rows",
+            format!("{states}\n{}", states.replace("\"tiles\"", "\"more\"")),
+            "holds a state of another row",
+        ),
+        (
+            "a template the install lacks",
+            states.replace("template = 0x4700115B", "template = 0x47009999"),
+            "template 47009999 is not in the install",
+        ),
+    ] {
+        let mut f = fixture();
+        f.insert("town/server/puzzles.toml".into(), files);
+        let problems = compile(&merge(&read(&f).unwrap()).unwrap(), &Fake::new()).unwrap_err();
+        assert!(
+            problems.iter().any(|p| p.to_string().contains(wanted)),
+            "{what}: {problems:?}"
+        );
+    }
+
+    // Their shapes.
+    for bad in [
+        states.replace("states = [\"red\", \"white\"]", "states = [\"red\"]"),
+        states.replace(
+            "states = [\"red\", \"white\"]",
+            "states = [\"red\", \"red\"]",
+        ),
+        states.replace("start = \"red\"", "start = \"blue\""),
+        states.replace("to = \"white\"", "to = \"blue\""),
+        states.replace("reverts = 90", "reverts = 0"),
+        states.replace(
+            "templates = [{ template = 0x4700115B, start = \"red\" }]",
+            "templates = []",
+        ),
+        sequence.replace(
+            "uses = [{ use = 0x4700115B, state = \"white\" }, { use = 0x47002224 }]",
+            "uses = []",
+        ),
+        sequence.replace("state = \"white\"", "state = \"White\""),
+    ] {
+        let mut f = fixture();
+        f.insert("town/server/puzzles.toml".into(), bad.clone());
+        assert!(read(&f).is_err(), "{bad}");
+    }
+}
+
+/// A quest's name in the install's enumeration said as words: the leading `Quest` and underscores
+/// left out, a word begun at a capital after a small letter, at the last of a run of capitals
+/// before a small letter, and where a number begins or ends.
+/// Behaviour: server.world-db.quest-name-in-words
+#[test]
+fn a_quests_enumeration_name_is_said_as_its_words() {
+    use yalain_world_db::install::spoken_name;
+    for (name, words) in [
+        (
+            "Quest_MarshTerrorMustBeStopped",
+            "Marsh Terror Must Be Stopped",
+        ),
+        ("QuestMirraRelicAlabaster", "Mirra Relic Alabaster"),
+        ("QuestTOMortal", "TO Mortal"),
+        ("QuestDesolationMH", "Desolation MH"),
+        ("Quest_DeadlyDummy60", "Deadly Dummy 60"),
+        ("QuestIN", "IN"),
+        ("Quest_Two_Words", "Two Words"),
+        ("TheBeetleHunt", "The Beetle Hunt"),
+    ] {
+        assert_eq!(spoken_name(name).as_deref(), Some(words), "{name}");
+    }
+    assert_eq!(spoken_name("Quest"), None);
+    assert_eq!(spoken_name("Quest_"), None);
+}
+
+/// A step's `escort` reads to its creature, icon, last phase, distance and portal rule, and
+/// compiles to the escort table with its step whole; one whose creature has no `[[pet]]` row, one
+/// lasting until a phase not after the step's own, one on a completing step and one that reads
+/// wrong are problems.
+/// Behaviour: server.quests.escorts-follow
+#[test]
+fn a_steps_escort_compiles_with_its_step_and_needs_a_pet_row_for_its_creature() {
+    use yalain_content::escorts::Escort;
+    let mut files = fixture();
+    files.insert(
+        "town/server/pets.toml".into(),
+        "[[pet]]\neffect = 0x4700115B\ntemplate = 0x4700115B\nflags = 8\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    edit(
+        &mut files,
+        "town/server/quests/40000088.toml",
+        "update = \"bestow\"\n",
+        "update = \"bestow\"\nescort = { template = 0x4700115B, icon = 0x4100034B, until = 2, far = 60, portal_fails = true }\n",
+    );
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let e = &t.content.escorts.steps;
+    assert_eq!(e.len(), 1);
+    assert_eq!(
+        (e[0].0.trigger, e[0].0.update),
+        (Trigger::Use(0x4700_33D0), Update::Bestow)
+    );
+    assert!(t.quests.steps.contains(&e[0].0), "the step whole");
+    assert_eq!(
+        e[0].1,
+        Escort {
+            template: 0x4700_115B,
+            icon: 0x4100_034B,
+            until: Some(2),
+            far: Some(60.0),
+            portal_fails: true,
+        }
+    );
+    // No pet row for it.
+    let mut f = files.clone();
+    f.remove("town/server/pets.toml");
+    let problems = compile(&merge(&read(&f).unwrap()).unwrap(), &Fake::new()).unwrap_err();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.to_string().contains("no [[pet]] row")),
+        "{problems:?}"
+    );
+    // Lasting until the phase it starts at.
+    let mut f = files.clone();
+    edit(
+        &mut f,
+        "town/server/quests/40000088.toml",
+        "until = 2",
+        "until = 1",
+    );
+    let problems = compile(&merge(&read(&f).unwrap()).unwrap(), &Fake::new()).unwrap_err();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.to_string().contains("until must be after the phase")),
+        "{problems:?}"
+    );
+    // On a step that completes its quest.
+    let mut f = files.clone();
+    edit(
+        &mut f,
+        "town/server/quests/40000088.toml",
+        "update = \"complete\"\nxp = 40\n",
+        "update = \"complete\"\nxp = 40\nescort = { template = 0x4700115B }\n",
+    );
+    let problems = compile(&merge(&read(&f).unwrap()).unwrap(), &Fake::new()).unwrap_err();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.to_string().contains("leaves nothing to escort")),
+        "{problems:?}"
+    );
+    for bad in [
+        "escort = { icon = 1 }",
+        "escort = { template = 0x4700115B, until = 0 }",
+        "escort = { template = 0x4700115B, far = -1 }",
+        "escort = { template = 0x4700115B, portal_fails = 1 }",
+        "escort = { template = 0x4700115B, lasts = 3 }",
+    ] {
+        let mut f = files.clone();
+        edit(
+            &mut f,
+            "town/server/quests/40000088.toml",
+            "escort = { template = 0x4700115B, icon = 0x4100034B, until = 2, far = 60, portal_fails = true }",
+            bad,
+        );
+        assert!(read(&f).is_err(), "{bad}");
+    }
+}
+
+/// A step's trigger may give any item of a class, and a give that moves no quest may take one; the
+/// class compiles to the trigger and to the class gives' table, and a give naming both an item and
+/// a class, or a class trigger that reads wrong, is a problem.
+/// Behaviour: server.gives.any-item-of-a-class
+#[test]
+fn a_give_of_a_class_compiles_to_its_trigger_and_to_the_class_gives() {
+    let mut files = fixture();
+    edit(
+        &mut files,
+        "town/server/quests/40000088.toml",
+        "trigger = { give = 0x470020B9, to = 0x470033D0 }",
+        "trigger = { give_class = 0x1049, to = 0x470033D0 }",
+    );
+    files.insert(
+        "town/server/gives/470033D0.toml".into(),
+        "[[give]]\nkey = \"weapons\"\nto = 0x470033D0\nitem_class = 0x1049\ngives = [0x470020B9]\n\
+         prov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert!(t
+        .quests
+        .steps
+        .iter()
+        .any(|s| s.trigger == Trigger::GiveClass(0x1049, 0x4700_33D0)));
+    let c: Vec<(usize, u32)> = t
+        .content
+        .class_gives
+        .iter()
+        .map(|(i, c)| (*i, *c))
+        .collect();
+    let row = t
+        .quests
+        .gives
+        .iter()
+        .position(|g| g.to == 0x4700_33D0 && g.gives == [0x4700_20B9])
+        .expect("the give");
+    assert_eq!(c, vec![(row, 0x1049)], "by its row");
+    assert_eq!(t.quests.gives[row].item, None);
+    for (path, from, to) in [
+        (
+            "town/server/gives/470033D0.toml",
+            "item_class = 0x1049",
+            "item_class = 0x1049\nitem = 0x470020B9",
+        ),
+        (
+            "town/server/quests/40000088.toml",
+            "{ give_class = 0x1049, to = 0x470033D0 }",
+            "{ give_class = 0x1049 }",
+        ),
+    ] {
+        let mut f = files.clone();
+        edit(&mut f, path, from, to);
+        assert!(read(&f).is_err(), "{to}");
+    }
+}
+
+/// A quest's `companion_of` compiles to the quests that go with the one it names; one naming
+/// itself, or a quest with no row, is a problem.
+/// Behaviour: server.quests.companions-end-with-their-bearers
+#[test]
+fn a_quests_companion_of_compiles_to_the_quest_it_goes_with() {
+    let mut files = fixture();
+    let companion = |of: &str| {
+        format!(
+            "[[quest]]
+id = 0x40000089
+id_name = \"QuestRescueHoldProtect\"
+companion_of = {of}
+prov = {{ from = \"authored\" }}
+"
+        )
+    };
+    files.insert(
+        "town/server/quests/40000089.toml".into(),
+        companion("0x40000088"),
+    );
+    assert_eq!(check(&files), Vec::new());
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert_eq!(
+        t.content.companions.get(&0x4000_0088),
+        Some(&vec![0x4000_0089])
+    );
+    assert_eq!(t.content.companions.len(), 1);
+    for (of, says) in [
+        ("0x40000089", "cannot go with itself"),
+        ("0x40000099", "quest 40000099 has no row"),
+    ] {
+        let mut f = files.clone();
+        f.insert("town/server/quests/40000089.toml".into(), companion(of));
+        let problems = compile(&merge(&read(&f).unwrap()).unwrap(), &Fake::new()).unwrap_err();
+        assert!(
+            problems.iter().any(|p| p.to_string().contains(says)),
+            "{of}: {problems:?}"
+        );
+    }
+}
+
+/// The test world with one more static object, `lever@77B7`, a sign beside the gate.
+fn with_lever(mut files: Files) -> Files {
+    files
+        .get_mut("town/server/landblocks/77B7.toml")
+        .unwrap()
+        .push_str(
+            "\n[[object]]\nkey = \"lever\"\nkind = \"static\"\nid = 0x4077B70000000003\n\
+             template = 0x4700115B\nat = [119.0, 111.0, 250.0]\nprov = { from = \"authored\" }\n",
+        );
+    files
+}
+
+/// The place in the compiled pack of the test world's placed object of this id.
+fn placed_at(t: &yalain_world_db::compile::Tables, id: u64) -> usize {
+    t.content
+        .objects
+        .iter()
+        .position(|o| o.object == Some(id))
+        .expect("placed")
+}
+
+#[test]
+fn a_lever_row_names_its_levers_and_doors_by_placement_and_compiles_to_the_lever_table() {
+    let mut files = with_lever(fixture());
+    files.insert(
+        "town/server/levers.toml".into(),
+        "[[lever]]\nkey = \"gate-lever\"\nlevers = [\"lever@77B7\"]\nopens = [\"gate@77B7\"]\n\
+         open_for = 20\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let lever = placed_at(&t, 0x4077_B700_0000_0003);
+    let gate = placed_at(&t, 0x4077_B700_0000_0001);
+    assert_eq!(
+        t.content.levers.rows,
+        vec![yalain_content::levers::Lever {
+            key: "gate-lever".into(),
+            levers: vec![lever],
+            opens: vec![gate],
+            open_for: Some(20.0),
+            within: None,
+        }]
+    );
+
+    let mut bad = files.clone();
+    edit(
+        &mut bad,
+        "town/server/levers.toml",
+        "opens = [\"gate@77B7\"]",
+        "opens = [\"nowhere@77B7\"]",
+    );
+    assert!(
+        check(&bad)
+            .iter()
+            .any(|p| p.to_string().contains("opens: no object nowhere@77B7")),
+        "{:?}",
+        check(&bad)
+    );
+    let problems = compile(&merge(&read(&bad).unwrap()).unwrap(), &Fake::new()).unwrap_err();
+    assert!(
+        problems.iter().any(|p| p
+            .to_string()
+            .contains("opens: no placed object nowhere@77B7 is served")),
+        "{problems:?}"
+    );
+    let mut bad = files;
+    edit(
+        &mut bad,
+        "town/server/levers.toml",
+        "open_for = 20",
+        "open_for = 0",
+    );
+    assert!(
+        check(&bad)
+            .iter()
+            .any(|p| p.to_string().contains("open_for: above 0")),
+        "{:?}",
+        check(&bad)
+    );
+}
+
+#[test]
+fn a_guarded_row_names_its_camp_and_objects_by_placement_and_compiles_to_the_guard_table() {
+    let mut files = with_lever(fixture());
+    files.insert(
+        "town/server/puzzles.toml".into(),
+        "[[guarded]]\nkey = \"rift\"\ncamp = \"beetles@77B7\"\nobjects = [\"lever@77B7\"]\n\
+         refused = { table = 0x250028EF, string = 0xC844788A }\nhidden = true\ngone_for = 30\n\
+         prov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let camp = t
+        .spawns
+        .camps
+        .iter()
+        .position(|c| c.id == "beetles")
+        .unwrap();
+    assert_eq!(
+        t.content.guards.rows,
+        vec![yalain_content::guards::Guarded {
+            key: "rift".into(),
+            camp,
+            objects: vec![placed_at(&t, 0x4077_B700_0000_0003)],
+            refused: Some((0xC844_788A, 0x2500_28EF)),
+            hidden: true,
+            gone_for: Some(30.0),
+        }]
+    );
+
+    for (from, to, says) in [
+        (
+            "camp = \"beetles@77B7\"",
+            "camp = \"wasps@77B7\"",
+            "camp: no camp wasps@77B7",
+        ),
+        (
+            "camp = \"beetles@77B7\"",
+            "camp = \"beetles\"",
+            "camp: a camp is named key@XXYY",
+        ),
+        (
+            "objects = [\"lever@77B7\"]",
+            "objects = [\"nowhere@77B7\"]",
+            "objects: no object nowhere@77B7",
+        ),
+        ("gone_for = 30", "gone_for = 0", "gone_for: above 0"),
+        (
+            "objects = [\"lever@77B7\"]",
+            "objects = []",
+            "objects: at least one",
+        ),
+    ] {
+        let mut bad = files.clone();
+        edit(&mut bad, "town/server/puzzles.toml", from, to);
+        assert!(
+            check(&bad).iter().any(|p| p.to_string().contains(says)),
+            "{to}: {:?}",
+            check(&bad)
+        );
+    }
+}
+
+#[test]
+fn a_shifting_row_names_its_objects_by_placement_and_compiles_to_the_shift_table() {
+    let mut files = with_lever(fixture());
+    files.insert(
+        "town/server/puzzles.toml".into(),
+        "[[shifting]]\n\
+         key = \"remains\"\n\
+         objects = [\"lever@77B7\", \"gate@77B7\"]\n\
+         gone_for = 30\n\
+         moves_after = 600\n\
+         prov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let gate = placed_at(&t, 0x4077_B700_0000_0001);
+    assert_eq!(
+        t.content.shifting.rows,
+        vec![yalain_content::shifting::Shifting {
+            key: "remains".into(),
+            objects: vec![placed_at(&t, 0x4077_B700_0000_0003), gate],
+            gone_for: Some(30.0),
+            moves_after: Some(600.0),
+        }]
+    );
+
+    for (from, to, says) in [
+        (
+            "\"gate@77B7\"]",
+            "\"nowhere@77B7\"]",
+            "objects: no object nowhere@77B7",
+        ),
+        (
+            "objects = [\"lever@77B7\", \"gate@77B7\"]",
+            "objects = [\"lever@77B7\"]",
+            "objects: at least two",
+        ),
+        ("gone_for = 30", "gone_for = 0", "gone_for: above 0"),
+        (
+            "moves_after = 600",
+            "moves_after = -1",
+            "moves_after: above 0",
+        ),
+    ] {
+        let mut bad = files.clone();
+        edit(&mut bad, "town/server/puzzles.toml", from, to);
+        assert!(
+            check(&bad).iter().any(|p| p.to_string().contains(says)),
+            "{to}: {:?}",
+            check(&bad)
+        );
+    }
+    // An object in two rows is a problem of the compile.
+    let mut twice = files.clone();
+    twice.get_mut("town/server/puzzles.toml").unwrap().push_str(
+        "\n\
+         [[shifting]]\n\
+         key = \"again\"\n\
+         objects = [\"gate@77B7\", \"lever@77B7\"]\n\
+         prov = { from = \"authored\" }\n",
+    );
+    let problems =
+        compile(&merge(&read(&twice).unwrap()).unwrap(), &Fake::new()).expect_err("refused");
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.to_string().contains("shifts in another row")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn a_defense_row_names_its_device_attackers_and_what_it_leaves_and_bad_ones_are_problems() {
+    use yalain_content::defenses::Defense;
+    let mut files = fixture();
+    files.insert(
+        "town/server/creatures.toml".into(),
+        "[[defense]]\ndevice = 0x4700115B\nholds = 180\nspawns = [{ template = 0x47002224, weight = 1 }]\n\
+         population = 3\nradius = 12\nthen = 0x470020B9\nthen_lasts = 120\n\
+         says = [{ at = 0, line = { table = 0x250026BE, string = 0x8B69133E } }, { at = 90, line = { table = 0x250026BE, string = 0xBB6BB931 } }]\n\
+         hurt_line = { table = 0x250026BE, string = 0x2FA8FC8E }\nheld_line = { table = 0x250026BE, string = 0xFF1D266D }\n\
+         prov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert_eq!(
+        t.content.defenses.rows,
+        vec![Defense {
+            device: 0x4700_115B,
+            holds: 180.0,
+            spawns: vec![(0x4700_2224, 1)],
+            population: 3,
+            regen: None,
+            radius: 12.0,
+            then: Some(0x4700_20B9),
+            then_lasts: Some(120),
+            says: vec![
+                (0.0, (0x8B69_133E, 0x2500_26BE)),
+                (90.0, (0xBB6B_B931, 0x2500_26BE))
+            ],
+            hurt_line: Some((0x2FA8_FC8E, 0x2500_26BE)),
+            held_line: Some((0xFF1D_266D, 0x2500_26BE)),
+            then_name: None,
+        }]
+    );
+    assert!(merge(&read(&files).unwrap())
+        .unwrap()
+        .rows
+        .iter()
+        .filter_map(yalain_world_db::merge::item)
+        .any(|i| i.to_string() == "defense 0x4700115b"));
+
+    for (from, to) in [
+        ("holds = 180", "holds = 0"),
+        ("population = 3", "population = 0"),
+        (
+            "spawns = [{ template = 0x47002224, weight = 1 }]",
+            "spawns = []",
+        ),
+        (
+            "spawns = [{ template = 0x47002224, weight = 1 }]",
+            "spawns = [{ template = 0x47002224, weight = 0 }]",
+        ),
+        ("then = 0x470020B9\n", ""),
+        ("then_lasts = 120", "then_lasts = 0"),
+        ("at = 90", "at = 200"),
+        ("at = 0,", "at = 100,"),
+        ("at = 0,", "at = -1,"),
+    ] {
+        let mut bad = files.clone();
+        edit(&mut bad, "town/server/creatures.toml", from, to);
+        assert!(read(&bad).is_err(), "{to}");
+    }
+    let mut bad = files;
+    edit(
+        &mut bad,
+        "town/server/creatures.toml",
+        "device = 0x4700115B",
+        "device = 0x47009999",
+    );
+    let problems = compile(&merge(&read(&bad).unwrap()).unwrap(), &Fake::new()).unwrap_err();
+    assert!(
+        problems.iter().any(|p| p
+            .to_string()
+            .contains("device: template 47009999 is not in the install")),
+        "{problems:?}"
+    );
+}
+
+fn offering_world() -> Files {
+    let mut files = with_lever(fixture());
+    files.insert(
+        "town/server/offerings.toml".into(),
+        "[[offering]]\nkey = \"altar\"\nobject = \"keeper@77B7\"\n\
+         takes = [{ item = 0x47002224, shows = \"lever@77B7\" }, { item = 0x470020BB }]\n\
+         opens = [\"gate@77B7\"]\nlasts = 300\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    files
+}
+
+#[test]
+fn an_offering_row_names_its_object_parts_and_what_it_opens_and_compiles_to_the_offering_table() {
+    use yalain_content::offerings::{Offering, Part};
+    let files = offering_world();
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let keeper = t
+        .content
+        .objects
+        .iter()
+        .position(|o| o.template == 0x4700_33D0)
+        .expect("the keeper");
+    let flare = placed_at(&t, 0x4077_B700_0000_0003);
+    let gate = placed_at(&t, 0x4077_B700_0000_0001);
+    assert_eq!(
+        t.content.offerings.offerings,
+        vec![Offering {
+            key: "altar".into(),
+            object: keeper,
+            takes: vec![
+                Part {
+                    item: 0x4700_2224,
+                    shows: Some(flare)
+                },
+                Part {
+                    item: 0x4700_20BB,
+                    shows: None
+                },
+            ],
+            opens: vec![gate],
+            lasts: 300,
+        }]
+    );
+
+    let mut twice = offering_world();
+    edit(
+        &mut twice,
+        "town/server/offerings.toml",
+        "{ item = 0x470020BB }",
+        "{ item = 0x47002224 }",
+    );
+    assert!(
+        check(&twice).iter().any(|p| p
+            .to_string()
+            .contains("takes: at least one, each item once")),
+        "{:?}",
+        check(&twice)
+    );
+    let mut two = offering_world();
+    two.get_mut("town/server/offerings.toml").unwrap().push_str(
+        "\n[[offering]]\nkey = \"altar-2\"\nobject = \"keeper@77B7\"\n\
+         takes = [{ item = 0x470020BB }]\nopens = [\"gate@77B7\"]\nlasts = 60\n\
+         prov = { from = \"authored\" }\n",
+    );
+    let problems = compile(&merge(&read(&two).unwrap()).unwrap(), &Fake::new()).unwrap_err();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.to_string().contains("takes another row's offering")),
+        "{problems:?}"
+    );
+}
+
+/// A sequence row's use may name a placed object (`key@XXYY`) in place of a template: it compiles to
+/// that object's place in the pack and its template, a use naming a template to none; a row may
+/// start over only for an object already used. An object the world lacks is a problem to the
+/// check and the build, and a use naming both a template and an object is refused.
+/// Behaviour: server.puzzles.rows
+#[test]
+fn a_sequence_row_names_its_uses_by_placement_and_whether_a_wrong_use_starts_over() {
+    let mut files = with_lever(fixture());
+    files
+        .get_mut("town/server/landblocks/77B7.toml")
+        .unwrap()
+        .push_str(
+            "\n[[object]]\nkey = \"pillar\"\nkind = \"static\"\nid = 0x4077B70000000004\n\
+             template = 0x4700115B\nat = [121.0, 111.0, 250.0]\nprov = { from = \"authored\" }\n",
+        );
+    let row = "[[sequence]]\nkey = \"pillars\"\nquest = 0x40000088\n\
+               uses = [{ object = \"pillar@77B7\" }, { object = \"lever@77B7\" }, { use = 0x47002224 }]\n\
+               wrong_starts_over = false\nprov = { from = \"authored\" }\n";
+    files.insert("town/server/puzzles.toml".into(), row.to_string());
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let pillar = placed_at(&t, 0x4077_B700_0000_0004);
+    let lever = placed_at(&t, 0x4077_B700_0000_0003);
+    let q = &t.items.sequences[0];
+    assert_eq!(
+        q.uses,
+        vec![
+            (0x4700_115B, None),
+            (0x4700_115B, None),
+            (0x4700_2224, None)
+        ]
+    );
+    assert_eq!(q.objects, vec![Some(pillar), Some(lever), None]);
+    assert!(!q.wrong_starts_over);
+    let mut bad = files.clone();
+    edit(
+        &mut bad,
+        "town/server/puzzles.toml",
+        "pillar@77B7",
+        "nowhere@77B7",
+    );
+    assert!(
+        check(&bad)
+            .iter()
+            .any(|p| p.to_string().contains("uses: no object nowhere@77B7")),
+        "{:?}",
+        check(&bad)
+    );
+    let problems = compile(&merge(&read(&bad).unwrap()).unwrap(), &Fake::new()).unwrap_err();
+    assert!(
+        problems.iter().any(|p| p
+            .to_string()
+            .contains("uses: no placed object nowhere@77B7")),
+        "{problems:?}"
+    );
+    let mut bad = files;
+    edit(
+        &mut bad,
+        "town/server/puzzles.toml",
+        "{ object = \"pillar@77B7\" }",
+        "{ object = \"pillar@77B7\", use = 0x4700115B }",
+    );
+    assert!(read(&bad).is_err());
+}
+
+/// An event's windows may follow the game's clock: its hours (a 24-hour clock of the game's day)
+/// or its day or night; a window of the game's names nothing else.
+/// Behaviour: server.events.windows-by-the-game
+#[test]
+fn an_event_row_reads_windows_of_the_games_hours_day_and_night() {
+    use yalain_content::events::Window;
+    let mut files = fixture();
+    let row = "[[event]]\nkey = \"daylight\"\n\
+               when = [{ game = \"day\" }, { game = \"night\" }, \
+               { game = \"hours\", from = \"06:00\", until = \"18:30\" }]\n\
+               prov = { from = \"authored\" }\n";
+    files.insert("town/server/events.toml".into(), row.to_string());
+    let db = read(&files).unwrap();
+    let when = db
+        .rows()
+        .find_map(|l| match &l.row {
+            Row::Event(e) => Some(e.when.clone()),
+            _ => None,
+        })
+        .expect("the event");
+    assert_eq!(
+        when,
+        vec![
+            Window::GameDay { night: false },
+            Window::GameDay { night: true },
+            Window::GameHours {
+                from: 6 * 3600,
+                until: 18 * 3600 + 1800
+            },
+        ]
+    );
+    for (from, to) in [
+        ("{ game = \"day\" }", "{ game = \"day\", from = \"06:00\" }"),
+        ("{ game = \"day\" }", "{ game = \"noon\" }"),
+        ("from = \"06:00\", ", ""),
+        ("game = \"hours\", ", "game = \"hours\", days = [\"mon\"], "),
+    ] {
+        files.insert("town/server/events.toml".into(), row.replacen(from, to, 1));
+        assert!(read(&files).is_err(), "{from} to {to}");
+    }
+}
+
+#[test]
+fn a_row_that_makes_something_reads_the_name_it_gives_it() {
+    use yalain_content::Words;
+    const PATH: &str = "town/server/made.toml";
+    let mut files = fixture();
+    let rows = "[[death_spawn]]\neffect = \"Eff_OpensTheLair\"\ntemplate = 0x47000C8C\n\
+                offset = [0.0, 2.0, 0.0]\nname = { table = 0x25001B44, string = 0x1B6D27C1 }\n\
+                prov = { from = \"authored\" }\n\n\
+                [[defense]]\ndevice = 0x4700115B\nholds = 180\nspawns = [{ template = 0x47002224, weight = 1 }]\n\
+                population = 3\nthen = 0x470020B9\nthen_name_text = \"Way Out\"\nprov = { from = \"authored\" }\n\n\
+                [[effect_rule]]\neffect = \"Eff_PlaceTorchFestival\"\nplaces = 0x47002224\n\
+                name_text = \"Festival Torch\"\nprov = { from = \"authored\" }\n";
+    files.insert(PATH.into(), rows.to_string());
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert_eq!(
+        t.death_spawns["Eff_OpensTheLair"].name,
+        Some(Words::Ref(0x1B6D_27C1, 0x2500_1B44))
+    );
+    assert_eq!(
+        t.content.defenses.rows[0].then_name,
+        Some(Words::Literal("Way Out".into()))
+    );
+    assert_eq!(
+        t.effect_rules.places_named["Eff_PlaceTorchFestival"].name,
+        Some(Words::Literal("Festival Torch".into()))
+    );
+    // A reference and prose: the reference names it.
+    files.insert(
+        PATH.into(),
+        rows.replacen(
+            "prov = { from = \"authored\" }\n\n[[defense]]",
+            "name_text = \"Ignored\"\nprov = { from = \"authored\" }\n\n[[defense]]",
+            1,
+        ),
+    );
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert_eq!(
+        t.death_spawns["Eff_OpensTheLair"].name,
+        Some(Words::Ref(0x1B6D_27C1, 0x2500_1B44))
+    );
+    // A name of nothing made; a name that is no reference.
+    for (from, to) in [
+        ("then = 0x470020B9\n", ""),
+        ("places = 0x47002224\n", ""),
+        (
+            "name = { table = 0x25001B44, string = 0x1B6D27C1 }",
+            "name = 7",
+        ),
+    ] {
+        files.insert(PATH.into(), rows.replacen(from, to, 1));
+        assert!(read(&files).is_err(), "{from} to {to}");
+    }
+    // A creature is named by a string reference alone, as its corpse is after it; so is what a
+    // device leaves.
+    files.insert(
+        PATH.into(),
+        rows.replacen("template = 0x47000C8C", "template = 0x47002226", 1)
+            .replacen(
+                "name = { table = 0x25001B44, string = 0x1B6D27C1 }",
+                "name_text = \"Hound\"",
+                1,
+            ),
+    );
+    let problems = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new())
+        .err()
+        .unwrap_or_default();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.message.contains("name_text: a creature")),
+        "{problems:?}"
+    );
+    files.insert(
+        PATH.into(),
+        rows.replacen("then = 0x470020B9", "then = 0x47002226", 1),
+    );
+    let problems = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new())
+        .err()
+        .unwrap_or_default();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.message.contains("then_name_text: a creature")),
+        "{problems:?}"
+    );
+}
+
+/// A sequence row with no quest keeps its own count, forgotten after its `forgets_after`; a step
+/// and a give may wait on it, at a count or done, and compile with their gates. A gate naming an
+/// order the world lacks, one counted by its quest, or a count past its uses is a problem; a time
+/// to forget on a quest's order, or a gate both at a count and done, is refused.
+#[test]
+fn a_sequence_row_of_its_own_count_and_the_steps_and_gives_waiting_on_it() {
+    use yalain_content::item_rows::{SequenceGate, SequenceNeed};
+    const PATH: &str = "town/server/temple.toml";
+    let mut files = fixture();
+    let rows = "[[sequence]]\nkey = \"pillars\"\n\
+                uses = [{ use = 0x4700115B }, { use = 0x47002224 }]\nforgets_after = 600\n\
+                prov = { from = \"authored\" }\n\n\
+                [[step]]\nkey = \"in\"\nquest = 0x40000088\nneeds = 0\ntrigger = { use = 0x470033D0 }\n\
+                update = \"bestow\"\nrequires = [{ sequence = \"pillars\", done = true }]\n\
+                prov = { from = \"authored\" }\n\n\
+                [[give]]\nkey = \"gem\"\nto = 0x470033D0\nitem = 0x470020BB\n\
+                requires = [{ sequence = \"pillars\", at = 1 }]\nprov = { from = \"authored\" }\n";
+    files.insert(PATH.into(), rows.to_string());
+    assert!(check(&files).is_empty(), "{:?}", check(&files));
+    let t = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new()).unwrap();
+    let q = &t.items.sequences[0];
+    assert_eq!((q.quest, q.forgets_after), (None, Some(600.0)));
+    let gate = |need| SequenceGate {
+        key: "pillars".into(),
+        need,
+    };
+    let steps: Vec<_> = t
+        .items
+        .sequence_steps
+        .iter()
+        .map(|(s, g)| (s.key.as_str(), g.clone()))
+        .collect();
+    assert_eq!(steps, [("in", gate(SequenceNeed::Done))]);
+    let gives: Vec<_> = t
+        .items
+        .sequence_gives
+        .iter()
+        .map(|(_, g)| g.clone())
+        .collect();
+    assert_eq!(gives, [gate(SequenceNeed::At(1))]);
+    // Problems for the build.
+    for (from, to, says) in [
+        (
+            "sequence = \"pillars\", done",
+            "sequence = \"columns\", done",
+            "no [[sequence]] columns",
+        ),
+        ("at = 1", "at = 3", "has 2 uses, not 3"),
+        (
+            "forgets_after = 600\n",
+            "quest = 0x40000088\n",
+            "counts by its quest's phase",
+        ),
+    ] {
+        files.insert(PATH.into(), rows.replacen(from, to, 1));
+        let problems = compile(&merge(&read(&files).unwrap()).unwrap(), &Fake::new())
+            .err()
+            .unwrap_or_default();
+        assert!(
+            problems.iter().any(|p| p.message.contains(says)),
+            "{to}: {problems:?}"
+        );
+    }
+    // Refused as read.
+    for (from, to) in [
+        (
+            "forgets_after = 600\n",
+            "forgets_after = 600\nquest = 0x40000088\n",
+        ),
+        ("forgets_after = 600", "forgets_after = 0"),
+        ("at = 1", "at = 1, done = true"),
+        (
+            "{ sequence = \"pillars\", at = 1 }",
+            "{ sequence = \"pillars\" }",
+        ),
+    ] {
+        files.insert(PATH.into(), rows.replacen(from, to, 1));
+        assert!(read(&files).is_err(), "{from} to {to}");
+    }
+}
+
+/// A safe passage names a camp (the camp's row in the spawn table) or a template, and an item or an
+/// effect; one naming both or neither of either pair, a camp the world lacks, and a template or an
+/// item the install lacks are refused.
+#[test]
+fn safe_passage_rows_compile_to_their_camps_or_kinds_and_what_lets_pass() {
+    use yalain_content::creature_rows::{Guards, Pass, SafePassage};
+    const ROWS: &str = "[[safe_passage]]\nkey = \"by-camp\"\ncamp = \"beetles@77B7\"\n\
+        effect = 0x6F001D2C\nprov = { from = \"authored\" }\n\n\
+        [[safe_passage]]\nkey = \"by-kind\"\ntemplate = 0x47002224\nitem = 0x470020BB\n\
+        prov = { from = \"authored\" }\n";
+    let mut files = fixture();
+    files.insert("town/server/creatures.toml".into(), ROWS.into());
+    assert_eq!(check(&files), Vec::new());
+    let db = read(&files).unwrap();
+    let mut keys: Vec<String> = db
+        .rows()
+        .filter(|l| l.file.ends_with("creatures.toml"))
+        .filter_map(yalain_world_db::merge::item_key)
+        .collect();
+    keys.sort();
+    assert_eq!(keys, ["safe_passage by-camp", "safe_passage by-kind"]);
+    for k in &keys {
+        let words: Vec<&str> = k.split(' ').collect();
+        let item = auberean_pack::Item::parse(&words).unwrap_or_else(|| panic!("{k} parses"));
+        assert_eq!(&item.to_string(), k, "{k} reads back");
+    }
+    let t = compile(&merge(&db).unwrap(), &Fake::new()).unwrap();
+    let row = t
+        .spawns
+        .camps
+        .iter()
+        .position(|c| c.id == "beetles")
+        .map(|r| u32::try_from(r).unwrap())
+        .unwrap();
+    let mut got = t.creatures.safe_passage.clone();
+    got.sort_by_key(|r| matches!(r.guards, Guards::Template(_)));
+    assert_eq!(
+        got,
+        [
+            SafePassage {
+                guards: Guards::Camp(row),
+                pass: Pass::Effect(0x6F00_1D2C),
+            },
+            SafePassage {
+                guards: Guards::Template(0x4700_2224),
+                pass: Pass::Item(0x4700_20BB),
+            },
+        ]
+    );
+    // A camp named alone, where one camp has the key, is that camp.
+    let mut f = fixture();
+    f.insert(
+        "town/server/creatures.toml".into(),
+        ROWS.replace("beetles@77B7", "beetles"),
+    );
+    let t = compile(&merge(&read(&f).unwrap()).unwrap(), &Fake::new()).unwrap();
+    assert!(t
+        .creatures
+        .safe_passage
+        .iter()
+        .any(|r| r.guards == Guards::Camp(row)));
+
+    for (from, to) in [
+        ("camp = \"beetles@77B7\"\n", ""),
+        (
+            "camp = \"beetles@77B7\"\n",
+            "camp = \"beetles@77B7\"\ntemplate = 0x47002224\n",
+        ),
+        ("effect = 0x6F001D2C\n", ""),
+        (
+            "effect = 0x6F001D2C\n",
+            "effect = 0x6F001D2C\nitem = 0x470020BB\n",
+        ),
+        ("key = \"by-camp\"\n", ""),
+        (
+            "effect = 0x6F001D2C\n",
+            "effect = 0x6F001D2C\nclass = 0x65\n",
+        ),
+    ] {
+        let mut f = fixture();
+        f.insert(
+            "town/server/creatures.toml".into(),
+            ROWS.replacen(from, to, 1),
+        );
+        assert!(read(&f).is_err(), "{to:?} for {from:?}");
+    }
+    let mut f = fixture();
+    f.insert(
+        "town/server/creatures.toml".into(),
+        ROWS.replace("beetles@77B7", "wasps@77B7"),
+    );
+    let problems: Vec<String> = check(&f).iter().map(ToString::to_string).collect();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("camp: no camp wasps@77B7")),
+        "{problems:?}"
+    );
+    assert!(compile(&merge(&read(&f).unwrap()).unwrap(), &Fake::new()).is_err());
+    for (from, to) in [
+        ("template = 0x47002224", "template = 0x47009999"),
+        ("item = 0x470020BB", "item = 0x47009999"),
+    ] {
+        let mut f = fixture();
+        f.insert("town/server/creatures.toml".into(), ROWS.replace(from, to));
+        assert!(
+            compile(&merge(&read(&f).unwrap()).unwrap(), &Fake::new()).is_err(),
+            "{to}: the install lacks it"
+        );
+    }
+}
+
+/// A creature effect row names its creatures' templates, the effect they hold from their first
+/// moment and its spellcraft (a number, or a line of `[level, spellcraft]`; none: 1); a give's step
+/// that hands its item back may name the effects it puts on it; an effect rule may name the effects
+/// a dispel takes off. Each compiles to its table; a row with no templates, no effect, a spellcraft
+/// that is no number or line, an install template it lacks, given effects on a step that keeps its
+/// item or is no give, and an empty dispel list are refused.
+/// Behaviour: server.content.creature-effects-given-effects-and-dispels
+#[test]
+fn creature_effects_a_steps_given_effects_and_dispels_compile_to_their_tables() {
+    use yalain_content::creature_rows::CreatureEffect;
+    const ROWS: &str = "[[creature_effect]]\nkey = \"by-level\"\ntemplates = [0x47002224]\n\
+        effect = 0x6F001E06\nspellcraft = [[30, 30.0], [70, 50]]\nprov = { from = \"authored\" }\n\n\
+        [[creature_effect]]\nkey = \"plain\"\ntemplates = [0x47002224, 0x470020BB]\n\
+        effect = 0x70001C79\nprov = { from = \"authored\" }\n\n\
+        [[creature_effect]]\nkey = \"number\"\ntemplates = [0x470020BB]\neffect = 0x6F000E94\n\
+        spellcraft = 12\nprov = { from = \"authored\" }\n";
+    let mut files = fixture();
+    files.insert("town/server/creatures.toml".into(), ROWS.into());
+    edit(
+        &mut files,
+        "town/server/quests/40000088.toml",
+        "trigger = { give = 0x470020B9, to = 0x470033D0 }\nupdate = \"complete\"",
+        "trigger = { give = 0x470020B9, to = 0x470033D0 }\nupdate = \"complete\"\n\
+         given_effects = [0x6F001E04]",
+    );
+    files.insert(
+        "town/server/effects.toml".into(),
+        "[[effect_rule]]\neffect = 0x6F001E05\ndispels = [0x6F001E06]\nprov = { from = \"authored\" }\n"
+            .into(),
+    );
+    assert_eq!(check(&files), Vec::new());
+    let db = read(&files).unwrap();
+    let mut keys: Vec<String> = db
+        .rows()
+        .filter(|l| l.file.ends_with("creatures.toml"))
+        .filter_map(yalain_world_db::merge::item_key)
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "creature_effect by-level",
+            "creature_effect number",
+            "creature_effect plain"
+        ]
+    );
+    for k in &keys {
+        let words: Vec<&str> = k.split(' ').collect();
+        let item = auberean_pack::Item::parse(&words).unwrap_or_else(|| panic!("{k} parses"));
+        assert_eq!(&item.to_string(), k, "{k} reads back");
+    }
+    let t = compile(&merge(&db).unwrap(), &Fake::new()).unwrap();
+    let mut got = t.creatures.effects.clone();
+    got.sort_by_key(|e| e.effect);
+    assert_eq!(
+        got,
+        [
+            CreatureEffect {
+                templates: vec![0x4700_20BB],
+                effect: 0x6F00_0E94,
+                spellcraft: vec![(0.0, 12.0)],
+            },
+            CreatureEffect {
+                templates: vec![0x4700_2224],
+                effect: 0x6F00_1E06,
+                spellcraft: vec![(30.0, 30.0), (70.0, 50.0)],
+            },
+            CreatureEffect {
+                templates: vec![0x4700_2224, 0x4700_20BB],
+                effect: 0x7000_1C79,
+                spellcraft: vec![(0.0, 1.0)],
+            },
+        ]
+    );
+    assert_eq!(
+        t.content
+            .given_effects
+            .get(&(0x4000_0088, "s4".to_string())),
+        Some(&vec![0x6F00_1E04])
+    );
+    assert_eq!(t.content.given_effects.len(), 1);
+    assert_eq!(
+        t.effect_rules.dispels.get(&0x6F00_1E05),
+        Some(&vec![0x6F00_1E06])
+    );
+    for (from, to) in [
+        ("templates = [0x47002224]\n", ""),
+        ("templates = [0x47002224]\n", "templates = []\n"),
+        ("effect = 0x6F001E06\n", ""),
+        (
+            "spellcraft = [[30, 30.0], [70, 50]]",
+            "spellcraft = [[30, 30.0, 1], [70, 50]]",
+        ),
+        ("spellcraft = [[30, 30.0], [70, 50]]", "spellcraft = []"),
+        ("spellcraft = [[30, 30.0], [70, 50]]", "spellcraft = \"30\""),
+        ("key = \"plain\"\n", ""),
+    ] {
+        let mut f = files.clone();
+        edit(&mut f, "town/server/creatures.toml", from, to);
+        assert!(read(&f).is_err(), "{to:?} for {from:?}");
+    }
+    let mut f = files.clone();
+    edit(
+        &mut f,
+        "town/server/effects.toml",
+        "dispels = [0x6F001E06]",
+        "dispels = []",
+    );
+    assert!(read(&f).is_err(), "an empty dispel list");
+    let mut f = files.clone();
+    edit(
+        &mut f,
+        "town/server/creatures.toml",
+        "templates = [0x470020BB]",
+        "templates = [0x47009999]",
+    );
+    assert!(
+        compile(&merge(&read(&f).unwrap()).unwrap(), &Fake::new()).is_err(),
+        "the install lacks it"
+    );
+    // Given effects on a step that keeps the item, or that is no give.
+    for (from, to) in [
+        (
+            "given_effects = [0x6F001E04]",
+            "given_effects = [0x6F001E04]\ntakes = [0x470020B9]",
+        ),
+        (
+            "trigger = { give = 0x470020B9, to = 0x470033D0 }",
+            "trigger = { use = 0x470033D0 }",
+        ),
+    ] {
+        let mut f = files.clone();
+        edit(&mut f, "town/server/quests/40000088.toml", from, to);
+        let problems: Vec<String> = check(&f).iter().map(ToString::to_string).collect();
+        assert!(
+            problems.iter().any(|p| p.contains("given_effects:")),
+            "{to}: {problems:?}"
+        );
+    }
 }

@@ -62,11 +62,17 @@ pub use remaster_assets::DatAssets;
 #[path = "remaster_bridge.rs"]
 mod remaster_bridge;
 #[cfg(feature = "remaster")]
+#[path = "remaster_cover.rs"]
+mod remaster_cover;
+#[cfg(feature = "remaster")]
 #[path = "remaster_look.rs"]
 mod remaster_look;
 #[cfg(feature = "remaster")]
 #[path = "remaster_pack.rs"]
 mod remaster_pack;
+#[cfg(feature = "remaster")]
+#[path = "remaster_slots.rs"]
+mod remaster_slots;
 #[cfg(feature = "remaster")]
 pub use remaster_look::{RemasterLookError, RemasterLookLayer, RemasterLooks};
 #[cfg(feature = "remaster")]
@@ -80,8 +86,8 @@ pub use remaster_effects::{
 };
 #[cfg(feature = "remaster")]
 pub use remaster_effects::{
-    remaster_upscaler_drawn, RemasterAo, RemasterPost, RemasterPostPicture, RemasterUpscale,
-    RemasterUpscaleMode, RemasterWater,
+    remaster_upscaler_drawn, RemasterAo, RemasterPost, RemasterPostPicture, RemasterSkinBody,
+    RemasterSurfaceRef, RemasterUpscale, RemasterUpscaleMode, RemasterWater,
 };
 #[cfg(feature = "remaster")]
 #[path = "remaster_weather.rs"]
@@ -117,6 +123,9 @@ pub use remaster_lod::{RemasterImpostorStats, RemasterLod, RemasterLodStats};
 #[cfg(feature = "remaster")]
 #[path = "remaster_ground.rs"]
 mod remaster_ground;
+#[cfg(feature = "remaster")]
+#[path = "remaster_pictures.rs"]
+mod remaster_pictures;
 #[cfg(feature = "remaster")]
 #[path = "remaster_view.rs"]
 mod remaster_view;
@@ -528,6 +537,13 @@ struct BlockDraw {
     /// degraded past its last real level assembles to *nothing* and would otherwise be
     /// rebuilt on every frame for ever.
     degrade_assembled: bool,
+    /// What its placements' levels, its own and its rooms', were last chosen under, and how far
+    /// the viewer may move from there before any of them could change; `None` before the first.
+    levels_chosen: Option<degrade::LevelsChosen>,
+    /// Which choice of its placements' levels and turns the block holds: a new number, larger than
+    /// any before, each time [`SceneDraw::refresh_degrade_levels`] changes one of them, its own or
+    /// its rooms'. 0 before the first.
+    levels_serial: u64,
     /// The block's environment cells.
     env_cells: Vec<EnvCellDraw>,
     /// The block's building objects, as the *outdoor* portal machinery needs them.
@@ -580,6 +596,13 @@ struct BlockDraw {
     /// The block's own placements as the bake placed them, block-local, for the remaster.
     #[cfg(feature = "remaster")]
     remaster_placements: Vec<remaster_bridge::BakedPlacement>,
+}
+
+/// The number a block's choice of levels takes when it changes ([`BlockDraw::levels_serial`]):
+/// larger than every one before, whichever block took them.
+fn next_levels_serial() -> u64 {
+    static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The number the next block build takes, so the remaster tells a block whose contents were
@@ -1195,6 +1218,10 @@ pub const DETAIL_TEXTURE_PASS: bool = true;
 #[derive(Debug)]
 pub struct SceneDraw {
     pub cfg: SceneConfig,
+    /// The scenery radius the scene was loaded with, the command line's: the one it draws while
+    /// the remaster does not, or while the remaster's scenery distance names none.
+    #[cfg(feature = "remaster")]
+    scenery_asked: u32,
     /// Shadow copies used by the rendering-preference poll.
     ///
     /// The client keeps one shadow per polled field: landscape and environment texture
@@ -1471,6 +1498,9 @@ pub struct SceneDraw {
     frame_building_cells: std::cell::Cell<u32>,
     /// What the scene's own parts of the last frame took on the processor.
     pub(super) frame_costs: std::cell::Cell<FrameCosts>,
+    /// The blocks, and the choice of levels each held, the degrade counters were last counted
+    /// over ([`Self::refresh_degrade_stats`]): counted again only once they change.
+    pub(super) degrade_stats_of: Option<(usize, u64)>,
     /// Where the detail textures were last taken from ([`Self::detail_source_used`]).
     detail_from: DetailSource,
     /// The sky objects, and the clock that positions them.
@@ -4770,6 +4800,32 @@ pub trait SceneWrites: sealed::SceneHalvesMut {
     ) -> Result<(), WorldError> {
         let (world, draw) = self.halves_mut();
         draw.attach_character(world, store, region, gpu)
+    }
+
+    /// The body rebuilt on another setup and motion table, as a server description naming them
+    /// would, its part meshes built again. `Ok(false)` when it already had that setup.
+    ///
+    /// # Errors
+    /// No body, a setup or table that will not load, or a part mesh that cannot be built.
+    fn set_character_setup(
+        &mut self,
+        store: &Arc<RetailDatStore>,
+        gpu: &mut Gpu,
+        setup: dereth_primitives::DataId,
+        motion_table: Option<dereth_primitives::DataId>,
+    ) -> Result<bool, WorldError> {
+        use world_objects::ObjectAppearance as _;
+        let (world, draw) = self.halves_mut();
+        let Some(c) = world.character.as_mut() else {
+            return Err(WorldError::Render("no body".to_owned()));
+        };
+        let rebuilt = c
+            .set_setup_id(setup, motion_table)
+            .map_err(|e| WorldError::Render(e.to_string()))?;
+        if rebuilt {
+            DrawFollows { draw, gpu, store }.body_parts_changed(world)?;
+        }
+        Ok(rebuilt)
     }
 
     /// [`SceneDraw::sync_objects`] on the scene.

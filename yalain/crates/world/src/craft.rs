@@ -50,8 +50,11 @@
 //! making; the plant is used up, the armor stays).
 //!
 //! **Other recipes that work out their own product** (card melds and the like) name none the data
-//! holds: such a making answers that it failed, with a line saying so, uses up nothing and pays
-//! nothing (2017: 9 of 9 card melds).
+//! holds: what one makes of a set of ingredients is the world's `[[combination]]` row's for the
+//! recipe whose templates the slots hold, one a slot in any order. Such a making makes the row's
+//! product and uses up its slots as the outcome says; one whose slots make no row answers that it
+//! failed, with a line saying so, uses up nothing and pays nothing (2017: 9 of 9 card melds, none of
+//! them a set of cards that melds).
 //!
 //! **Craft experience.** A recipe made pays experience in its craft skill: the recipe's table by
 //! the spinner chosen (else its own fixed amount), times the outcome's share. A part goes to the
@@ -73,7 +76,7 @@
 //! **A day's craft experience** starts over 22 hours after it last did (at entry, when that came
 //! while the player was away): every craft skill's record is told with nothing earned today.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use auberean_protocol::physics::Release;
 use auberean_protocol::quality::VisualQuality;
@@ -83,7 +86,7 @@ use auberean_script::args::Arg;
 use auberean_script::graph::{Graph, PackedObject};
 use auberean_script::library::{Elem, Library};
 use auberean_script::native_object::{Item, NativeObject};
-use yalain_content::crafts::{Crafts, MapRecipes, Refining, Totem};
+use yalain_content::crafts::{CraftGate, Crafts};
 use yalain_content::treasure_tables::Sort;
 use yalain_net::{ConnId, ServerNet};
 use yalain_store::Store;
@@ -330,39 +333,21 @@ pub enum Custom {
     /// It has none.
     #[default]
     None,
-    /// Refining: it yields units of this template, by how much it took and the craft skill, all it
-    /// took at the level `full_at` (the world's `[[refining]]` rows name both).
-    Refine { product: u32, full_at: u32 },
+    /// Refining: it yields units of this template, by how much it took and the craft skill: `start`
+    /// percent of it before any skill, all it took at the level `full_at` (the world's
+    /// `[[refining]]` rows name all three).
+    Refine {
+        product: u32,
+        full_at: u32,
+        start: u32,
+    },
     /// Spellbinding: it makes a totem of the kind of the item in its first slot.
     Spellbind,
     /// Dyeing: the item in its first slot takes the color of the dye in its second.
     Dye,
-    /// A product it works out for itself, which nothing here can: it makes nothing.
+    /// A product it works out for itself: what the world's `[[combination]]` rows say its slots
+    /// make, else nothing.
     Unknown,
-}
-
-/// The totems spellbinding makes in a world with no `[[spellbinding]]` rows, by what the item taken
-/// apart is: a weapon, a shield, armor (2017: 11 weapons, 2 armor, each by the recipe for its
-/// class; the shield's by the totems seen in play, none made).
-#[must_use]
-pub fn fallback_totems() -> Vec<Totem> {
-    vec![
-        Totem {
-            sort: Sort::Weapon,
-            template: 0x4700_0CCB,
-            word: 0xEE40_CD5E,
-        },
-        Totem {
-            sort: Sort::Shield,
-            template: 0x4700_0CC9,
-            word: 0x3B28_4FFE,
-        },
-        Totem {
-            sort: Sort::Armor,
-            template: 0x4700_0CC7,
-            word: 0xCED7_169A,
-        },
-    ]
 }
 
 /// The script packages whose recipes bind an item's enchantments into a totem, and whose recipes
@@ -374,50 +359,24 @@ const DYEING: &str = "DyeingRecipe";
 /// "You fail to produce anything."
 pub const NOTHING_PRODUCED: (u32, u32) = (0x9CD4_94DC, 0x2500_000C);
 
-/// What the refining recipes yield in a world with no `[[refining]]` rows: by their script
-/// packages, the template of each product, all it takes at [`REFINING_CAP`].
-#[must_use]
-pub fn fallback_refining() -> BTreeMap<String, Refining> {
-    [
-        ("SteelRefiningRecipe", 0x4700_0B40),
-        ("DramasticRefiningRecipe", 0x4700_0B46),
-        ("MoonglassRefiningRecipe", 0x4700_08FC),
-        ("RunewoodRefiningRecipe", 0x4700_08DA),
-        ("TukaliteRefiningRecipe", 0x4700_08D3),
-        ("TileRefiningRecipe", 0x4700_0657),
-        ("BlockRefiningRecipe", 0x4700_0658),
-        ("BoardRefiningRecipe", 0x4700_0659),
-        ("BrickRefiningRecipe", 0x4700_0655),
-        ("PlasterRefiningRecipe", 0x4700_0656),
-    ]
-    .into_iter()
-    .map(|(recipe, product)| {
-        (
-            recipe.to_string(),
-            Refining {
-                recipe: recipe.to_string(),
-                product,
-                full_at: Some(REFINING_CAP),
-            },
-        )
-    })
-    .collect()
-}
-
 /// The craft skill level at which a refining yields all it takes, where its row names none.
 pub const REFINING_CAP: u32 = 150;
 
-/// What a refining of this amount of each material yields at a craft skill level: a third of it at
-/// the first level (2017: 34 of 100 at level 2, 2 of 2), all of it at `full_at` (a row's, or
-/// [`REFINING_CAP`]: this server's own, the recipes say only that it grows with the skill).
+/// The percent of what it takes a refining yields before any skill, where its row names none.
+pub const REFINING_START: u32 = 34;
+
+/// What a refining of this amount of each material yields at a craft skill level: `start` percent
+/// of it before any skill, growing evenly to all of it at `full_at`, rounded down. The server's
+/// own, 34 and 150, is 34 percent and 0.44 more a level, as players measured it in 2004-05; it
+/// gives 34 of 100 at level 2, as in 2017.
 #[must_use]
-pub fn refining_yield(amount: u32, level: u32, full_at: u32) -> u32 {
-    let full_at = full_at.max(2);
-    let above = f64::from(level.clamp(1, full_at) - 1) / f64::from(full_at - 1);
-    let share = 1.0 / 3.0 + 2.0 / 3.0 * above;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let got = (f64::from(amount) * share).round() as u32;
-    got
+pub fn refining_yield(amount: u32, level: u32, full_at: u32, start: u32) -> u32 {
+    let full_at = u64::from(full_at.max(1));
+    let start = u64::from(start.min(100));
+    let level = u64::from(level).min(full_at);
+    let share = start * full_at + (100 - start) * level;
+    let got = u64::from(amount) * share / (100 * full_at);
+    u32::try_from(got).unwrap_or(amount)
 }
 
 /// "You successfully produce %1 units of %2.": its string, and its variables (how many, the
@@ -603,17 +562,33 @@ pub struct Crafting {
     pub butchery: HashMap<u32, Vec<crate::butchery::Yield>>,
     /// What gathering tools yield when they were not made, by template (the world's rows).
     pub tool_yields: HashMap<u32, u32>,
-    /// What mining's nodes do and the nodes surveyor's maps lead to (the world's rows, or the
-    /// server's own of a kind it has none of).
+    /// What mining's nodes do and the nodes surveyor's maps lead to (the world's rows).
     pub gathering: yalain_content::gathering::Gathering,
-    /// Map recipes' waits, spellbinding's totems and refining's products (the world's rows, or the
-    /// server's own of a kind it has none of).
+    /// Map recipes' waits, spellbinding's totems and refining's products (the world's rows).
     pub crafts: Crafts,
     /// The level tables recipes' actions read by the spinner, by saved state.
     pub spinner_tables: HashMap<u32, LevelMap>,
+    /// The records of the recipes the world defines, by id, as a data file would hold them: served
+    /// to a client that asks for one ([`crate::recipe_rows`]).
+    pub records: HashMap<u32, Vec<u8>>,
 }
 
 impl Crafting {
+    /// The effects its recipes' outcomes put on, on their makers or their products.
+    #[must_use]
+    pub fn outcome_effects(&self) -> Vec<u32> {
+        self.recipes
+            .values()
+            .flat_map(|r| r.checks.iter())
+            .flat_map(|c| c.outcomes.iter())
+            .flat_map(|o| o.actions.iter())
+            .filter_map(|a| match a {
+                Action::Effect { state, .. } | Action::ItemEffect { state, .. } => Some(*state),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The recipes and craft skills of these saved states (a state that does not read is left
     /// out; a recipe's craft skill is read with it).
     #[must_use]
@@ -1256,6 +1231,25 @@ pub fn award<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, sk
     progress::private(net, world, &skill_call(&record));
 }
 
+/// A player is given craft experience to spend: its pool's total and what is left of it grow by
+/// so much, and the client is told both (nothing when it is nothing).
+pub fn give_pool<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, points: u64) {
+    if points == 0 {
+        return;
+    }
+    let Some(p) = s.players.get_mut(&world) else {
+        return;
+    };
+    for k in [pool::AVAILABLE, pool::TOTAL] {
+        let v = quals::long(&p.qualities, k)
+            .unwrap_or(0)
+            .saturating_add(points);
+        quals::set_long(&mut p.qualities, k, v);
+    }
+    tell_pool(net, world, p, true);
+    crate::world::keep_player(s, world);
+}
+
 /// The client asks to raise a craft skill: the pool pays what the skill still lacks for its next
 /// level. One that cannot be raised, is at its cap, or that the pool cannot pay for is left as it
 /// is (the client asks only when it can).
@@ -1381,6 +1375,35 @@ pub fn craft_level<S: Store>(s: &Server<S>, world: ConnId, skill: u32) -> u32 {
         .min(d.cap.max(raw))
 }
 
+/// Does a player meet a craft gate: one of its skills at its level or above, as a making reads it?
+fn meets<S: Store>(s: &Server<S>, world: ConnId, gate: &CraftGate) -> bool {
+    gate.skills
+        .iter()
+        .any(|k| craft_level(s, world, *k) >= gate.at_least)
+}
+
+/// May a step run for a player, by the craft skills it waits on: every gate it names met.
+#[must_use]
+pub fn step_allows<S: Store>(
+    s: &Server<S>,
+    world: ConnId,
+    step: &yalain_content::quests::Step,
+) -> bool {
+    let gates = &s.content.craft_gates;
+    gates.is_empty() || gates.of_step(step).all(|g| meets(s, world, g))
+}
+
+/// May a give take its item from a player, by the craft skills it waits on.
+#[must_use]
+pub fn give_allows<S: Store>(
+    s: &Server<S>,
+    world: ConnId,
+    give: &yalain_content::quests::Give,
+) -> bool {
+    let gates = &s.content.craft_gates;
+    gates.is_empty() || gates.of_give(give).all(|g| meets(s, world, g))
+}
+
 /// The record of a craft skill held, as the registry packs it.
 fn skill_slots(c: &CraftSkillState) -> [Slot; 4] {
     [
@@ -1499,109 +1522,95 @@ pub fn recipes_call(rs: &[RecipeState], now: f64) -> ServerMessage {
     session::call(function::UPDATE_RECIPES, &[Arg::Object(b.graph())]).expect("records pack")
 }
 
-/// The surveyor's map recipes of each region in a world with no `[[map_recipes]]` rows, in the
-/// order their call lists them (crystal, iron, stone, wood, silver), with the effect a map drawn
-/// puts on the drawer to set their wait and the usage effect of the region's maps that ends it.
-#[must_use]
-pub fn fallback_map_recipes() -> BTreeMap<String, MapRecipes> {
-    [
-        (
-            "linvak",
-            0x6F00_170C,
-            "Eff_ResetLinvakResetTimers",
-            [
-                0x6F00_109B,
-                0x6F00_1099,
-                0x6F00_109C,
-                0x6F00_109D,
-                0x6F00_109A,
-            ],
-        ),
-        (
-            "omishan",
-            0x6F00_170D,
-            "Eff_ResetOmishanResetTimers",
-            [
-                0x6F00_1096,
-                0x6F00_1094,
-                0x6F00_1097,
-                0x6F00_1098,
-                0x6F00_1095,
-            ],
-        ),
-        (
-            "osteth",
-            0x6F00_170E,
-            "Eff_ResetOstethResetTimers",
-            [
-                0x6F00_1091,
-                0x6F00_108F,
-                0x6F00_1092,
-                0x6F00_1093,
-                0x6F00_1090,
-            ],
-        ),
-    ]
-    .into_iter()
-    .map(|(region, drawn, found, recipes)| {
-        (
-            region.to_string(),
-            MapRecipes {
-                region: region.to_string(),
-                drawn,
-                found: found.to_string(),
-                recipes: recipes.to_vec(),
-                wait: Some(MAP_RECIPES_WAIT),
-            },
-        )
-    })
-    .collect()
-}
-
 /// How long a region's map recipes wait after one of them is drawn, in seconds of game time, where
 /// its row names no wait.
 pub const MAP_RECIPES_WAIT: f64 = 300.0;
 
-/// The world's crafting work: its rows of each kind, or the server's own of a kind it has none of
-/// ([`fallback_map_recipes`], [`fallback_totems`], [`fallback_refining`]); and the kinds it had
-/// none of.
-#[must_use]
-pub fn world_crafts(rows: &Crafts) -> (Crafts, Vec<&'static str>) {
-    let mut c = rows.clone();
-    let mut fell_back = Vec::new();
-    if c.map_recipes.is_empty() {
-        c.map_recipes = fallback_map_recipes();
-        fell_back.push("map_recipes");
-    }
-    if c.totems.is_empty() {
-        c.totems = fallback_totems();
-        fell_back.push("spellbinding");
-    }
-    if c.refining.is_empty() {
-        c.refining = fallback_refining();
-        fell_back.push("refining");
-    }
-    (c, fell_back)
-}
-
 impl Crafting {
-    /// Crafting takes the world's crafting work ([`world_crafts`]): each refining recipe yields its
-    /// row's product, a recipe no row names nothing of its own. Returns the kinds the world had no
-    /// rows of.
+    /// Crafting takes the world's crafting work, its `[[map_recipes]]`, `[[spellbinding]]` and
+    /// `[[refining]]` rows: each refining recipe yields its row's product, a recipe no row names
+    /// nothing of its own. Returns the kinds the world had no rows of: it has no map recipes'
+    /// waits, totems or refined products of such a kind.
     pub fn take_world_crafts(&mut self, rows: &Crafts) -> Vec<&'static str> {
-        let (crafts, fell_back) = world_crafts(rows);
         for r in self.recipes.values_mut() {
-            if let Some(row) = crafts.refining.get(&r.package) {
-                r.custom = Custom::Refine {
-                    product: row.product,
-                    full_at: row.full_at.unwrap_or(REFINING_CAP),
-                };
-            } else if matches!(r.custom, Custom::Refine { .. }) {
-                r.custom = Custom::None;
+            refine_by_rows(r, rows);
+        }
+        self.crafts = rows.clone();
+        [
+            ("map_recipes", rows.map_recipes.is_empty()),
+            ("spellbinding", rows.totems.is_empty()),
+            ("refining", rows.refining.is_empty()),
+        ]
+        .into_iter()
+        .filter_map(|(kind, none)| none.then_some(kind))
+        .collect()
+    }
+
+    /// Read these recipes too, those it does not hold already, each refining as the world's
+    /// `[[refining]]` rows it has taken say: how many it read.
+    pub fn read_more(
+        &mut self,
+        lib: &Library,
+        recipes: &[u32],
+        graph: &dyn Fn(u32) -> Option<Graph>,
+    ) -> usize {
+        let wanted: Vec<u32> = recipes
+            .iter()
+            .copied()
+            .filter(|r| !self.recipes.contains_key(r))
+            .collect();
+        let more = Self::read(lib, &[], &wanted, &[], graph);
+        let read = more.recipes.len();
+        for (did, mut r) in more.recipes {
+            refine_by_rows(&mut r, &self.crafts);
+            self.recipes.insert(did, r);
+        }
+        for (table, m) in more.spinner_tables {
+            self.spinner_tables.entry(table).or_insert(m);
+        }
+        read
+    }
+
+    /// Make the recipes the world defines (the `[[recipe]]` rows taken with
+    /// [`Self::take_world_crafts`]), each from the install recipe it names, and read them as the
+    /// install's are, their records kept for clients ([`crate::recipe_rows`]). A row whose id the
+    /// install holds a record of, or whose recipe to make it from does not read, is not made.
+    /// Returns those rows, by id, each with why.
+    pub fn take_world_recipes(
+        &mut self,
+        lib: &Library,
+        graph: &dyn Fn(u32) -> Option<Graph>,
+    ) -> Vec<(u32, String)> {
+        let mut made = HashMap::new();
+        let mut refused = Vec::new();
+        for row in self.crafts.recipes.values() {
+            if graph(row.recipe).is_some() {
+                refused.push((row.recipe, "the install holds a record of its id".into()));
+                continue;
+            }
+            let Some(like) = graph(row.like) else {
+                refused.push((
+                    row.recipe,
+                    format!("no recipe {:08X} to make it from", row.like),
+                ));
+                continue;
+            };
+            match crate::recipe_rows::make(lib, &like, row)
+                .and_then(|g| RecipeDef::from_state(row.recipe, lib, &g).map(|_| g))
+                .and_then(|g| crate::recipe_rows::record(row.recipe, &g).map(|r| (g, r)))
+            {
+                Ok((g, record)) => {
+                    made.insert(row.recipe, g);
+                    self.records.insert(row.recipe, record);
+                }
+                Err(why) => refused.push((row.recipe, why)),
             }
         }
-        self.crafts = crafts;
-        fell_back
+        let ids: Vec<u32> = made.keys().copied().collect();
+        self.read_more(lib, &ids, &|id| {
+            made.get(&id).cloned().or_else(|| graph(id))
+        });
+        refused
     }
 
     /// The `[[refining]]` rows whose recipe none of crafting's recipes is of (none a player can
@@ -1614,6 +1623,19 @@ impl Crafting {
             .filter(|k| !self.recipes.values().any(|r| &r.package == *k))
             .map(String::as_str)
             .collect()
+    }
+}
+
+/// A recipe refines as its `[[refining]]` row says; one no row names refines nothing of its own.
+fn refine_by_rows(r: &mut RecipeDef, rows: &Crafts) {
+    if let Some(row) = rows.refining.get(&r.package) {
+        r.custom = Custom::Refine {
+            product: row.product,
+            full_at: row.full_at.unwrap_or(REFINING_CAP),
+            start: row.start.unwrap_or(REFINING_START),
+        };
+    } else if matches!(r.custom, Custom::Refine { .. }) {
+        r.custom = Custom::None;
     }
 }
 
@@ -2177,16 +2199,28 @@ fn result<S: Store>(
     let Some(def) = s.crafting.recipes.get(&m.recipe).cloned() else {
         return;
     };
-    if def.custom == Custom::Unknown {
-        let line = progress::text(NOTHING_PRODUCED);
-        progress::private(
-            net,
-            world,
-            &crate::chat::show_text(progress::TEXT_KIND, line),
-        );
-        progress::private(net, world, &executed(error::FAILED, m.recipe));
-        return;
-    }
+    // A recipe that works out its own product makes what the world's rows say its slots make,
+    // else nothing.
+    let combined = if def.custom == Custom::Unknown {
+        let templates: Vec<u32> = m
+            .slots
+            .iter()
+            .filter_map(|(_, item)| s.things.get(*item).map(|t| t.template))
+            .collect();
+        let Some(c) = s.crafting.crafts.combination(m.recipe, &templates) else {
+            let line = progress::text(NOTHING_PRODUCED);
+            progress::private(
+                net,
+                world,
+                &crate::chat::show_text(progress::TEXT_KIND, line),
+            );
+            progress::private(net, world, &executed(error::FAILED, m.recipe));
+            return;
+        };
+        Some((c.product, c.count))
+    } else {
+        None
+    };
     // An ingredient put down, traded or sold since the request: nothing is made of it.
     let why = check_slots(s, world, &def, m.spinner, &m.slots);
     if why != 0 {
@@ -2217,8 +2251,10 @@ fn result<S: Store>(
     // What can't be made uses nothing up.
     let cannot = outcome.actions.iter().any(|a| match a {
         Action::Produce { template, .. } => !crate::makes::can_make(s, *template),
-        Action::Custom => matches!(def.custom, Custom::Refine { product, .. }
-            if !crate::makes::can_make(s, product)),
+        Action::Custom => match def.custom {
+            Custom::Refine { product, .. } => !crate::makes::can_make(s, product),
+            _ => combined.is_some_and(|(product, _)| !crate::makes::can_make(s, product)),
+        },
         _ => false,
     });
     if cannot {
@@ -2233,7 +2269,7 @@ fn result<S: Store>(
     }
     let makes_item = outcome.actions.iter().any(|a| match a {
         Action::Produce { .. } => true,
-        Action::Custom => matches!(def.custom, Custom::Refine { .. }),
+        Action::Custom => matches!(def.custom, Custom::Refine { .. }) || combined.is_some(),
         _ => false,
     });
     if makes_item
@@ -2346,7 +2382,12 @@ fn result<S: Store>(
                     }
                 }
                 Custom::Dye => dye(s, net, world, &m.slots),
-                Custom::None | Custom::Unknown => {}
+                Custom::Unknown => {
+                    if let Some((product, count)) = combined {
+                        crate::inventory::give_made(s, net, world, product, count);
+                    }
+                }
+                Custom::None => {}
             },
             Action::Other => {}
         }
@@ -2885,7 +2926,12 @@ fn refine<S: Store>(
     outcome: &Outcome,
     spinner: u32,
 ) -> u64 {
-    let Custom::Refine { product, full_at } = def.custom else {
+    let Custom::Refine {
+        product,
+        full_at,
+        start,
+    } = def.custom
+    else {
         return 0;
     };
     let amount = outcome
@@ -2903,7 +2949,7 @@ fn refine<S: Store>(
     else {
         return 0;
     };
-    let got = refining_yield(amount, craft_level(s, world, def.skill), full_at);
+    let got = refining_yield(amount, craft_level(s, world, def.skill), full_at, start);
     let name = s.catalog.get(product).and_then(|t| t.facts.name);
     crate::inventory::give_stacked(s, net, world, product, got);
     if let Some(name) = name {

@@ -7,7 +7,7 @@ use crate::assets::{
     kind, AssetSource, AssetTables, BlendFactor, CellPieceKey, Kind, Material, MaterialKey, Mesh,
     MeshKey, SubsetInfo, SurfaceRef, Texture, TextureFormat, TextureKey, Use, Vertex,
 };
-use crate::scene::{PartLook, Placement, PlacementKind, Terrain};
+use crate::scene::{Object, ObjectKey, ObjectPart, PartLook, Placement, PlacementKind, Terrain};
 
 /// Off, nothing of a pack is drawn; every switch on is every kind; each kind's models follow
 /// their own switch.
@@ -127,6 +127,7 @@ fn tree_model() -> PackModel {
                 },
             })
             .collect(),
+        cover: false,
     }
 }
 
@@ -177,6 +178,7 @@ fn a_placement_the_pack_has_a_model_for_is_drawn_as_the_model() {
                 mesh: pack_mesh(3, 0),
                 distance: f32::INFINITY,
             }],
+            cover: false,
         })
     };
     swap_placements(&mut b, &mut |id| {
@@ -184,6 +186,131 @@ fn a_placement_the_pack_has_a_model_for_is_drawn_as_the_model() {
     });
     assert_eq!(b.placements[1].parts, vec![part(pack_mesh(3, 0), None)]);
     assert_eq!(b.degrades.len(), 1);
+}
+
+/// A tree of one level still has a degrade record, of that level alone: far off it is drawn as
+/// its impostor, as a tree of many levels is past its last.
+#[test]
+fn a_tree_of_one_level_still_has_a_degrade_record() {
+    let mut b = block();
+    let one = || PackModel {
+        category: Category::Tree,
+        levels: vec![PackLevel {
+            mesh: pack_mesh(9, 0),
+            distance: f32::INFINITY,
+        }],
+        cover: false,
+    };
+    swap_placements(&mut b, &mut |id| (id == TREE).then(one));
+    assert_eq!(
+        b.placements[0].parts,
+        vec![Part {
+            frame: b.placements[0].frame,
+            scale: Vec3::splat(1.5),
+            ..part(pack_mesh(9, 0), Some(1))
+        }]
+    );
+    assert_eq!(b.degrades.len(), 2);
+    assert_eq!(b.degrades[1].levels, [pack_mesh(9, 0)]);
+    assert_eq!(b.degrades[1].scale_z, 1.5);
+}
+
+/// An object the server built (a lifestone: standing stones and a crystal) has each part the
+/// pack has a model for, by the GfxObj it draws, drawn as the model at every level it had; its
+/// other parts, its levels that draw nothing and its look stay; counted with the placements.
+#[test]
+fn a_built_objects_part_the_pack_has_a_model_for_is_drawn_as_the_model() {
+    const STONE: u32 = 0x0100_0D00;
+    const CRYSTAL: u32 = 0x0100_0CFA;
+    let look = PartLook {
+        textures: vec![(0x0500_0001, 0x0500_0002)],
+        palette: None,
+        ranges: Vec::new(),
+    };
+    let object = || Object {
+        key: ObjectKey::Server(0x7000_0001),
+        setup: 0x0200_02EE,
+        palettes: Vec::new(),
+        who: crate::scene::Who::default(),
+        parts: vec![
+            ObjectPart {
+                levels: vec![STONE, 0x0100_0D01],
+                look: Some(look.clone()),
+            },
+            ObjectPart {
+                levels: vec![CRYSTAL],
+                look: None,
+            },
+            ObjectPart {
+                levels: vec![0, STONE],
+                look: None,
+            },
+            ObjectPart {
+                levels: Vec::new(),
+                look: None,
+            },
+        ],
+    };
+    let stone = |id: u32| {
+        (id == STONE).then(|| PackModel {
+            category: Category::Rock,
+            levels: vec![
+                PackLevel {
+                    mesh: pack_mesh(4, 0),
+                    distance: 30.0,
+                },
+                PackLevel {
+                    mesh: pack_mesh(4, 1),
+                    distance: f32::INFINITY,
+                },
+            ],
+            cover: false,
+        })
+    };
+    let mut o = object();
+    assert_eq!(swap_object_parts(&mut o, &mut |id| stone(id)), 2);
+    assert_eq!(o.parts[0].levels, [pack_mesh(4, 0); 2]);
+    assert_eq!(
+        o.parts[0].look,
+        Some(look.clone()),
+        "the object's look stays on the part"
+    );
+    assert_eq!(o.parts[1], object().parts[1], "the crystal has no model");
+    assert_eq!(
+        o.parts[2].levels,
+        [pack_mesh(4, 0); 2],
+        "found by the first level that draws"
+    );
+    assert!(o.parts[3].levels.is_empty());
+    // Through the swaps, built and built again alike, for the kinds switched on.
+    let mut swaps = PackSwaps {
+        settings: PackSettings::all(),
+        ..PackSwaps::default()
+    };
+    let deltas = swaps.swap(
+        vec![
+            SceneDelta::ObjectBuilt(Box::new(object())),
+            SceneDelta::ObjectChanged(Box::new(object())),
+        ],
+        &mut |id| stone(id),
+    );
+    for d in &deltas {
+        let (SceneDelta::ObjectBuilt(o) | SceneDelta::ObjectChanged(o)) = d else {
+            panic!("an object delta");
+        };
+        assert_eq!(o.parts[0].levels, [pack_mesh(4, 0); 2]);
+    }
+    assert_eq!(swaps.placements, 4);
+    let mut off = PackSwaps::default();
+    let kept = off.swap(
+        vec![SceneDelta::ObjectBuilt(Box::new(object()))],
+        &mut |id| stone(id),
+    );
+    assert_eq!(
+        kept,
+        vec![SceneDelta::ObjectBuilt(Box::new(object()))],
+        "rocks off: kept"
+    );
 }
 
 /// A source with a pack: the tree's model of three levels, each a triangle on a surface of its
@@ -345,6 +472,46 @@ fn every_pack_asset_a_swapped_block_uses_is_held() {
             pictures_held: 3,
         }
     );
+}
+
+/// **A block's placements of one object ask the pack for its model once**: a block's ground cover
+/// is thousands of placements of a few objects, and each is swapped as the first is, at its own
+/// place with a record of its own.
+#[test]
+fn a_blocks_placements_of_one_object_ask_the_pack_for_its_model_once() {
+    let mut b = block();
+    b.placements = (0..50u8)
+        .map(|k| {
+            let at = Mat4::from_translation(Vec3::new(f32::from(k), 0.0, 0.0));
+            placement(TREE, at, 1.0, vec![part(3, None)])
+        })
+        .collect();
+    let mut swaps = PackSwaps {
+        settings: PackSettings::all(),
+        ..PackSwaps::default()
+    };
+    let mut asked = 0;
+    let deltas = swaps.swap(vec![SceneDelta::BlockIn(Box::new(b))], &mut |id| {
+        asked += 1;
+        (id == TREE).then(tree_model)
+    });
+    assert_eq!(asked, 1);
+    let SceneDelta::BlockIn(b) = &deltas[0] else {
+        panic!("a block");
+    };
+    assert_eq!(
+        b.degrades.len(),
+        51,
+        "the block's own record and one a placement"
+    );
+    for (k, p) in (0u8..).zip(&b.placements) {
+        let [part] = p.parts.as_slice() else {
+            panic!("one part");
+        };
+        assert_eq!(part.gfxobj, pack_mesh(7, 0));
+        let record = &b.degrades[part.degrade.expect("its levels") as usize];
+        assert_eq!(record.centre, Vec3::new(f32::from(k), 0.0, 0.0));
+    }
 }
 
 /// A green leaf in the middle of a picture whose cut-away texels are a magenta key, as a painted

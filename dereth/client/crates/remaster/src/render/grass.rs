@@ -9,7 +9,7 @@
 //!
 //! Flowers and pebbles ride on the same placing: flowers in clusters on grassland, each cluster a
 //! few colors of its region's palette ([`PALETTE`]); pebbles on bare ground, scree and the road's
-//! edges ([`pebbles`]).
+//! edges ([`pebbles`]), except on the grounds a pack keeps them off ([`PebbleGrounds`]).
 
 use dereth_gfx::{
     BufferDesc, BufferUsage, ColorAttachment, ColorTarget, Compare, ComputeDesc, Cull,
@@ -20,6 +20,7 @@ use glam::{Mat4, Vec3};
 
 use super::drawn::DrawnPlan;
 use super::{push_words, shader, Targets, ALBEDO, DEPTH, LIGHT, MATERIAL, NORMAL};
+use crate::assets::terrain::PebbleGrounds;
 use crate::scene::FrameDelta;
 use crate::shaders::Entry;
 
@@ -57,8 +58,8 @@ pub struct FieldAsk {
     pub scatter: bool,
 }
 /// The constants' rows: the field's, each type's grass, the scatter's, each type's pebbles, the
-/// palette.
-const ROWS: usize = 11 + 32 + 1 + 32 + PALETTE.len();
+/// palette, the road's edges' pebbles.
+const ROWS: usize = 11 + 32 + 1 + 32 + PALETTE.len() + 1;
 
 /// The flowers' colors, display values: white, yellow, pink, violet, blue, orange, cream and red. A
 /// region's clusters take a run of them from where its scene type starts.
@@ -92,6 +93,24 @@ pub fn pebbles() -> [f32; 32] {
     }
     p
 }
+/// Each terrain type's scatter row: its share of pebbles, the share of its flowers kept, and
+/// whether its pebbles lie at all, on its flat ground or its slopes.
+fn pebble_rows<'a>(
+    kinds: &'a [GrassKind; 32],
+    grounds: &'a PebbleGrounds,
+) -> impl Iterator<Item = [u32; 4]> + 'a {
+    pebbles()
+        .into_iter()
+        .zip(kinds)
+        .zip(grounds.types)
+        .map(|((p, k), lie)| [p, k.flowers, if lie { 1.0 } else { 0.0 }, 0.0].map(f32::to_bits))
+}
+
+/// The scatter's row for the road's edges: 1 where pebbles lie along them.
+fn roadside_row(grounds: &PebbleGrounds) -> [u32; 4] {
+    [if grounds.road { 1.0f32 } else { 0.0 }, 0.0, 0.0, 0.0].map(f32::to_bits)
+}
+
 /// The field's clock wraps over this many seconds; every motion of the wind fits it closely
 /// enough that the wrap is not seen.
 const CLOCK_PERIOD: f64 = 1200.0;
@@ -107,6 +126,9 @@ pub struct GrassKind {
     pub dryness: f32,
     /// How patchily it grows, 0 evenly to 1 in clumps with bare ground between.
     pub patchy: f32,
+    /// The share of the flowers its grass would carry that are kept, 0 to 1: an art pack's own
+    /// cover may stand in for them.
+    pub flowers: f32,
 }
 
 const NONE_GROWS: GrassKind = GrassKind {
@@ -114,6 +136,7 @@ const NONE_GROWS: GrassKind = GrassKind {
     height: 0.0,
     dryness: 0.0,
     patchy: 0.0,
+    flowers: 1.0,
 };
 
 /// What each terrain type grows, by its number in the terrain word.
@@ -126,6 +149,7 @@ pub fn kinds() -> [GrassKind; 32] {
             height,
             dryness,
             patchy,
+            flowers: 1.0,
         };
     };
     // Grassland, lush grass, patchy grassland.
@@ -157,6 +181,7 @@ pub fn kinds_with(looks: &crate::look::LookStack) -> [GrassKind; 32] {
         k.height = p.height.unwrap_or(k.height);
         k.dryness = p.dryness.unwrap_or(k.dryness);
         k.patchy = p.patchy.unwrap_or(k.patchy);
+        k.flowers = p.flowers.unwrap_or(k.flowers);
     }
     out
 }
@@ -195,6 +220,10 @@ pub struct GrassPass {
     args: (dereth_gfx::Buffer, u32),
     /// The field's clock last frame, for the blades' motion.
     last_clock: Option<f32>,
+    /// What each terrain type grows, as the looks say: the flowers' shares are read from it.
+    kinds: [GrassKind; 32],
+    /// Where the pebbles may lie.
+    pebbles: PebbleGrounds,
 }
 
 fn bound(
@@ -274,6 +303,8 @@ impl GrassPass {
             scatter_draw,
             motion,
             last_clock: None,
+            kinds: kinds(),
+            pebbles: PebbleGrounds::default(),
             constants: bound(
                 gfx,
                 "remaster grass constants",
@@ -293,6 +324,16 @@ impl GrassPass {
                 BufferUsage::STORAGE | BufferUsage::INDIRECT,
             )?,
         })
+    }
+
+    /// What each terrain type grows, as the looks now say.
+    pub fn set_kinds(&mut self, kinds: [GrassKind; 32]) {
+        self.kinds = kinds;
+    }
+
+    /// Where the pebbles may lie, as the ground drawn there now allows.
+    pub fn set_pebbles(&mut self, pebbles: PebbleGrounds) {
+        self.pebbles = pebbles;
     }
 
     /// The field for `frame`, seen through the pair `(clip, eye)` (the eye in the frame's space), lit by the
@@ -357,12 +398,11 @@ impl GrassPass {
             SCATTER_ROOM,
             1.0f32.to_bits(),
         ]);
-        for p in pebbles() {
-            rows.push([p, 0.0, 0.0, 0.0].map(f32::to_bits));
-        }
+        rows.extend(pebble_rows(&self.kinds, &self.pebbles));
         for c in PALETTE {
             rows.push([c[0], c[1], c[2], 1.0].map(f32::to_bits));
         }
+        rows.push(roadside_row(&self.pebbles));
         let bytes: Vec<u8> = rows
             .iter()
             .flat_map(|r| r.iter().flat_map(|w| w.to_le_bytes()))
@@ -595,6 +635,39 @@ mod tests {
         }
     }
 
+    /// The pebbles lie on every ground until a pack keeps them off one: then that type's row
+    /// lays none, flat or steep, while its share and its flowers stay as they were; and the road's
+    /// edges lay none once the pack keeps them off the road.
+    #[test]
+    fn a_ground_kept_free_of_pebbles_lays_none_and_keeps_its_flowers() {
+        let lie = |r: [u32; 4]| f32::from_bits(r[2]);
+        let k = kinds();
+        let all = PebbleGrounds::default();
+        assert!(pebble_rows(&k, &all).all(|r| lie(r) == 1.0));
+        assert_eq!(f32::from_bits(roadside_row(&all)[0]), 1.0);
+        let mut some = all;
+        some.types[12] = false;
+        some.road = false;
+        let rows: Vec<[u32; 4]> = pebble_rows(&k, &some).collect();
+        assert_eq!(rows.len(), 32);
+        assert_eq!(lie(rows[12]), 0.0);
+        assert!(rows
+            .iter()
+            .enumerate()
+            .all(|(t, r)| t == 12 || lie(*r) == 1.0));
+        assert_eq!(
+            f32::from_bits(rows[12][0]),
+            pebbles()[12],
+            "its share stays"
+        );
+        assert_eq!(
+            f32::from_bits(rows[12][1]),
+            k[12].flowers,
+            "its flowers stay"
+        );
+        assert_eq!(f32::from_bits(roadside_row(&some)[0]), 0.0);
+    }
+
     /// A look's grass table changes what that terrain type grows, number by number, and nothing else.
     #[test]
     fn a_looks_grass_table_changes_what_that_type_grows() {
@@ -610,6 +683,26 @@ mod tests {
         assert_eq!(k[1], kinds()[1]);
         assert!(LookToml::parse("[grass.40]\nheight = 1\n").is_err());
         assert!(LookToml::parse("[grade.dawn]\nsaturation = 1\n").is_err());
+    }
+
+    /// A pack's look can keep a terrain type's grass and take away its flowers, for its own cover
+    /// to stand in for them; every type keeps all its flowers until a look says otherwise.
+    #[test]
+    fn a_looks_flowers_share_takes_that_types_flowers_and_leaves_its_grass() {
+        use crate::look::{Layer, LookStack, LookToml};
+        assert!(kinds().iter().all(|k| k.flowers == 1.0));
+        let mut looks = LookStack::new();
+        looks.set(
+            Layer::ArtPack,
+            Some(
+                LookToml::parse("[grass.1]\nflowers = 0\n[grass.9]\nflowers = 0.25\n")
+                    .expect("a look"),
+            ),
+        );
+        let k = kinds_with(&looks);
+        assert_eq!((k[1].flowers, k[9].flowers, k[3].flowers), (0.0, 0.25, 1.0));
+        assert_eq!(k[1].share, kinds()[1].share, "the grass stays");
+        assert!(LookToml::parse("[grass.1]\nflowers = 2\n").is_err());
     }
 
     /// Grass grows on the grass types and nowhere wet, sandy, rocky or snowy.

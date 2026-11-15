@@ -12,6 +12,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ac2_look;
 mod art;
 mod auberean;
 mod backend;
@@ -19,6 +20,7 @@ mod client_bundle;
 mod component_archive;
 mod components;
 mod discord;
+mod downloads;
 mod host_config;
 mod host_publication;
 mod host_runtime;
@@ -285,6 +287,63 @@ fn move_art_pack(b: State<'_, Shared>, id: String, up: bool) -> Cmd<()> {
     lock(&b).move_art_pack(&id, up)
 }
 
+/// Choose a packed art pack's file on this computer for the Library's Add a pack file, which adds
+/// it at once. `None` when the player cancels.
+#[tauri::command]
+async fn pick_art_file(app: tauri::AppHandle) -> Cmd<Option<PathBuf>> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Choose an art pack file")
+        .add_filter("Art pack", &["dat"])
+        .blocking_pick_file();
+    Ok(picked.and_then(|p| p.into_path().ok()))
+}
+
+/// Add an art pack file on this computer to the stack; the file stays where it is.
+#[tauri::command]
+fn add_art_file(b: State<'_, Shared>, file: PathBuf) -> Cmd<String> {
+    lock(&b).add_art_file(&file)
+}
+
+/// Build the AC2 look from the player's own Asheron's Call 2 files, with the parts ticked.
+#[tauri::command]
+async fn build_ac2_look(b: State<'_, Shared>) -> Cmd<String> {
+    let shared = b.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        Backend::build_ac2_look(&shared, &ac2_look::run_tool)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Tick or untick a part of the AC2 look for the next build.
+#[tauri::command]
+fn set_ac2_look_part(b: State<'_, Shared>, part: String, on: bool) -> Cmd<()> {
+    lock(&b).set_ac2_look_part(&part, on)
+}
+
+/// Tick or untick a creature of the AC2 look for the next build.
+#[tauri::command]
+fn set_ac2_look_creature(b: State<'_, Shared>, creature: String, on: bool) -> Cmd<()> {
+    lock(&b).set_ac2_look_creature(&creature, on)
+}
+
+/// Choose the Asheron's Call 2 install the AC2 look is built from. `None` when the player
+/// cancels.
+#[tauri::command]
+async fn pick_ac2_look_folder(app: tauri::AppHandle, b: State<'_, Shared>) -> Cmd<Option<String>> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Choose your Asheron's Call 2 folder")
+        .blocking_pick_folder();
+    let Some(dir) = picked.and_then(|p| p.into_path().ok()) else {
+        return Ok(None);
+    };
+    lock(&b).set_ac2_look_folder(&dir).map(Some)
+}
+
 /// Build a new plugin: the name and the repository are checked, then the player chooses an empty
 /// folder, where the template is written, or a plugin repository, which gets the new plugin's
 /// folder. `None` when the player cancels.
@@ -411,6 +470,29 @@ async fn pick_folder(
 #[tauri::command]
 fn add_folder(b: State<'_, Shared>, find: FolderFind) {
     lock(&b).add_folder(find);
+}
+
+/// Download a data set from the community's archive into the library.
+#[tauri::command]
+fn get_dats(b: State<'_, Shared>, id: String) -> Cmd<()> {
+    Backend::get_dats(b.inner(), std::sync::Arc::new(downloads::Https::new()), &id)
+}
+
+#[tauri::command]
+fn cancel_get_dats(b: State<'_, Shared>) {
+    lock(&b).cancel_get_dats();
+}
+
+/// Stop the job the page shows, when it may be cancelled: a world's copy of the retail client
+/// being made as it is played.
+#[tauri::command]
+fn cancel_job(b: State<'_, Shared>) {
+    lock(&b).cancel_job();
+}
+
+#[tauri::command]
+fn clear_get_dats(b: State<'_, Shared>) {
+    lock(&b).clear_get_dats();
 }
 
 #[tauri::command]
@@ -550,7 +632,7 @@ fn forget_all_passwords(b: State<'_, Shared>) {
     lock(&b).forget_all_passwords();
 }
 
-/// Start the Dereth client in this interface from now on: written into the client's preferences.
+/// Start every world the player has not changed in game in this interface from now on.
 #[tauri::command]
 fn set_interface(b: State<'_, Shared>, name: String) -> Cmd<()> {
     lock(&b).set_interface(&name)
@@ -840,8 +922,8 @@ fn main() {
         find_client(named, &here, installed)
     };
     let tool = find_tool(&here, client.as_deref());
-    // The preferences file the Dereth client reads when it is started from its own folder, which
-    // names the interface it starts in.
+    // The preferences file the Dereth client reads when it is started from its own folder, where
+    // an earlier launcher wrote the interface it starts in.
     let client_preferences = dereth_launch::interface::preferences_file(
         System::HOST,
         &|name| std::env::var_os(name),
@@ -914,6 +996,14 @@ fn main() {
                     &art::ask_github,
                     &art::fetch_pack,
                 );
+            });
+            // The AC2 look is built again when the art tool came with a newer table than one it
+            // was built from.
+            let look = shared.clone();
+            std::thread::spawn(move || {
+                if let Some(Err(e)) = Backend::rebuild_stale_ac2_look(&look, &ac2_look::run_tool) {
+                    eprintln!("dereth-launcher: {e}");
+                }
             });
             // The author's tool's copy in each folder Make Your Own wrote in is this launcher's
             // tool again: after an update, the new release's.
@@ -1097,10 +1187,20 @@ fn main() {
             add_art_source,
             remove_art_source,
             install_art_pack,
+            get_dats,
+            cancel_get_dats,
+            cancel_job,
+            clear_get_dats,
             update_art_pack,
             remove_art_pack,
             set_art_pack_on,
             move_art_pack,
+            pick_art_file,
+            add_art_file,
+            build_ac2_look,
+            set_ac2_look_part,
+            set_ac2_look_creature,
+            pick_ac2_look_folder,
             create_plugin,
             pick_plugin_folder,
             add_plugin_folder,
@@ -1245,7 +1345,7 @@ mod tests {
         // One Library for both realms, each with its own retail client and data sets.
         let library = page_function("library");
         assert!(library.contains("const r = ac2Realm ? s.auberean?.retail : s.retail;"));
-        assert!(library.contains("The *.dat files from an install."));
+        assert!(library.contains(r#"kindBody("auberean", s.auberean?.dat_sets ?? []"#));
         // Play lists the realm's own combinations, and plays them with the realm's clients.
         assert!(page_function("homeEntries").contains("inRealm(worldBy(e.world_slug))"));
         assert!(page_function("home").contains("clientOf(sel.client, game)"));
@@ -1279,12 +1379,14 @@ mod tests {
         assert!(page.contains(
             r#"serverBy(edit.id)?.game === "auberean" ? "save_yalain_host" : "save_host""#
         ));
+        // Only the interface's question is Dereth's; each realm has its first run.
         let pull = page_function("pull");
         assert_eq!(
             pull.matches(r#"ui.realm === "dereth" && "#).count(),
-            2,
+            1,
             "{pull}"
         );
+        assert!(pull.contains("!ui.firstRun.dismissed[ui.realm]"), "{pull}");
         // A world's page says nothing of its friends service: the launch asks it, and that decides
         // the clients' friends options.
         assert!(!page.contains("probe_auberean_friends"));
@@ -1358,6 +1460,84 @@ mod tests {
         assert!(!page.contains("added optional components"));
     }
 
+    /// The art packs' Add a pack file sits under Installed's list: the system's picker chooses a
+    /// file, which is added at once, and a pack on this computer's row shows its path, and File not
+    /// found when it is gone.
+    #[test]
+    fn add_a_pack_file_sits_under_installed_and_its_row_shows_the_path() {
+        let art = page_function("artPacks");
+        assert!(art.contains(
+            r#"const addFile = `<div class="plugin-line add"><button class="btn" data-act="art-file-add" ${busy ? "disabled" : ""}>Add a pack file…</button></div>`;"#
+        ));
+        assert!(
+            art.contains(r#"`<div class="list">${installed}</div>${addFile}`, { sub: true })"#),
+            "the button sits under Installed's list"
+        );
+        assert!(art.contains(r#"(p.missing ? `<div class="sub bad">File not found</div>` : "")"#));
+        assert!(art.contains(r#"${esc(p.file)}</div>"#));
+        let add = page_function("addArtFile");
+        let picked = add
+            .find(r#"file = await api("pick_art_file");"#)
+            .expect("the picker");
+        let added = add
+            .find(r#"if (file) await artFetch("add_art_file", { file });"#)
+            .expect("added at once");
+        assert!(picked < added, "{add}");
+        let app = include_str!("../ui/app.js");
+        assert!(app.contains(r#"case "art-file-add": await addArtFile(); break;"#));
+        let main = include_str!("main.rs");
+        for command in ["pick_art_file,", "add_art_file,"] {
+            assert!(main.contains(command), "the app answers {command}");
+        }
+        assert_eq!(
+            dereth_launch::art::THIS_COMPUTER,
+            "local",
+            "where the row says it is from"
+        );
+    }
+
+    /// The Asheron's Call 2 art section: its title and what it does, the data set it is made
+    /// from with the folder under it, the parts by name, the creatures folded under their own
+    /// heading, and Built with the version and Build or Rebuild.
+    #[test]
+    fn the_asherons_call_2_art_section_says_what_it_makes_and_from_what() {
+        let look = page_function("ac2Look");
+        assert!(look.contains(r#"libFold("art.ac2look", "ASHERON'S CALL 2 ART","#));
+        assert!(look.contains(
+            "Create an art pack bringing Asheron's Call 2 art into Dereth from your own Asheron's Call 2 data files."
+        ));
+        assert!(look.contains(r#"<div class="name">Asheron's Call 2 data set</div>${from}"#));
+        assert!(look.contains(r#"l.built ? `Built ${esc(l.built)}.`"#));
+        assert!(look.contains(r#"${l.built ? "Rebuild" : "Build"}"#));
+        let labels: Vec<&str> = dereth_launch::ac2_look::PARTS
+            .iter()
+            .map(|(_, label)| *label)
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Terrain",
+                "Red Desert",
+                "Trees and Ground Cover",
+                "Rocks",
+                "Sky"
+            ]
+        );
+        // The creatures below the parts, under a heading that folds them, folded at first, each a
+        // tick box, and nothing about holding weapons.
+        assert!(look.contains(r#"data-lib-fold="art.ac2look.creatures" data-lib-closed="1""#));
+        assert!(look.contains(r#"libOpen("art.ac2look.creatures", true)"#));
+        assert!(look.contains("</span>Creatures</div>"));
+        assert!(look.contains("data-look-creature="));
+        assert!(look.find("${ticks}") < look.find("${creatureFold}"));
+        assert!(!look.to_lowercase().contains("weapon") && !look.to_lowercase().contains("hold"));
+        assert_eq!(dereth_launch::ac2_look::CREATURES.len(), 18);
+        assert_eq!(
+            dereth_launch::ac2_look::CREATURES[11],
+            ("olthoi-grub", "Olthoi Grub")
+        );
+    }
+
     /// The Library's settings say what they do in their tooltips, with nothing under the checkbox,
     /// and the art packs' Refresh is inside their section, on its explainer's line, not in its
     /// heading.
@@ -1414,7 +1594,6 @@ mod tests {
             "\"sets\"",
             "\"sets.modern\"",
             "\"sets.classic\"",
-            "\"sets.original\"",
             "\"art\"",
             "\"art.installed\"",
             "\"art.available\"",
@@ -1480,6 +1659,48 @@ mod tests {
     }
 
     /// The text of the page's function `name`, up to the next top-level function.
+    /// Each realm's first run says what its client loads and opens the Library; the Library gives
+    /// each kind of set its own lines, Add Folder and a Download for each set on offer, whose
+    /// explainer folds out under them, and AC1's retail row points at the community's guide.
+    #[test]
+    fn the_first_run_opens_the_library_where_each_kind_of_set_can_be_added_or_downloaded() {
+        let first = page_function("firstRun");
+        assert!(first.contains("loads original Asheron's Call${ac2Realm ? \" 2\" : \"\"} data files. Let's get you set up..."));
+        assert!(first.contains(r#"data-act="fr-library">Open Library"#));
+        let library = page_function("library");
+        for line in [
+            "The data files from a modern, post-ToD install.",
+            "No modern data files yet.",
+            "The data files from a pre-ToD install.",
+            "No classic data files yet.",
+            "No data files yet.",
+            "No retail client chosen. Show me where",
+        ] {
+            assert!(library.contains(line), "{line}");
+        }
+        assert!(!library.contains("1999"), "one Classic kind");
+        assert!(library.contains(r#"${ac2Realm ? "" : `<button class="btn" data-url="${GUIDE}">Open Community Guide</button>`}"#));
+        let buttons = page_function("setButtons");
+        assert!(buttons.contains(r#"say("library.add", "Add Folder")"#));
+        assert!(buttons.contains(">Download ${esc(o.label)}</button>"));
+        assert!(buttons.contains("Dereth Network will try to fetch a community archive of the requested data files and verify them."));
+        assert!(buttons
+            .contains(">Download</button><button class=\"btn\" data-get-never>Nevermind</button>"));
+        // Every set the archive offers has its kind's place, in both realms.
+        let offers = dereth_launch::downloads::offers(&dereth_datfetch::Catalogue::built_in());
+        let labels: Vec<_> = offers.iter().map(|o| (o.kind, o.label.as_str())).collect();
+        use dereth_launch::SetKind::{Auberean, Classic, Modern};
+        assert_eq!(
+            labels,
+            [
+                (Modern, "End of Retail"),
+                (Classic, "Infiltration"),
+                (Classic, "Launch"),
+                (Auberean, "End of Retail")
+            ]
+        );
+    }
+
     fn page_function(name: &str) -> &'static str {
         let page = include_str!("../ui/app.js");
         let at = page

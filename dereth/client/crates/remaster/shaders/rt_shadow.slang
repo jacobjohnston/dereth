@@ -7,8 +7,10 @@
 // still picture. A ray is moved off its surface toward the sun's side, more the more the surface
 // turns from the sun. Alpha-tested surfaces are tested at the texel the ray meets, as the G-buffer
 // tests them. The ground's own structure is retail's surface: a ray from the ground looks for it
-// only past a meter, so the ground drawn over retail's never shadows itself. The shadows fade in
-// as the sun rises off the horizon, as the cascades' do.
+// only past a meter, so the ground drawn over retail's never shadows itself. Past the near
+// ground, a ray meets retail's surface only from above, so neither the far ground drawn coarser
+// than retail's nor a far point's barely known depth shades the far land itself. The shadows
+// fade in as the sun rises off the horizon, as the cascades' do.
 import bindless;
 import retail;
 import rt;
@@ -34,6 +36,10 @@ struct Push
     // horizon, 1 with it well up.
     uint rays;
     uint strength;
+    // How far along the view ground cover casts (a float's bits): the nearest cascade's reach,
+    // fading out over its last fifth as the cascades' look-up blends it into the next, which has
+    // none.
+    uint cover_reach;
 };
 
 [[vk::push_constant]]
@@ -42,6 +48,9 @@ ConstantBuffer<Push> push;
 // The sun's disc's angular radius, radians, a little wider than the sun's own.
 static const float SUN_RADIUS = 0.005;
 static const float TAU = 6.2831853;
+// Where the near ground gives way to the far, meters from the eye, where the frame draws no far
+// ground of its own: the drawn ground's own defaults.
+static const float2 NEAR_GROUND = float2(300.0, 500.0);
 
 float4 at(uint t, int2 p)
 {
@@ -62,12 +71,34 @@ bool blocked(RayDesc ray, uint mask)
     q.TraceRayInline(accels[NonUniformResourceIndex(push.accel)], RAY_FLAG_NONE, mask, ray);
     while (q.Proceed())
     {
+        float t;
         if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE
-            && alpha_kept(push.statics, push.objects, push.indices, push.vertices, push.materials,
-                          push.sampler, q.CandidateInstanceID(), q.CandidateGeometryIndex(),
-                          q.CandidatePrimitiveIndex(), q.CandidateTriangleBarycentrics()))
+            && hit_kept(push.frame, push.statics, push.objects, push.indices, push.vertices,
+                        push.materials, push.sampler, q.CandidateInstanceID(),
+                        q.CandidateGeometryIndex(), q.CandidatePrimitiveIndex(),
+                        q.CandidateTriangleBarycentrics(), ray.Origin, ray.Direction, ray.TMin,
+                        ray.TMax, q.CandidateObjectToWorld3x4(), t))
         {
             q.CommitNonOpaqueTriangleHit();
+        }
+    }
+    return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+}
+
+// Whether retail's ground stands along `ray` between its ends, met on its upper face. A ray that
+// starts under it leaves through its underside, which hides nothing.
+bool ground_above(RayDesc ray)
+{
+    RayQuery<RAY_FLAG_FORCE_NON_OPAQUE> q;
+    q.TraceRayInline(accels[NonUniformResourceIndex(push.accel)], RAY_FLAG_FORCE_NON_OPAQUE,
+                     RT_GROUND, ray);
+    while (q.Proceed())
+    {
+        // The ground's triangles turn their front faces up.
+        if (q.CandidateTriangleFrontFace())
+        {
+            q.CommitNonOpaqueTriangleHit();
+            q.Abort();
         }
     }
     return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
@@ -104,6 +135,18 @@ float4 fs_main(float4 position : SV_Position) : SV_Target0
     float3 up = cross(across, sun);
     uint rays = max(push.rays, 1u);
     float turn = pattern(p) * TAU;
+    float ahead = transform(push.frame, FRAME_VIEW, float4(world, 1.0)).z;
+    float reach = asfloat(push.cover_reach);
+    float cover = 1.0 - saturate((ahead - 0.8 * reach) / max(0.2 * reach, 1e-3));
+    // Past the near ground (by the pixel's pattern across the stretch where it gives way to the
+    // far) a ray meets retail's ground only from above: the drawn ground there is coarser than
+    // retail's, lying under it on every crest, and a far point's depth is known only to meters,
+    // so a far point may stand under retail's surface, and leaving through its underside would
+    // shade it, differently from frame to frame. Nearer, the ground drawn under retail's (a shore
+    // lowered under the water) is shaded by its rim, as the drawn ground shades it.
+    float4 lift = row(push.frame, FRAME_LIFT);
+    float2 band = lift.z > 0.5 ? lift.xy : NEAR_GROUND;
+    float far = smoothstep(band.x, max(band.y, band.x + 1e-3), dist);
     float lit = 0.0;
     for (uint k = 0; k < rays; k++)
     {
@@ -115,12 +158,16 @@ float4 fs_main(float4 position : SV_Position) : SV_Target0
         ray.Direction = normalize(sun + across * (cos(a) * r) + up * (sin(a) * r));
         ray.TMin = 0.0;
         ray.TMax = 4000.0;
-        if (blocked(ray, 0xFF & ~RT_GROUND))
+        // Each ray takes the cover in as the share of it left here says, by the pixel's pattern.
+        bool with_cover = frac(pattern(p) + (float(k) + 0.5) / float(rays)) < cover;
+        uint mask = 0xFF & ~RT_GROUND & (with_cover ? 0xFF : ~RT_COVER);
+        if (blocked(ray, mask))
         {
             continue;
         }
         ray.TMin = cls == CLASS_GROUND ? 1.0 : 0.05;
-        if (blocked(ray, RT_GROUND))
+        bool from_above = frac(pattern(p) * 7.0 + (float(k) + 0.5) / float(rays)) < far;
+        if (from_above ? ground_above(ray) : blocked(ray, RT_GROUND))
         {
             continue;
         }

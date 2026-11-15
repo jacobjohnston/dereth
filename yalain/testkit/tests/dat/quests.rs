@@ -1,5 +1,5 @@
 //! Quests' definitions as the server's world compile reads them from the September 2013 data: the
-//! phases done by other quests.
+//! phases done by other quests, and what fails a quest.
 
 use yalain_content::quests::{CompletionPay, Subquests};
 use yalain_testkit::authored::Portal;
@@ -106,7 +106,7 @@ fn a_quests_setup_says_how_a_kill_reaches_fellows_and_its_definition_whether_its
                 d.fellows.shared,
                 d.fellows.near_level,
                 d.fellows.near_by,
-                d.last_waits,
+                d.ranges.last().is_some_and(|r| *r != 1),
             )
         })
     };
@@ -137,6 +137,54 @@ fn a_quests_setup_says_how_a_kill_reaches_fellows_and_its_definition_whether_its
         Some(true),
         "a last phase of no range"
     );
+}
+
+/// The ranges kills count are the install's: Rat-Smasher's ten phases of Tanglefoot Vermin then ten of
+/// Dank Vermin are ranges 1 and 2, and each vermin's death effect on it names its own; a quest that
+/// sends its player to someone, counts kills, then sends it back has ranges 0, 1, 0; a quest of kills
+/// alone keeps none (every phase's is 1).
+/// Behaviour: server.quests.a-kills-ranges-from-the-install
+#[test]
+fn a_quests_phases_and_its_creatures_death_effects_name_the_ranges_kills_count() {
+    let p = Portal::open();
+    let states = p
+        .dat
+        .entries_in(0x6F00_0000, 0x6FFF_FFFF)
+        .map(|e| e.id)
+        .collect();
+    let lib = p.library();
+    let install = DatInstall::new(
+        Box::new(|id| p.dat.read(id).ok()),
+        p.ctx.clone(),
+        &lib,
+        states,
+    )
+    .expect("install");
+    let ranges = |q: u32| install.quest_definition(None, q).map(|d| d.ranges);
+    let rat_smasher: Vec<u32> = [1; 10].into_iter().chain([2; 10]).collect();
+    assert_eq!(ranges(0x4000_000C), Some(rat_smasher));
+    assert_eq!(ranges(0x4000_028B), Some(vec![0, 1, 1, 1, 0, 0]));
+    assert_eq!(ranges(0x4000_000A), Some(Vec::new()), "kills alone");
+    let prop_name = |id: u32| {
+        p.ctx
+            .properties()
+            .and_then(|l| l.names.name(id))
+            .map(str::to_string)
+    };
+    let entity = |id: u32| -> Option<auberean_assets::entity::Entity> {
+        auberean_assets::decode(id, &p.dat.read(id).ok()?, &p.ctx).ok()
+    };
+    let named = |template: u32| {
+        let props = yalain_content::Props::of(template, &entity, &prop_name);
+        yalain_content::CreatureStats::from_props(&props)
+            .expect("a creature")
+            .death_effects
+            .into_iter()
+            .find(|(n, _)| n == "Eff_IncrementQuestRatSmasher")
+            .map(|(_, range)| range)
+    };
+    assert_eq!(named(0x4700_2D2D), Some(1), "a Tanglefoot Vermin");
+    assert_eq!(named(0x4700_2D26), Some(2), "a Dank Vermin");
 }
 
 /// Every effect a creature template names that reads as a quest effect names a quest of the install.
@@ -173,7 +221,7 @@ fn every_quest_effect_a_creature_names_names_a_quest_of_the_install() {
         let Some(stats) = yalain_content::CreatureStats::from_props(&props) else {
             continue;
         };
-        for n in &stats.death_effects {
+        for (n, _) in &stats.death_effects {
             let lower = n.to_ascii_lowercase();
             if ![
                 "eff_increment",
@@ -337,4 +385,91 @@ fn a_quests_setup_says_whether_it_is_for_a_monarch() {
     let monarch = |q: u32| install.quest_definition(None, q).map(|d| d.monarch_only);
     assert_eq!(monarch(0x4000_01D1), Some(true), "the Hall's");
     assert_eq!(monarch(0x4000_0009), Some(false), "another's");
+}
+
+/// The four craft gateways' quests put the one craft experience reward on as they are done, each
+/// at its own spellcraft, 1, 5, 10 and 30, and the reward pays 2500, 3112, 3877 and 6938 there, the
+/// amounts players were paid.
+/// Behaviour: server.effects.craft-experience-at-its-spellcraft
+#[test]
+fn the_craft_gateways_quests_pay_their_craft_experience_at_their_records_spellcraft() {
+    use yalain_world::effect_defs::Kind;
+    const REWARD: u32 = 0x6F00_0DCE;
+    const COMPLETE: u32 = 0x3000_0000;
+    let p = Portal::open();
+    let states = p
+        .dat
+        .entries_in(0x6F00_0000, 0x6FFF_FFFF)
+        .map(|e| e.id)
+        .collect();
+    let lib = p.library();
+    let install = DatInstall::new(
+        Box::new(|id| p.dat.read(id).ok()),
+        p.ctx.clone(),
+        &lib,
+        states,
+    )
+    .expect("install");
+    let t = p.effects(&[REWARD]);
+    let Some(Kind::CraftExperience(points)) = t.get(REWARD).map(|d| &d.kind) else {
+        panic!("{:?}", t.get(REWARD));
+    };
+    // Apprentice, Journeyman, Master, Grandmaster.
+    for (quest, spellcraft, pays) in [
+        (0x8000_0044_u32, 1.0_f32, 2500.0_f32),
+        (0x8000_0039, 5.0, 3112.0),
+        (0x8000_0045, 10.0, 3877.0),
+        (0x8000_0038, 30.0, 6938.0),
+    ] {
+        let def = install.quest_definition(None, quest).expect("the quest");
+        assert_eq!(def.effects, [(COMPLETE, REWARD, spellcraft)], "{quest:08X}");
+        let at = points.at(spellcraft).expect("an amount").floor();
+        assert!((at - pays).abs() < f32::EPSILON, "{quest:08X}: {at}");
+    }
+}
+
+/// What fails a quest is its setup's: the totem's emerald fails on its player's death, leaving the
+/// world and portal space alike; the Mist Opal's on death alone; the totem's protecting companion
+/// on none, nor a quest whose setup says nothing; and of the install's quests, five fail on death,
+/// two on leaving and two on portal space.
+/// Behaviour: server.quests.fails-as-its-setup-says
+#[test]
+fn a_quests_setup_says_what_fails_it() {
+    let p = Portal::open();
+    let states = p
+        .dat
+        .entries_in(0x6F00_0000, 0x6FFF_FFFF)
+        .map(|e| e.id)
+        .collect();
+    let lib = p.library();
+    let install = DatInstall::new(
+        Box::new(|id| p.dat.read(id).ok()),
+        p.ctx.clone(),
+        &lib,
+        states,
+    )
+    .expect("install");
+    let fails = |q: u32| {
+        install
+            .quest_definition(None, q)
+            .map(|d| (d.fails.death, d.fails.logout, d.fails.teleport))
+    };
+    assert_eq!(fails(0x4000_005C), Some((true, true, true)), "the emerald");
+    assert_eq!(fails(0x4000_01FA), Some((true, true, true)), "the sword");
+    assert_eq!(fails(0x4000_005B), Some((true, false, false)), "the opal");
+    assert_eq!(
+        fails(0x4000_005D),
+        Some((false, false, false)),
+        "a companion"
+    );
+    assert_eq!(fails(0x8000_00B7), Some((false, false, false)), "no setup");
+    let (mut death, mut logout, mut teleport) = (0, 0, 0);
+    for q in (0x4000_0000..0x4000_0800).chain(0x8000_0000..0x8000_0400) {
+        if let Some((d, l, t)) = fails(q) {
+            death += usize::from(d);
+            logout += usize::from(l);
+            teleport += usize::from(t);
+        }
+    }
+    assert_eq!((death, logout, teleport), (5, 2, 2));
 }

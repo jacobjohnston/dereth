@@ -19,6 +19,14 @@
 //! none of its business: an item is used up for what it makes, and what others have made doesn't
 //! take that from its user. What a use makes takes an item each time, so it is held to the items
 //! there are.
+//!
+//! **A portal.** A row whose template names a destination makes a portal there, standing as
+//! [`portals`] says; one that names a place of its own to lead to leads there instead.
+//!
+//! **A creature's own row.** A row may be of the creatures of a template rather than of a death
+//! effect: the death of any of them makes what it names, wherever the killer stands, at the row's
+//! place (facing as the place does), else at its offset from where the creature died, as it faced.
+//! Made at a place, one of the row's stands at a time: a death while it stands makes none.
 
 use dereth_primitives::num::math;
 use yalain_net::{ConnId, ServerNet};
@@ -27,6 +35,7 @@ use yalain_store::{Store, StoredPosition};
 use crate::effect_defs::Kind;
 use crate::effects::{Cast, On};
 use crate::things::Mode;
+use crate::usable::portals;
 use crate::{presence, Clock, Server};
 
 /// The most of one death effect's that live at once.
@@ -43,7 +52,7 @@ pub fn killed<S: Store>(
     killer: ConnId,
     creature: u64,
     template: u32,
-    effects: &[String],
+    effects: &[(String, u32)],
     clock: Clock,
 ) {
     let lasting: Vec<(u32, f32)> = s
@@ -66,6 +75,12 @@ pub fn killed<S: Store>(
         };
         crate::effects::apply_on(s, net, On::Player(killer), state, cast, clock);
     }
+    let died = s.things.get(creature).and_then(|t| t.at);
+    let key = yalain_content::DeathSpawn::of_creature(template);
+    if let (Some(spawn), Some(died)) = (s.death_spawns.get(&key).cloned(), died) {
+        let most = if spawn.at.is_some() { 1 } else { MOST };
+        makes(s, net, (died, Some((key.as_str(), most))), spawn, clock);
+    }
     let near = s
         .things
         .get(creature)
@@ -76,10 +91,12 @@ pub fn killed<S: Store>(
     if !near {
         return;
     }
-    for name in effects {
-        if let Some(spawn) = s.death_spawns.get(name).copied() {
-            let most = Some((name.as_str(), MOST));
-            makes(s, net, killer, most, spawn, clock);
+    for (name, _) in effects {
+        if let Some(spawn) = s.death_spawns.get(name).cloned() {
+            let Some(from) = s.players.get(&killer).map(|p| p.position) else {
+                return;
+            };
+            makes(s, net, (from, Some((name.as_str(), MOST))), spawn, clock);
         }
     }
 }
@@ -93,17 +110,20 @@ pub fn names_one<S: Store>(s: &Server<S>, props: &yalain_content::Props) -> bool
         .any(|e| s.death_spawns.contains_key(e))
 }
 
-/// Can this world make everything a template's use names of a world's rows, as creatures?
+/// Can this world make everything a template's use names of a world's rows: creatures, or portals
+/// to places it holds?
 #[must_use]
 pub fn can_make_all<S: Store>(s: &Server<S>, props: &yalain_content::Props) -> bool {
     let (name, _) = crate::item_use::USED;
     (1..=8)
         .filter_map(|i| props.text(&format!("{name}{i}")))
         .filter_map(|e| s.death_spawns.get(e))
-        .all(|spawn| {
-            s.catalog
-                .get(spawn.template)
-                .is_some_and(|t| yalain_content::CreatureStats::from_props(&t.props).is_some())
+        .all(|spawn| match s.catalog.get(spawn.template) {
+            Some(t) if portals::is_portal(&t.props) => {
+                spawn.to.is_some() || portals::leads_to(s, t.id).is_some()
+            }
+            Some(t) => yalain_content::CreatureStats::from_props(&t.props).is_some(),
+            None => false,
         })
 }
 
@@ -120,8 +140,11 @@ pub fn used<S: Store>(
         let Some(effect) = props.text(&format!("{name}{i}")) else {
             continue;
         };
-        if let Some(spawn) = s.death_spawns.get(effect).copied() {
-            makes(s, net, user, None, spawn, clock);
+        if let Some(spawn) = s.death_spawns.get(effect).cloned() {
+            let Some(from) = s.players.get(&user).map(|p| p.position) else {
+                return;
+            };
+            makes(s, net, (from, None), spawn, clock);
         }
     }
 }
@@ -135,17 +158,19 @@ pub fn ends<S: Store>(s: &mut Server<S>, net: &mut ServerNet, id: u64) {
     }
 }
 
-/// What a row makes around a player, up to `most` live (by name, the limit) if a limit holds.
+/// What a row makes about a place (a player's, or where a creature died), at its offset as the
+/// place faces, or at the row's own place, up to `most` live (by name, the limit) if a limit holds.
 fn makes<S: Store>(
     s: &mut Server<S>,
     net: &mut ServerNet,
-    killer: ConnId,
-    most: Option<(&str, usize)>,
+    (from, most): (StoredPosition, Option<(&str, usize)>),
     spawn: yalain_content::DeathSpawn,
     clock: Clock,
 ) {
-    let Some(killer_at) = s.players.get(&killer).map(|p| p.position) else {
-        return;
+    let stored = |p: yalain_content::Place| StoredPosition {
+        cell: p.cell,
+        origin: p.origin,
+        rotation: p.rotation,
     };
     let Some(template) = s.catalog.get(spawn.template).cloned() else {
         return;
@@ -153,55 +178,93 @@ fn makes<S: Store>(
     if let Some((name, _)) = most {
         let things = &s.things;
         let live = s.death_spawned.entry(name.to_string()).or_default();
+        // A creature lives until it dies; a portal until it goes.
         live.retain(|id| {
             things
                 .get(*id)
-                .and_then(|t| t.creature.as_ref())
-                .is_some_and(|c| c.mode != Mode::Dead)
+                .is_some_and(|t| t.creature.as_ref().is_none_or(|c| c.mode != Mode::Dead))
         });
     }
+    let portal = portals::is_portal(&template.props);
     for _ in 0..spawn.count {
         let full = most.is_some_and(|(name, n)| s.death_spawned.get(name).map_or(0, Vec::len) >= n);
         if full || !s.rng.chance(spawn.chance) {
             continue;
         }
-        let Some(stats) = yalain_content::CreatureStats::from_props(&template.props) else {
+        let at = spawn
+            .at
+            .map_or_else(|| at_offset(s, &from, spawn.offset), stored);
+        if portal {
+            let made = portals::made(
+                s,
+                net,
+                (spawn.template, spawn.to.map(stored)),
+                at,
+                (spawn.kingdom, spawn.lasts),
+                spawn.name.as_ref(),
+                clock,
+            );
+            if let (Some(id), Some((name, _))) = (made, most) {
+                s.death_spawned
+                    .entry(name.to_string())
+                    .or_default()
+                    .push(id);
+            }
+            continue;
+        }
+        let name = spawn.name.as_ref();
+        let Some(id) = creature_at(s, net, &template, at, spawn.lasts, name, clock) else {
             s.unhandled.note(format!(
                 "a death effect's template {:08X} is no creature",
                 spawn.template
             ));
             return;
         };
-        let at = at_offset(s, &killer_at, spawn.offset);
-        let heading = crate::world::heading_of_rotation(at.rotation);
-        let id = crate::spawn::make(
-            s,
-            &template,
-            stats,
-            (at, heading),
-            None,
-            None,
-            clock.local.0,
-        );
         if let Some((name, _)) = most {
             s.death_spawned
                 .entry(name.to_string())
                 .or_default()
                 .push(id);
         }
-        if let Some(seconds) = spawn.lasts {
-            s.after(
-                clock,
-                f64::from(seconds),
-                crate::Timer::MadeEnds { creature: id },
-            );
-        }
-        presence::thing_appears(s, net, id);
     }
 }
 
+/// Make a creature of a template at a place, facing as the place does, standing until killed or for
+/// `lasts` seconds, named as a row names it. Returns its id; none for a template that is no
+/// creature.
+pub(crate) fn creature_at<S: Store>(
+    s: &mut Server<S>,
+    net: &mut ServerNet,
+    template: &yalain_content::Template,
+    at: StoredPosition,
+    lasts: Option<f32>,
+    name: Option<&yalain_content::Words>,
+    clock: Clock,
+) -> Option<u64> {
+    let stats = yalain_content::CreatureStats::from_props(&template.props)?;
+    let heading = crate::world::heading_of_rotation(at.rotation);
+    let id = crate::spawn::make(s, template, stats, (at, heading), None, None, clock.local.0);
+    if let (Some(name), Some(t)) = (name, s.things.get_mut(id)) {
+        t.name_as(name);
+    }
+    if let Some(seconds) = lasts {
+        s.after(
+            clock,
+            f64::from(seconds),
+            crate::Timer::MadeEnds { creature: id },
+        );
+    }
+    presence::thing_appears(s, net, id);
+    crate::spawn::holds_its_effects(s, net, id, clock);
+    Some(id)
+}
+
 /// A place at an offset from another, as that one faces, on the ground.
-fn at_offset<S: Store>(s: &Server<S>, from: &StoredPosition, offset: [f32; 2]) -> StoredPosition {
+pub(crate) fn at_offset<S: Store>(
+    s: &Server<S>,
+    from: &StoredPosition,
+    offset: [f32; 2],
+) -> StoredPosition {
     let (x, y) = turned(from.rotation, offset);
     let (x, y) = (from.origin[0] + x, from.origin[1] + y);
     let (cell, x, y) = if presence::indoors(from.cell) {

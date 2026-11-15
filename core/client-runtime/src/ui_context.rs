@@ -182,6 +182,14 @@ impl<'a, S: Shell> UiContext<'a, S> {
         &self.app.objects
     }
 
+    /// The places of the world the player is in that the client has learned, and their revision
+    /// (it goes up as they change); `None` before a world is entered.
+    #[must_use]
+    pub fn world_places(&self) -> Option<(Arc<dereth_navigation::PlaceStore>, u64)> {
+        let t = &self.app.travel;
+        (!t.places().world.is_empty()).then(|| (t.places_shared(), t.places_revision()))
+    }
+
     /// Where `id` stands against the player: whether it is outdoors (on the landscape rather than
     /// in a building or a dungeon) and how far it is, in metres. `None` while either has no place
     /// in the world.
@@ -609,6 +617,14 @@ impl<'a, S: Shell> UiContext<'a, S> {
         self.app.interaction.take_framerate_display_notices()
     }
 
+    /// The interface shown is now `shown`, after a switch: see [`App::note_interface_shown`].
+    pub fn note_interface_shown(
+        &mut self,
+        shown: dereth_client_contract::options::interface::Interface,
+    ) {
+        self.app.note_interface_shown(shown);
+    }
+
     /// A local line in the text scroll.
     pub fn add_scroll_line(&mut self, text: &str, kind: u32) {
         self.app
@@ -898,6 +914,40 @@ impl<'a, S: Shell> UiContext<'a, S> {
     /// …
     pub fn flycam_sink(&mut self, held: bool) {
         self.app.flycam_sink(held);
+    }
+
+    /// Whether the client runs in explore mode (`--explore`).
+    #[must_use]
+    pub fn exploring(&self) -> bool {
+        self.app.exploring()
+    }
+
+    /// Explore mode's camera: one of its ways held or let go.
+    pub fn explore_fly(&mut self, way: crate::explore::Fly, held: bool) {
+        self.app.explore_fly(way, held);
+    }
+
+    /// Explore mode's camera `steps` speeds faster, or slower below zero.
+    pub fn explore_speed(&mut self, steps: i32) {
+        self.app.explore_speed(steps);
+    }
+
+    /// What explore mode's screen says; `None` outside the mode.
+    #[must_use]
+    pub fn explore_status(&self) -> Option<crate::explore::Status> {
+        self.app.explore_status()
+    }
+
+    /// The camera's spot as `@loc` says a place; `None` before the world is up.
+    #[must_use]
+    pub fn camera_location_line(&self) -> Option<String> {
+        self.app.camera_location_line()
+    }
+
+    /// The visual report's line for the frame last drawn, as `@report` writes it.
+    #[must_use]
+    pub fn visual_report_line(&self, shell: &S) -> String {
+        self.app.visual_report(shell).line()
     }
 }
 

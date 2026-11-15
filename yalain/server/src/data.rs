@@ -291,6 +291,23 @@ pub fn level_table(p: &Portal) -> Result<yalain_world::levels::LevelTable, Strin
 /// The world's calendar, by its region's first sky.
 #[must_use]
 pub fn calendar(p: &Portal) -> Option<auberean_world::calendar::GameClock> {
+    game_time(p).map(auberean_world::calendar::GameClock::new)
+}
+
+/// The parts of the game's day, by the world's calendar: where each begins (a share of the day)
+/// and whether it is night.
+#[must_use]
+pub fn day_parts(p: &Portal) -> Vec<(f32, bool)> {
+    game_time(p).map_or_else(Vec::new, |c| {
+        c.day_parts
+            .iter()
+            .map(|d| (d.begin, d.night != 0))
+            .collect()
+    })
+}
+
+/// The calendar of the region's first sky.
+fn game_time(p: &Portal) -> Option<auberean_assets::region::GameTime> {
     use auberean_assets::region::{GameTime, Region, SkyDesc};
     const REGION_MAPPING: u32 = 0x4000_0007;
     let (_, path) = p.files.iter().find(|(n, _)| *n == DatName::Portal)?;
@@ -300,9 +317,7 @@ pub fn calendar(p: &Portal) -> Option<auberean_world::calendar::GameClock> {
     let sky = db.get::<Region>(record)?.skies.first()?.record.0;
     let game_time = db.get::<SkyDesc>(sky)?.game_time.0;
     let calendar = db.get::<GameTime>(game_time)?;
-    Some(auberean_world::calendar::GameClock::new(
-        (*calendar.arc()).clone(),
-    ))
+    Some((*calendar.arc()).clone())
 }
 
 /// The vitae cost table (the experience to raise vitae by one at full vitae, by level from 1),
@@ -577,7 +592,9 @@ fn state_graph(p: &Portal, lib: &Library, id: u32) -> Option<Graph> {
 }
 
 /// The effects' definitions of these saved states, and of the effects they add, with what the
-/// world's rules (by saved state) say of them: what wards keep off, what taps vitae.
+/// world's rules (by saved state) say of them: what wards keep off, what taps vitae; and the line
+/// each one's application tells, where its own table in the English file holds one (none without
+/// that file).
 ///
 /// # Errors
 /// The library does not read.
@@ -587,12 +604,28 @@ pub fn effect_table(
     rules: &yalain_world::effect_defs::EffectRules,
 ) -> Result<yalain_world::effect_defs::EffectTable, String> {
     let lib = library(p)?;
-    Ok(yalain_world::effect_defs::EffectTable::read(
+    let mut t = yalain_world::effect_defs::EffectTable::read(
         lib,
         states,
         &|id| state_graph(p, lib, id),
         rules,
-    ))
+    );
+    if let Some(english) = p.english() {
+        t.read_lines(&mut |string, table| {
+            english
+                .read(table)
+                .ok()
+                .and_then(|bytes| {
+                    auberean_assets::decode::<auberean_assets::strings::StringTable>(
+                        table, &bytes, &p.ctx,
+                    )
+                    .ok()
+                })
+                .and_then(|t| t.entry(string).cloned())
+                .is_some_and(|e| e.strings.iter().flatten().any(|s| !s.is_empty()))
+        });
+    }
+    Ok(t)
 }
 
 /// The effects each item template's profile lists, read from the effects' saved states (the
@@ -718,8 +751,9 @@ pub fn interactions(
     ))
 }
 
-/// The effects each item template's use puts on its user, and those it puts on whoever wears or
-/// wields it: each name the template gives resolved to the saved state of its effect enumeration
+/// The effects each item template's use puts on its user, those it puts on whoever wears or
+/// wields it, those a creature's death puts on its killer, and those a weapon puts on what it
+/// hits: each name the template gives resolved to the saved state of its effect enumeration
 /// value, else of its package (the package's one saved state among the effects', else its
 /// singleton), else to the saved state the world's database gives the name.
 ///
@@ -734,10 +768,11 @@ pub fn item_uses(
         yalain_world::item_use::ItemUses,
         yalain_world::item_use::ItemUses,
         yalain_world::item_use::ItemUses,
+        yalain_world::item_use::ItemUses,
     ),
     String,
 > {
-    use yalain_world::item_use::{read_named_or, DIED, USED, WORN};
+    use yalain_world::item_use::{read_named_or, DIED, HIT, USED, WORN};
     let lib = library(p)?;
     let named: HashMap<String, u32> = named.iter().map(|(n, s)| (n.clone(), *s)).collect();
     let states: Vec<(u32, u32, Option<u32>)> = saved_states(p)?
@@ -749,6 +784,7 @@ pub fn item_uses(
         read_named_or(lib, states.iter().copied(), templates(), USED, &named),
         read_named_or(lib, states.iter().copied(), templates(), WORN, &named),
         read_named_or(lib, states.iter().copied(), templates(), DIED, &named),
+        read_named_or(lib, states.iter().copied(), templates(), HIT, &named),
     ))
 }
 
@@ -938,6 +974,34 @@ pub fn chest_packages(
         .collect())
 }
 
+/// Every script package of the library with the packages it derives from, nearest first: what
+/// counts in a class a give names.
+///
+/// # Errors
+/// The library does not read.
+pub fn item_classes(p: &Portal) -> Result<yalain_world::gives::ItemClasses, String> {
+    let lib = library(p)?;
+    let mut bases = std::collections::HashMap::new();
+    for pkg in &lib.packages {
+        let mut chain = Vec::new();
+        let mut at = pkg.parent;
+        while let Some(i) = at {
+            let Some(base) = lib.packages.get(i) else {
+                break;
+            };
+            if chain.contains(&base.id) || chain.len() > lib.packages.len() {
+                break;
+            }
+            chain.push(base.id);
+            at = base.parent;
+        }
+        if !chain.is_empty() {
+            bases.insert(pkg.id, chain);
+        }
+    }
+    Ok(yalain_world::gives::ItemClasses { bases })
+}
+
 /// The script library's packages that are this one or derive from it.
 ///
 /// # Errors
@@ -977,8 +1041,9 @@ pub fn catalog_packages_from(
         .collect())
 }
 
-/// The packages of the catalog's treasure equipment (not its instruments), its shields and treasure
-/// potions, each treasure potion effect's name table and color, and the game's Arcane Lore table.
+/// The packages of the catalog's treasure equipment (not its instruments), its shields, treasure
+/// potions, trumps and gems, each treasure potion effect's name table and color, and the game's
+/// Arcane Lore table.
 ///
 /// # Errors
 /// The library or the Arcane Lore table does not read.
@@ -1010,6 +1075,7 @@ pub fn treasure(
         jewelry: catalog_packages_from(p, catalog, &treasure::JEWELRY)?,
         potions: catalog_packages_from(p, catalog, &treasure::POTIONS)?,
         trumps: catalog_packages_from(p, catalog, &treasure::TRUMPS)?,
+        gems: catalog_packages_from(p, catalog, &treasure::GEMS)?,
         potion_looks,
         lore: lore_table(p, treasure::ARCANE_LORE_TABLE)?,
     })
@@ -1051,6 +1117,44 @@ pub fn crafting(
         &start.recipes,
         &|id| state_graph(p, lib, id),
     ))
+}
+
+/// Make the recipes the world defines (crafting's `[[recipe]]` rows) from the install's: the rows
+/// not made, by id, each with why.
+///
+/// # Errors
+/// The library does not read.
+pub fn world_recipes(
+    p: &Portal,
+    craft: &mut yalain_world::craft::Crafting,
+) -> Result<Vec<(u32, String)>, String> {
+    let lib = library(p)?;
+    Ok(craft.take_world_recipes(lib, &|id| state_graph(p, lib, id)))
+}
+
+/// The recipes these effects teach, and the effects they add in turn (a chain's), read into
+/// crafting where it lacks them: how many it read.
+///
+/// # Errors
+/// The library does not read.
+pub fn read_recipes_taught(
+    p: &Portal,
+    craft: &mut yalain_world::craft::Crafting,
+    states: &[u32],
+    rules: &yalain_world::effect_defs::EffectRules,
+) -> Result<usize, String> {
+    use yalain_world::effect_defs::{EffectTable, Kind};
+    let lib = library(p)?;
+    let graph = |id| state_graph(p, lib, id);
+    let taught: Vec<u32> = EffectTable::read(lib, states, &graph, rules)
+        .effects
+        .values()
+        .filter_map(|d| match d.kind {
+            Kind::GrantRecipe(r) => Some(r),
+            _ => None,
+        })
+        .collect();
+    Ok(craft.read_more(lib, &taught, &graph))
 }
 
 /// The recipes' ingredient classes made the catalog's templates that derive from them.
@@ -1240,8 +1344,12 @@ pub fn land_ground(
         inner: yalain_world::walls::RecordBlocks::new(records, region),
         spent: std::time::Duration::ZERO,
     };
+    let human = yalain_world::walls::setup_walker(blocks.inner.records(), HUMAN_SETUP, 1.0);
     let mut walls = yalain_world::walls::Walls::new(land.clone(), world, Box::new(blocks));
     walls.walkers = walkers;
+    if let Some(h) = human {
+        walls.player_walker = h;
+    }
     Ok((
         LandGround {
             known: yalain_world::reported::Known { land, rooms },
@@ -1250,6 +1358,10 @@ pub fn land_ground(
         walls,
     ))
 }
+
+/// The human male's setup, whose collision spheres and step heights every player's body takes on
+/// the server (a bigger race passes where it would, a little leniently).
+const HUMAN_SETUP: u32 = 0x0400_0029;
 
 /// The bodies of the templates whose looks give one: their setups' collision spheres and step
 /// heights, at the looks' scale.
@@ -1306,18 +1418,36 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
+    /// A world's folder, removed with everything in it when dropped: made before what reads it, it
+    /// goes after them.
+    struct WorldFolder(PathBuf);
+
+    impl std::ops::Deref for WorldFolder {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for WorldFolder {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
     /// A world's folder, `key`, its overlay holding `build`'s records.
     fn world_with_overlay(
         name: &str,
         key: &str,
         build: impl FnOnce(&dereth_dat::overlay::OverlayDir),
-    ) -> PathBuf {
+    ) -> WorldFolder {
         let world = std::env::temp_dir().join(format!(
             "yalain-world-overlay-{name}-{}",
             std::process::id()
         ));
         std::fs::remove_dir_all(&world).ok();
         std::fs::create_dir_all(&world).expect("the world's folder");
+        let world = WorldFolder(world);
         std::fs::write(
             world.join("world.toml"),
             format!(
@@ -1404,7 +1534,6 @@ mod tests {
         assert!(files.overlaid(DatKind::Cell, replaced));
         assert!(files.overlaid(DatKind::Cell, deleted));
         assert!(!files.overlaid(DatKind::Cell, kept));
-        std::fs::remove_dir_all(&world).ok();
     }
 
     /// A world with no overlay reads the install and starts as it did; the pinned release has none.
@@ -1428,7 +1557,6 @@ mod tests {
             install_files(&p).read(DatKind::Cell, id),
             cell.read(id).ok()
         );
-        std::fs::remove_dir_all(&world).ok();
     }
 
     /// An overlay made against other files stops the start, and so does another world's, whichever
@@ -1482,9 +1610,6 @@ mod tests {
             panic!("another world's overlay was taken");
         };
         assert!(why.contains("another-world"), "{why}");
-        for w in [other_files, other_world] {
-            std::fs::remove_dir_all(&w).ok();
-        }
     }
 
     /// A world that writes clearings and has no overlay is told, as it starts.
@@ -1646,24 +1771,24 @@ mod tests {
         assert!(materials.is_empty(), "{materials:?}");
     }
 
-    /// A start describes everything mining and maps name, as it asks for them with crafting's
-    /// templates: the 15 nodes maps conjure and the 5 delving stones do, each giving a material by
+    /// A start describes everything the test world's mining and maps rows name (the release's,
+    /// entry for entry), as it asks for them with crafting's templates: the 15 nodes maps conjure and the 5 delving stones do, each giving a material by
     /// its mine's craft skill (a region's five one of each skill); the 10 tools, each playing its
     /// mine's behavior in hand but the rock hammers, which play iron's (2017: stone mined with a
     /// rock hammer in hand played it); the 25 lodestones; and the Tessera.
     /// Behaviour: server.craft.gathering-in-the-real-start
     #[test]
-    fn a_start_describes_every_node_tool_and_find_of_the_servers_own_gathering() {
+    fn a_start_describes_every_node_tool_and_find_of_the_test_worlds_gathering() {
         let dir = auberean_dat::testing::require_target_install();
         let p = Portal::open(&dir, None).expect("opens");
         let start = start_rules(&p).expect("the start");
         let mut craft =
             crafting(&p, &yalain_content::CraftStart::default(), &[]).expect("the crafting");
-        let fell_back = yalain_world::mining::take_world_gathering(
+        let missing = yalain_world::mining::take_world_gathering(
             &mut craft,
-            &yalain_content::gathering::Gathering::default(),
+            &yalain_testkit::test_gathering(),
         );
-        assert_eq!(fell_back, ["mine", "map_region"]);
+        assert!(missing.is_empty(), "{missing:?}");
         let more: Vec<u32> = yalain_world::makes::by_the_server(&start, &[])
             .into_iter()
             .chain(craft.templates())
@@ -1674,7 +1799,7 @@ mod tests {
             &LootTable::default(),
             &more,
             &TreasureTables::default(),
-            &yalain_content::worn_table::WornLooks::servers_own(),
+            yalain_testkit::test_worn_looks(),
         )
         .expect("the catalog");
         let g = &craft.gathering;
@@ -1724,18 +1849,18 @@ mod tests {
         assert_eq!(g.map_nodes().count(), 15);
     }
 
-    /// A start describes everything the server's own crafting work makes, as it asks for them with
-    /// crafting's templates: the three totems and the ten refined products, each a stack; each of
+    /// A start describes everything the test world's crafting rows make (the release's, entry for
+    /// entry), as it asks for them with crafting's templates: the three totems and the ten refined products, each a stack; each of
     /// the ten refinings is of a script package the install holds; and each region's five map
     /// recipes read from the install, each drawing putting on the region's own effect.
     /// Behaviour: server.craft.crafting-in-the-real-start
     #[test]
-    fn a_start_describes_every_totem_and_refined_product_of_the_servers_own_crafting() {
+    fn a_start_describes_every_totem_and_refined_product_of_the_test_worlds_crafting() {
         use yalain_world::craft::Action;
         let dir = auberean_dat::testing::require_target_install();
         let p = Portal::open(&dir, None).expect("opens");
         let start = start_rules(&p).expect("the start");
-        let own = yalain_world::craft::world_crafts(&yalain_content::crafts::Crafts::default()).0;
+        let own = yalain_testkit::test_crafts();
         let map_recipes: Vec<u32> = own
             .map_recipes
             .values()
@@ -1743,8 +1868,8 @@ mod tests {
             .collect();
         let mut craft = crafting(&p, &yalain_content::CraftStart::default(), &map_recipes)
             .expect("the crafting");
-        let fell_back = craft.take_world_crafts(&yalain_content::crafts::Crafts::default());
-        assert_eq!(fell_back, ["map_recipes", "spellbinding", "refining"]);
+        let missing = craft.take_world_crafts(&own);
+        assert!(missing.is_empty(), "{missing:?}");
         let more: Vec<u32> = yalain_world::makes::by_the_server(&start, &[])
             .into_iter()
             .chain(craft.templates())
@@ -1755,7 +1880,7 @@ mod tests {
             &LootTable::default(),
             &more,
             &TreasureTables::default(),
-            &yalain_content::worn_table::WornLooks::servers_own(),
+            yalain_testkit::test_worn_looks(),
         )
         .expect("the catalog");
         let described = |t: u32| c.get(t).unwrap_or_else(|| panic!("{t:08X} described"));
@@ -1811,7 +1936,7 @@ mod tests {
             &LootTable::default(),
             &more,
             &TreasureTables::default(),
-            &yalain_content::worn_table::WornLooks::servers_own(),
+            yalain_testkit::test_worn_looks(),
         )
         .expect("the catalog");
         c.implements = implements(&p, &c).expect("the implements");
@@ -1895,7 +2020,6 @@ mod tests {
             panic!("a start without the Arcane Lore table read its treasure");
         };
         assert!(why.starts_with("the Arcane Lore table 70001BE5"), "{why}");
-        std::fs::remove_dir_all(&world).ok();
     }
 
     /// A start reads the quest taking an item asks from its class, by the quest's name: a piece of
@@ -1912,7 +2036,7 @@ mod tests {
             &LootTable::default(),
             &[0x4700_0609, 0x4700_11C7, 0x4700_080B],
             &TreasureTables::default(),
-            &yalain_content::worn_table::WornLooks::servers_own(),
+            yalain_testkit::test_worn_looks(),
         )
         .expect("the catalog");
         let gate = |t: u32| {
@@ -1940,7 +2064,7 @@ mod tests {
             &LootTable::default(),
             &[0x4700_11C8, 0x4700_1AED, 0x4700_051C],
             &TreasureTables::default(),
-            &yalain_content::worn_table::WornLooks::servers_own(),
+            yalain_testkit::test_worn_looks(),
         )
         .expect("the catalog");
         assert!(yalain_world::inventory::attunable(&c, 0x4700_11C8));
@@ -1960,7 +2084,7 @@ mod tests {
             &LootTable::default(),
             &[0x4700_10B1, 0x4700_10AC],
             &TreasureTables::default(),
-            &yalain_content::worn_table::WornLooks::servers_own(),
+            yalain_testkit::test_worn_looks(),
         )
         .expect("the catalog");
         let key = |t: u32| c.get(t).expect("described").props.word("Lock_KeyID");
@@ -1981,7 +2105,7 @@ mod tests {
             &LootTable::default(),
             &[0x4700_1127, 0x4700_1128],
             &TreasureTables::default(),
-            &yalain_content::worn_table::WornLooks::servers_own(),
+            yalain_testkit::test_worn_looks(),
         )
         .expect("the catalog");
         let key = |t: u32| c.get(t).expect("described").props.word("Lock_KeyID");
@@ -2005,19 +2129,17 @@ mod tests {
         assert_eq!(rules.bodies.len(), 10);
     }
 
-    /// A start with the server's own item rows reads every effect their uses put on (the forager's
-    /// food's two heals, the training hall's haste, healing and thorns), describes every template they name (the food, the potions, the cards, the Shi) and,
-    /// asking for what the rows give with the server's own, the Shaper's Guide every new character
-    /// is given.
+    /// A start with the test world's item rows (the release's, entry for entry) reads every effect
+    /// their uses put on (the forager's food's two heals, the training hall's haste, healing and
+    /// thorns), describes every template they name (the food, the potions, the cards, the Shi) and,
+    /// asking for what the rows give, the Shaper's Guide every new character is given.
     /// Behaviour: server.items.item-rows-in-the-real-start
     #[test]
-    fn a_start_reads_the_effects_and_describes_the_templates_of_the_servers_own_item_rows() {
+    fn a_start_reads_the_effects_and_describes_the_templates_of_the_test_worlds_item_rows() {
         use yalain_world::effect_defs::Kind;
         let dir = auberean_dat::testing::require_target_install();
         let p = Portal::open(&dir, None).expect("opens");
-        let (rows, fell_back) =
-            yalain_world::item_use::world_item_rows(yalain_content::item_rows::ItemRows::default());
-        assert_eq!(fell_back, ["item_use", "book", "start_item"]);
+        let rows = yalain_testkit::test_item_rows();
         let states: Vec<u32> = rows.states().collect();
         assert_eq!(states.len(), 5);
         let t = effect_table(
@@ -2043,6 +2165,7 @@ mod tests {
                     pets: &BTreeMap::new(),
                     items: &rows,
                     plants: &yalain_world::plants::DyePlants::default(),
+                    effect_rules: &yalain_world::effect_defs::EffectRules::default(),
                 },
             ))
             .collect();
@@ -2052,7 +2175,7 @@ mod tests {
             &LootTable::default(),
             &more,
             &TreasureTables::default(),
-            &yalain_content::worn_table::WornLooks::servers_own(),
+            yalain_testkit::test_worn_looks(),
         )
         .expect("the catalog");
         assert_eq!(rows.start_items, BTreeMap::from([(0x4700_06CD, 1)]));
@@ -2068,7 +2191,7 @@ mod tests {
                 .copied()
                 .collect::<Vec<_>>(),
             &TreasureTables::default(),
-            &yalain_content::worn_table::WornLooks::servers_own(),
+            yalain_testkit::test_worn_looks(),
         )
         .expect("the catalog");
         for t in rows.uses.keys().chain(rows.books.keys()) {
@@ -2076,18 +2199,18 @@ mod tests {
         }
     }
 
-    /// A start describes every template of the server's own worn looks (75), none of which names a
-    /// worn look in its own data, and gives each its looks in order, 147 of 147: a wearer of each
+    /// A start describes every template of the test world's worn looks (the release's, 75), none of
+    /// which names a worn look in its own data, and gives each its looks in order, 147 of 147: a wearer of each
     /// race and sex a look fits wears the first that fits, as the starting clothes each race wears
     /// do. With a world's rows the templates take those alone.
     /// Behaviour: server.inventory.worn-looks-in-the-real-start
     #[test]
-    fn a_start_gives_every_template_of_the_servers_own_worn_looks_its_looks_in_order() {
+    fn a_start_gives_every_template_of_the_test_worlds_worn_looks_its_looks_in_order() {
         use yalain_content::worn_table::{Worn, WornLooks};
         use yalain_world::chargen::{FEMALE, MALE};
         let dir = auberean_dat::testing::require_target_install();
         let p = Portal::open(&dir, None).expect("opens");
-        let own = WornLooks::servers_own();
+        let own = yalain_testkit::test_worn_looks();
         let start = start_rules(&p).expect("the start");
         let garments: Vec<(u32, u32)> = start
             .items
@@ -2117,7 +2240,7 @@ mod tests {
             .expect("the catalog")
             .0
         };
-        let c = build(&own);
+        let c = build(own);
         let prop_name = |id: u32| {
             p.ctx
                 .properties()
@@ -2193,17 +2316,15 @@ mod tests {
         assert_eq!(props.word("Item_WornAppearanceFile1"), None, "{other:08X}");
     }
 
-    /// A start describes every template of the server's own dye plants, as it asks for them with
-    /// the rows' makers: each species' plant, seed, plant item and pollen (twelve of thirteen have
+    /// A start describes every template of the test world's dye plants (the release's, entry for
+    /// entry), as it asks for them with the rows' makers: each species' plant, seed, plant item and pollen (twelve of thirteen have
     /// one) and each cross's seeds; and it reads each species' ripe look from its plant item.
     /// Behaviour: server.plants.plants-in-the-real-start
     #[test]
-    fn a_start_describes_every_template_and_ripe_look_of_the_servers_own_dye_plants() {
+    fn a_start_describes_every_template_and_ripe_look_of_the_test_worlds_dye_plants() {
         let dir = auberean_dat::testing::require_target_install();
         let p = Portal::open(&dir, None).expect("opens");
-        let (plants, fell_back) =
-            yalain_world::plants::world_plants(&yalain_world::plants::DyePlants::default());
-        assert_eq!(fell_back, ["plant", "plant_cross"]);
+        let plants = yalain_testkit::test_plants();
         let start = start_rules(&p).expect("the start");
         let more: Vec<u32> = yalain_world::makes::by_the_server(&start, &[])
             .into_iter()
@@ -2217,6 +2338,7 @@ mod tests {
                     pets: &BTreeMap::new(),
                     items: &yalain_content::item_rows::ItemRows::default(),
                     plants: &plants,
+                    effect_rules: &yalain_world::effect_defs::EffectRules::default(),
                 },
             ))
             .collect();
@@ -2226,7 +2348,7 @@ mod tests {
             &LootTable::default(),
             &more,
             &TreasureTables::default(),
-            &yalain_content::worn_table::WornLooks::servers_own(),
+            yalain_testkit::test_worn_looks(),
         )
         .expect("the catalog");
         let described = |t: u32| assert!(c.get(t).is_some(), "{t:08X} described");
@@ -2254,9 +2376,9 @@ mod tests {
     /// Behaviour: server.content.destroyed-on-use-of-classes
     #[test]
     fn a_start_reads_which_items_their_use_destroys_from_their_classes() {
-        use yalain_world::item_use::{spends, world_item_rows};
+        use yalain_world::item_use::spends;
         const FOOD: u32 = 0x4700_0845;
-        let (rows, _) = world_item_rows(yalain_content::item_rows::ItemRows::default());
+        let rows = yalain_testkit::test_item_rows();
         let dir = auberean_dat::testing::require_target_install();
         let p = Portal::open(&dir, None).expect("opens");
         let (c, _) = catalog(
@@ -2265,7 +2387,7 @@ mod tests {
             &LootTable::default(),
             &[0x4700_11B4, 0x4700_1106, FOOD],
             &TreasureTables::default(),
-            &yalain_content::worn_table::WornLooks::servers_own(),
+            yalain_testkit::test_worn_looks(),
         )
         .expect("the catalog");
         let spent = |t: u32| spends(&rows, t, &c.get(t).expect("described").props);
@@ -2295,7 +2417,7 @@ mod tests {
             &LootTable::default(),
             &[ARMOR, weapon],
             &TreasureTables::default(),
-            &yalain_content::worn_table::WornLooks::servers_own(),
+            yalain_testkit::test_worn_looks(),
         )
         .expect("the catalog");
         assert!(
@@ -2413,6 +2535,175 @@ mod tests {
         let problems = crate::world::install_problems(&p, &db).expect("checks");
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].message.contains("0x6ffffff0"), "{problems:?}");
+    }
+
+    /// An effect rule's skill: the install's three effects that bestow a city's recall, each with a
+    /// rule naming its skill, read as training those skills, which are the install's skills, with
+    /// their own name's table and appearance; a rule naming a skill the install lacks is a problem.
+    /// Behaviour: server.skills.an-effect-trains-a-skill-for-good
+    #[test]
+    fn an_effect_rule_trains_a_skill_of_the_install_and_one_it_lacks_is_a_problem() {
+        use yalain_world::effect_defs::{EffectRules, Kind};
+        let (dat, _) = tallied(&DatName::Portal);
+        let p = Portal::over(dat, Vec::new(), None).expect("a context");
+        let named = [
+            (0x6F00_1A98, 925, 0x2500_10AA),
+            (0x6F00_1A99, 926, 0x2500_10AB),
+            (0x6F00_1A9A, 927, 0x2500_10AC),
+        ];
+        let rules = EffectRules {
+            skills: named.iter().map(|(e, k, _)| (*e, *k)).collect(),
+            ..EffectRules::default()
+        };
+        let states: Vec<u32> = named.iter().map(|(e, _, _)| *e).collect();
+        let t = effect_table(&p, &states, &rules).expect("the effects");
+        let skills = skill_table(&p).expect("the skills");
+        for (effect, skill, table) in named {
+            let d = t.get(effect).unwrap_or_else(|| panic!("{effect:08X} read"));
+            assert_eq!(d.kind, Kind::GrantSkill(skill), "{effect:08X}");
+            assert_eq!(d.name.map(|n| n.1), Some(table), "{effect:08X}");
+            assert_eq!(d.fx, 0x4100_0499, "{effect:08X}");
+            assert!(!d.lasts(), "{effect:08X}: once");
+            assert!(skills.skills.contains_key(&skill), "{skill}");
+        }
+        let mut files = yalain_world_db::Files::new();
+        files.insert(
+            "world.toml".into(),
+            "format_version = 1\nkey = \"w\"\ngame = \"ac2\"\nera = \"eor\"\npacks = [\"p\"]\n"
+                .into(),
+        );
+        files.insert(
+            "p/pack.toml".into(),
+            "format_version = 1\nname = \"p\"\nversion = \"0.1.0\"\ngame = \"ac2\"\nauthors = [\"a\"]\nlicense = \"CC0-1.0\"\ndescription = \"d\"\n".into(),
+        );
+        files.insert(
+            "p/server/effects.toml".into(),
+            "[[effect_rule]]\neffect = 0x6F001A98\nskill = 925\nprov = { from = \"authored\" }\n\n\
+             [[effect_rule]]\neffect = 0x6F001A99\nskill = 99999\nprov = { from = \"authored\" }\n"
+                .into(),
+        );
+        let db = yalain_world_db::rows::read(&files).expect("reads");
+        let problems = crate::world::install_problems(&p, &db).expect("checks");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].message.contains("skill 99999"), "{problems:?}");
+    }
+
+    /// An effect rule's items: the install's five effects that hand over a Curse of the Undead's
+    /// leather hide name no item of their own and read as giving nothing; each with a rule naming
+    /// its hide reads as giving it, once, with no appearance, and the catalog holds the hide.
+    /// Behaviour: server.effects.a-rule-names-what-an-effect-gives
+    #[test]
+    fn an_effect_rule_names_the_item_an_effect_that_names_none_gives() {
+        use yalain_world::effect_defs::{EffectRules, Grant, Kind};
+        let (dat, _) = tallied(&DatName::Portal);
+        let p = Portal::over(dat, Vec::new(), None).expect("a context");
+        let hides = [
+            (0x6F00_0D90, 0x4700_0806),
+            (0x6F00_0D98, 0x4700_0807),
+            (0x6F00_0D9F, 0x4700_0808),
+            (0x6F00_0DA6, 0x4700_0809),
+            (0x6F00_0DAD, 0x4700_080A),
+        ];
+        let states: Vec<u32> = hides.iter().map(|(e, _)| *e).collect();
+        let bare = effect_table(&p, &states, &EffectRules::default()).expect("the effects");
+        for (effect, _) in hides {
+            let d = bare
+                .get(effect)
+                .unwrap_or_else(|| panic!("{effect:08X} read"));
+            assert!(
+                !matches!(d.kind, Kind::GrantItem(_)),
+                "{effect:08X}: {:?}",
+                d.kind
+            );
+        }
+        let rules = EffectRules {
+            grants: hides
+                .iter()
+                .map(|(e, t)| {
+                    (
+                        *e,
+                        Grant {
+                            template: *t,
+                            count: 1,
+                        },
+                    )
+                })
+                .collect(),
+            ..EffectRules::default()
+        };
+        let t = effect_table(&p, &states, &rules).expect("the effects");
+        for (effect, hide) in hides {
+            let d = t.get(effect).unwrap_or_else(|| panic!("{effect:08X} read"));
+            let grant = Grant {
+                template: hide,
+                count: 1,
+            };
+            assert_eq!(d.kind, Kind::GrantItem(grant), "{effect:08X}");
+            assert_eq!(d.fx, 0, "{effect:08X}");
+            assert!(!d.lasts(), "{effect:08X}: once");
+        }
+        let more = yalain_world::makes::by_the_rows(yalain_world::makes::Rows {
+            objects: &[],
+            stores: &yalain_content::StoreTable::default(),
+            quests: &yalain_content::QuestTable::default(),
+            crafting: &yalain_content::CraftStart::default(),
+            death_spawns: &BTreeMap::new(),
+            pets: &BTreeMap::new(),
+            items: &yalain_content::item_rows::ItemRows::default(),
+            plants: &yalain_world::plants::DyePlants::default(),
+            effect_rules: &rules,
+        });
+        let (c, _) = catalog(
+            &p,
+            &SpawnTable::default(),
+            &LootTable::default(),
+            &more,
+            &TreasureTables::default(),
+            yalain_testkit::test_worn_looks(),
+        )
+        .expect("the catalog");
+        for (_, hide) in hides {
+            assert!(c.templates.contains_key(&hide), "{hide:08X}");
+        }
+    }
+
+    /// The line each effect's application tells reads from its own name's table in the English
+    /// file, where that table holds one: the recipes the Arwic mines, a Ulkas geyser and Orlen
+    /// teach, the Hero Shrine's pure mana, a city's recall and an emblem worn each have their own;
+    /// a soulbound weapon's recipe, a Drudge crafter's and a butcher's, the Darkfoe Aura worn, and a
+    /// recipe effect named only in words have none.
+    /// Behaviour: server.effects.lines-read-from-their-own-tables
+    #[test]
+    fn each_effects_line_reads_from_its_own_table_where_the_install_holds_one() {
+        use yalain_world::effect_defs::EffectRules;
+        use yalain_world::effects::learned::LINE;
+        let dir = auberean_dat::testing::require_target_install();
+        let p = Portal::open(&dir, None).expect("opens");
+        let own = [
+            (0x6F00_19EF, 0x2500_1070),
+            (0x6F00_1DA7, 0x2500_10DF),
+            (0x6F00_1DA3, 0x2500_10DB),
+            (0x6F00_1C60, 0x2500_2BD7),
+            (0x6F00_1A98, 0x2500_10AA),
+            (0x6F00_1D77, 0x2500_2C12),
+        ];
+        let none = [
+            0x6F00_1F47,
+            0x6F00_0E9E,
+            0x6F00_1B0D,
+            0x7000_070E,
+            0x6F00_1B04,
+        ];
+        let states: Vec<u32> = own.iter().map(|(e, _)| *e).chain(none).collect();
+        let t = effect_table(&p, &states, &EffectRules::default()).expect("the effects");
+        for (effect, table) in own {
+            assert_eq!(t.get(effect).and_then(|d| d.name).map(|n| n.1), Some(table));
+            assert_eq!(t.line(effect), Some((LINE, table)), "{effect:08X}");
+        }
+        for effect in none {
+            assert!(t.get(effect).is_some(), "{effect:08X} read");
+            assert_eq!(t.line(effect), None, "{effect:08X}");
+        }
     }
 
     /// An `[[item_use]]` row may name only effects the install holds: a training hall potion's
@@ -2562,7 +2853,7 @@ mod tests {
             &loot,
             &[],
             &TreasureTables::default(),
-            &yalain_content::worn_table::WornLooks::servers_own(),
+            yalain_testkit::test_worn_looks(),
         )
         .expect("the catalog");
         let kinds = treasure(&p, &c, &TreasureTables::default()).expect("the treasure kinds");
@@ -2575,6 +2866,59 @@ mod tests {
         assert!(!kinds.trumps.contains(&package(SWORD)));
         assert!(rare(RARE), "a rare");
         assert!(!rare(LESSER) && !rare(SWORD));
+    }
+
+    /// Gems are read from the install by their package, a small one and a large alike; no weapon,
+    /// trump or rare is one, and each gem's template carries the value it sells for.
+    /// Behaviour: server.loot.treasure-value-gems-read-from-the-install
+    #[test]
+    fn the_gems_are_read_from_the_install() {
+        const LARGE_EMERALD: u32 = 0x4700_103C;
+        const SMALL_MALACHITE: u32 = 0x4700_1052;
+        const LESSER: u32 = 0x4700_134C;
+        const RARE: u32 = 0x4700_1919;
+        const SWORD: u32 = 0x4700_051C;
+        let (dat, _) = tallied(&DatName::Portal);
+        let p = Portal::over(dat, Vec::new(), None).expect("a context");
+        let mut loot = LootTable::default();
+        loot.pools.pools.insert(
+            "GP_Test".into(),
+            yalain_content::pools::Pool {
+                name: "GP_Test".into(),
+                entries: [LARGE_EMERALD, SMALL_MALACHITE, LESSER, RARE, SWORD]
+                    .into_iter()
+                    .map(|t| yalain_content::pools::Entry {
+                        to: yalain_content::pools::Target::Template(t),
+                        weight: 1.0,
+                        least: 0,
+                        most: yalain_content::pools::OPEN_ABOVE,
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+        );
+        let (c, _) = catalog(
+            &p,
+            &SpawnTable::default(),
+            &loot,
+            &[],
+            &TreasureTables::default(),
+            yalain_testkit::test_worn_looks(),
+        )
+        .expect("the catalog");
+        let kinds = treasure(&p, &c, &TreasureTables::default()).expect("the treasure kinds");
+        let package = |t: u32| c.templates[&t].description.package;
+        assert!(kinds.gems.contains(&package(LARGE_EMERALD)), "a large gem");
+        assert!(
+            kinds.gems.contains(&package(SMALL_MALACHITE)),
+            "a small gem"
+        );
+        for t in [LESSER, RARE, SWORD] {
+            assert!(!kinds.gems.contains(&package(t)), "{t:#010x} is no gem");
+        }
+        let value = |t: u32| c.templates[&t].props.int("Item_Value");
+        assert_eq!(value(LARGE_EMERALD), Some(6_000));
+        assert_eq!(value(SMALL_MALACHITE), Some(50));
     }
 
     /// The catalog holds every template a treasure pool names, though no camp or profile names it, so
@@ -2605,7 +2949,7 @@ mod tests {
             &loot,
             &[],
             &TreasureTables::default(),
-            &yalain_content::worn_table::WornLooks::servers_own(),
+            yalain_testkit::test_worn_looks(),
         )
         .expect("the catalog");
         assert!(c.templates.contains_key(&ITEM));
@@ -2624,6 +2968,7 @@ mod tests {
                 from: yalain_content::Dropper::Template(0x4700_2C30),
                 item: ITEM,
                 chance: 0.5,
+                requires: None,
                 placed: "authored for a test".into(),
                 confidence: "authored".into(),
             }],
@@ -2635,7 +2980,7 @@ mod tests {
             &loot,
             &[],
             &TreasureTables::default(),
-            &yalain_content::worn_table::WornLooks::servers_own(),
+            yalain_testkit::test_worn_looks(),
         )
         .expect("the catalog");
         assert!(c.templates.contains_key(&ITEM));
@@ -2645,10 +2990,57 @@ mod tests {
             &LootTable::default(),
             &[],
             &TreasureTables::default(),
-            &yalain_content::worn_table::WornLooks::servers_own(),
+            yalain_testkit::test_worn_looks(),
         )
         .expect("the catalog");
         assert!(!c.templates.contains_key(&ITEM), "named by nothing else");
+    }
+
+    /// The catalog holds the corpse a camp's creature leaves in place of the common one, with the
+    /// generator profile that corpse names, though no camp or profile names the corpse itself.
+    /// Behaviour: server.loot.corpse-profile-in-the-catalog
+    #[test]
+    fn the_catalog_holds_the_corpse_a_creature_names_with_its_profile() {
+        const CREATURE: u32 = 0x4700_2CE8;
+        const CORPSE: u32 = 0x4700_0F85;
+        let (dat, _) = tallied(&DatName::Portal);
+        let p = Portal::over(dat, Vec::new(), None).expect("a context");
+        let mut camp = yalain_testkit::test_camp(1);
+        camp.templates = vec![(CREATURE, 1)];
+        let spawns = SpawnTable { camps: vec![camp] };
+        let (c, _) = catalog(
+            &p,
+            &spawns,
+            &LootTable::default(),
+            &[],
+            &TreasureTables::default(),
+            yalain_testkit::test_worn_looks(),
+        )
+        .expect("the catalog");
+        let named = c
+            .get(CREATURE)
+            .and_then(|t| t.props.word(yalain_world::death::CORPSE_OVERRIDE));
+        assert_eq!(named, Some(CORPSE), "the creature names its corpse");
+        let profile = c
+            .get(CORPSE)
+            .and_then(|t| t.props.word(yalain_world::death::GENERATOR_PROFILE))
+            .expect("the corpse, with its profile");
+        assert!(
+            c.profile_name(profile)
+                .is_some_and(|n| n.starts_with("GP_Corpse")),
+            "{profile:#x} {:?}",
+            c.profile_name(profile)
+        );
+        let (c, _) = catalog(
+            &p,
+            &SpawnTable::default(),
+            &LootTable::default(),
+            &[],
+            &TreasureTables::default(),
+            yalain_testkit::test_worn_looks(),
+        )
+        .expect("the catalog");
+        assert!(!c.templates.contains_key(&CORPSE), "named by nothing else");
     }
 
     /// Every enchantment treasure may carry, and what it puts on what it hits, reads from the data

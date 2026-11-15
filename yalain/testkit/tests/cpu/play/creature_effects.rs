@@ -212,7 +212,9 @@ fn a_specials_taunt_counts_only_for_the_uses_that_land() {
         TAUNT,
         yalain_world::effect_defs::EffectDef {
             state: TAUNT,
-            kind: yalain_world::effect_defs::Kind::Taunt(0.05),
+            kind: yalain_world::effect_defs::Kind::Taunt(yalain_world::effect_defs::Scale(vec![(
+                1.0, 0.05,
+            )])),
             ..h.server
                 .effect_table
                 .get(VACUUM_EFFECT)
@@ -557,6 +559,7 @@ fn with_immunity(h: &mut Harness) {
         external_flags: 0,
         internal_flags: yalain_world::effect_defs::HARMFUL,
         ends_at_logout: false,
+        ends_at_teleport: false,
         enum_value: 0,
         eq_class: class,
         name: None,

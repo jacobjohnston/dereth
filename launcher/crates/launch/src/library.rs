@@ -2,9 +2,11 @@
 //!
 //! The player points the launcher at folders. A folder holding `acclient.exe` becomes the retail
 //! client (there is only ever one: a second replaces the first), a folder holding the four later
-//! dats becomes a Modern set, and one holding `portal.dat` and `cell.dat` a Classic set, or an
-//! Original set when the pair is the 1999 files; the Dereth client can be given any of them. A retail install is usually a client and a Modern set: its dats go
-//! into the library too, so the Dereth client can use them. A folder may hold both kinds of set.
+//! dats becomes a Modern set, and one holding `portal.dat` and `cell.dat` a Classic set, whichever
+//! year's pair it is; the Dereth client can be given any of them, a Classic set on the worlds
+//! whose era its iterations suit ([`crate::choices::pair_suits`]). A retail install is usually a
+//! client and a Modern set: its dats go into the library too, so the Dereth client can use them. A
+//! folder may hold both kinds of set.
 //!
 //! The Dereth client is not added: it ships beside the launcher, and [`dereth_client`] reads it.
 //!
@@ -35,7 +37,7 @@ pub struct FolderFind {
     pub retail: Option<Installation>,
     /// The Modern set, when the folder holds any of the four later dats.
     pub dats: Option<DatSet>,
-    /// The Classic or Original set, when the folder holds both `portal.dat` and `cell.dat`.
+    /// The Classic set, when the folder holds both `portal.dat` and `cell.dat`.
     #[serde(default)]
     pub classic: Option<DatSet>,
     pub error: Option<String>,
@@ -71,7 +73,7 @@ pub fn read_folder(path: &Path, state: &LauncherState) -> FolderFind {
         // Its own prefix, so it never takes the Modern set's id from the same reading.
         id: state.new_id("c"),
         path: path.to_path_buf(),
-        kind: SetKind::of_pair(&classic_files),
+        kind: SetKind::Classic,
         origin: DatOrigin::Unassigned,
         files: classic_files.clone(),
         last_patched_by_server: None,
@@ -134,7 +136,7 @@ pub fn add_find(s: &mut LauncherState, find: FolderFind) {
             // the same reading, say) is replaced.
             if s.sets(game).iter().any(|d| d.id == set.id) {
                 set.id = s.new_id(match set.kind {
-                    SetKind::Classic | SetKind::Original => "c",
+                    SetKind::Classic => "c",
                     SetKind::Modern => "d",
                     SetKind::Auberean => "a",
                 });
@@ -152,7 +154,10 @@ pub fn add_find(s: &mut LauncherState, find: FolderFind) {
         }
         let sets = s.sets_mut(game);
         sets.retain(|d| !same(d));
+        let id = set.id.clone();
         sets.push(set);
+        // A set removed before and added again is the same set to what was saved with it.
+        s.reclaim(&id);
     }
 }
 
@@ -236,8 +241,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&b);
     }
 
+    /// A set removed and added again with the same files takes its place in what was saved with
+    /// it, and one with other files does not.
     #[test]
-    fn a_1999_pair_is_an_original_set_with_its_own_default_and_a_2005_pair_stays_classic() {
+    fn a_set_added_again_with_the_same_files_takes_the_removed_ones_place() {
+        let (a, b) = (tmp("lib-again-a"), tmp("lib-again-b"));
+        fake_set(&a, Iterations::END_OF_RETAIL);
+        let older = Iterations {
+            portal: Some(2000),
+            ..Iterations::END_OF_RETAIL
+        };
+        fake_set(&b, older);
+        let mut s = LauncherState::default();
+        let find = read_folder(&a, &s);
+        add_find(&mut s, find);
+        let id = s.dat_sets[0].id.clone();
+        s.favourites.push(crate::state::Favourite {
+            id: "f1".into(),
+            name: None,
+            world_slug: "w".into(),
+            account: "p".into(),
+            client: crate::install::ClientKind::Dereth,
+            dat_set_id: Some(id.clone()),
+            classic_set_id: None,
+        });
+        s.remove_set(&id);
+        assert_eq!(s.forgotten_sets.len(), 1);
+        // Other files are another set: what was saved stays as it was.
+        let find = read_folder(&b, &s);
+        add_find(&mut s, find);
+        assert_eq!(s.favourites[0].dat_set_id.as_deref(), Some(id.as_str()));
+        // The same files, from another folder, are the set removed.
+        let copy = tmp("lib-again-copy");
+        fake_set(&copy, Iterations::END_OF_RETAIL);
+        let find = read_folder(&copy, &s);
+        add_find(&mut s, find);
+        let again = s
+            .dat_sets
+            .iter()
+            .find(|d| d.path == copy)
+            .unwrap()
+            .id
+            .clone();
+        assert_ne!(again, id);
+        assert_eq!(s.favourites[0].dat_set_id.as_deref(), Some(again.as_str()));
+        assert!(s.forgotten_sets.is_empty(), "taken once");
+        for d in [a, b, copy] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn a_1999_pair_and_a_2005_pair_are_both_classic_sets_each_offered_to_its_own_era() {
         use crate::dat::testdat::pre_tod;
         let (old, feb) = (tmp("lib-original"), tmp("lib-feb2005"));
         for (d, portal, cell) in [(&old, 105, 67), (&feb, 2112, 1593)] {
@@ -247,19 +302,27 @@ mod tests {
         }
         let mut s = LauncherState::default();
         let find = read_folder(&old, &s);
-        assert_eq!(
-            find.classic.as_ref().map(|c| c.kind),
-            Some(SetKind::Original)
-        );
+        let c = find.classic.as_ref().unwrap();
+        assert_eq!(c.kind, SetKind::Classic);
+        assert_eq!(c.pair_era(), Some(dereth_primitives::EraId::Launch));
         add_find(&mut s, find);
         let find = read_folder(&feb, &s);
-        assert_eq!(
-            find.classic.as_ref().map(|c| c.kind),
-            Some(SetKind::Classic)
-        );
+        let c = find.classic.as_ref().unwrap();
+        assert_eq!(c.kind, SetKind::Classic);
+        assert_eq!(c.pair_era(), Some(dereth_primitives::EraId::Infiltration));
         add_find(&mut s, find);
-        assert_eq!(s.default_set(SetKind::Original).unwrap().path, old);
-        assert_eq!(s.default_set(SetKind::Classic).unwrap().path, feb);
+        assert_eq!(s.default_set(SetKind::Classic).unwrap().path, old);
+        let mut w = crate::world::World::new("w", "W");
+        let offered = |w: &crate::world::World| {
+            crate::choices::classic_sets_for(&s, w)
+                .into_iter()
+                .map(|d| d.path)
+                .collect::<Vec<_>>()
+        };
+        w.era = Some("launch".into());
+        assert_eq!(offered(&w), std::slice::from_ref(&old));
+        w.era = Some("infiltration".into());
+        assert_eq!(offered(&w), std::slice::from_ref(&feb));
         let _ = std::fs::remove_dir_all(&old);
         let _ = std::fs::remove_dir_all(&feb);
     }

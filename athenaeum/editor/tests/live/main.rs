@@ -7,6 +7,7 @@
 //! where its character stands. Each step waits for what it should leave in the server's or the
 //! client's log, with a time limit only against a hang.
 
+mod in_editor;
 mod stop;
 
 use std::net::{Ipv4Addr, UdpSocket};
@@ -15,7 +16,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use athenaeum_editor::characters::{self, Item, Making, Quest, QuestAt, Recipe, Skill, Start};
-use athenaeum_editor::live::{self, Ask, Entry, Event, Live, Programs, Reloaded, Said, Setup};
+use athenaeum_editor::live::{
+    self, Ask, Client, Entry, Event, Live, Programs, Reloaded, Said, Setup,
+};
 use athenaeum_editor::stop::windowless;
 use athenaeum_foundry::edit::{ClearingShape, NewKind, NewRow};
 use athenaeum_foundry::{new, world, Session};
@@ -288,6 +291,7 @@ fn recipes_characters_play_the_world_live_on_one_server_made_built_and_placed_at
         base: Some(base),
         key: String::new(),
         clearings: Vec::new(),
+        shops: Vec::new(),
     };
     let mut recipe = Recipe::new("Tester");
     recipe.race = chargen::TUMEROK;
@@ -335,7 +339,7 @@ fn recipes_characters_play_the_world_live_on_one_server_made_built_and_placed_at
         "the playtest folder is held while it plays"
     );
     live.prepare(&setup, &recipe, Some(entry)).expect("asked");
-    live.play_when_ready("Tester", false);
+    live.play_when_ready("Tester", Client::Window);
     let seen = played(&mut live, &walking, "Tester made and played");
     assert!(seen.contains(&Event::Up), "{seen:?}");
     assert!(
@@ -540,7 +544,7 @@ fn recipes_characters_play_the_world_live_on_one_server_made_built_and_placed_at
     );
     live.stop_client();
     live.prepare(&setup, &recipe, None).expect("asked");
-    live.play_when_ready("Tester", false);
+    live.play_when_ready("Tester", Client::Window);
     let seen = played(&mut live, &setup, "the build given and Tester played");
     assert!(
         done_with(
@@ -597,7 +601,7 @@ fn recipes_characters_play_the_world_live_on_one_server_made_built_and_placed_at
     };
     live.stop_client();
     live.prepare(&setup, &recipe, Some(there)).expect("asked");
-    live.play_when_ready("Tester", false);
+    live.play_when_ready("Tester", Client::Window);
     let seen = played(&mut live, &setup, "Tester placed and played");
     assert!(
         done_with(&seen, &Ask::Place(tester()), "Tester enters at"),
@@ -617,7 +621,7 @@ fn recipes_characters_play_the_world_live_on_one_server_made_built_and_placed_at
     characters::save(session.dir(), &two).expect("its recipe");
     live.stop_client();
     live.prepare(&setup, &two, Some(entry)).expect("asked");
-    live.play_when_ready("Tester Two", false);
+    live.play_when_ready("Tester Two", Client::Window);
     let seen = played(&mut live, &setup, "Tester Two made and played");
     assert!(
         done_with(
@@ -652,7 +656,7 @@ fn recipes_characters_play_the_world_live_on_one_server_made_built_and_placed_at
         done_with(&seen, &Ask::Make("Tester Two".into()), "made on tester_two"),
         "{seen:?}"
     );
-    live.play_when_ready("Tester Two", false);
+    live.play_when_ready("Tester Two", Client::Window);
     played(&mut live, &setup, "Tester Two played again");
     until(
         &mut live,
@@ -681,7 +685,7 @@ fn recipes_characters_play_the_world_live_on_one_server_made_built_and_placed_at
     three.name = "Tester Three".into();
     characters::save(session.dir(), &three).expect("its recipe");
     live.import(&three, &file);
-    live.play_when_ready("Tester Three", false);
+    live.play_when_ready("Tester Three", Client::Window);
     let seen = played(&mut live, &setup, "Tester Three brought in and played");
     assert!(
         done_with(
@@ -749,6 +753,7 @@ fn a_server_started_on_ports_another_program_holds_moves_on_to_free_ones() {
         base: Some(base),
         key: String::new(),
         clearings: Vec::new(),
+        shops: Vec::new(),
     };
     let p = live::free_port(live::first_port(41_500, std::process::id())).expect("free ports");
     let held: Vec<UdpSocket> = (0..4)
@@ -805,6 +810,7 @@ fn two_playtests_started_at_once_on_the_same_free_ports_each_serve_on_their_own(
             base: Some(base.clone()),
             key: String::new(),
             clearings: Vec::new(),
+            shops: Vec::new(),
         })
         .collect();
     let p = live::free_port(live::first_port(41_900, std::process::id())).expect("free ports");
@@ -949,6 +955,7 @@ fn a_clearing_is_read_by_the_server_and_by_the_client_play_starts() {
             .into_iter()
             .map(|(c, l)| (c.clone(), l))
             .collect(),
+        shops: Vec::new(),
     };
     let setup = setup_of(&session);
     let mut live = Live::default();
@@ -968,7 +975,7 @@ fn a_clearing_is_read_by_the_server_and_by_the_client_play_starts() {
     // Played, the client is told the folder.
     let recipe = Recipe::new("Tester");
     live.prepare(&setup, &recipe, None).expect("the character");
-    live.play_when_ready("Tester", false);
+    live.play_when_ready("Tester", Client::Window);
     played(&mut live, &setup, "Tester made and played");
     let client_log = setup.folder.join("client.log");
     until(&mut live, &setup, "the client reading it", |_, _| {

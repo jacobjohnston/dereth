@@ -570,6 +570,8 @@ pub enum FidelityFeature {
     RemasterScale,
     /// How strongly the remaster's sunlit air shows shafts of light: 0 none, 1 low, 2 high.
     RemasterGodRays,
+    /// The remaster's steep rock faces drawn far off as shelves.
+    RemasterCliffShelves,
     /// The art pack in the remaster.
     RemasterArtPack,
     /// The remaster's color grade.
@@ -580,12 +582,17 @@ pub enum FidelityFeature {
     RemasterGrass,
     /// The remaster's flowers and pebbles.
     RemasterFlowers,
+    /// An art pack's trees swaying in the wind.
+    RemasterSway,
+    /// How many rings of blocks round the player's stand their scenery, buildings and objects
+    /// while the remaster draws, 1 to 4; 0 until the player chooses one.
+    RemasterScenery,
 }
 
 #[cfg(feature = "fidelity")]
 impl FidelityFeature {
     /// Every option, in the order the names list them.
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 28] = [
         Self::Remaster,
         Self::RemasterShadows,
         Self::RemasterSky,
@@ -606,11 +613,14 @@ impl FidelityFeature {
         Self::RemasterDlss,
         Self::RemasterScale,
         Self::RemasterGodRays,
+        Self::RemasterCliffShelves,
         Self::RemasterArtPack,
         Self::RemasterGrade,
         Self::RemasterAir,
         Self::RemasterGrass,
         Self::RemasterFlowers,
+        Self::RemasterSway,
+        Self::RemasterScenery,
     ];
 
     /// The option's preference name.
@@ -637,21 +647,25 @@ impl FidelityFeature {
             Self::RemasterDlss => fidelity::REMASTER_DLSS,
             Self::RemasterScale => fidelity::REMASTER_SCALE,
             Self::RemasterGodRays => fidelity::REMASTER_GOD_RAYS,
+            Self::RemasterCliffShelves => fidelity::REMASTER_CLIFF_SHELVES,
             Self::RemasterArtPack => fidelity::REMASTER_ART_PACK,
             Self::RemasterGrade => fidelity::REMASTER_GRADE,
             Self::RemasterAir => fidelity::REMASTER_AIR,
             Self::RemasterGrass => fidelity::REMASTER_GRASS,
             Self::RemasterFlowers => fidelity::REMASTER_FLOWERS,
+            Self::RemasterSway => fidelity::REMASTER_SWAY,
+            Self::RemasterScenery => fidelity::REMASTER_SCENERY,
         }
     }
 
     /// The highest value the option takes: 100 for the share of the pixels, 2 for God Rays' high,
-    /// 1 for a box.
+    /// 4 for the farthest scenery, 1 for a box.
     #[must_use]
     pub const fn max(self) -> u32 {
         match self {
             Self::RemasterScale => 100,
             Self::RemasterGodRays => 2,
+            Self::RemasterScenery => 4,
             _ => 1,
         }
     }
@@ -713,6 +727,13 @@ impl FidelityPreferences {
                     .get(feature.name())
                     .and_then(|v| {
                         dereth_client_contract::options::remaster::god_rays_value(feature.name(), v)
+                    })
+                    .and_then(|v| u32::try_from(v).ok()),
+                // A distance, as the page writes it: "Far".
+                FidelityFeature::RemasterScenery => prefs
+                    .get(feature.name())
+                    .and_then(|v| {
+                        dereth_client_contract::options::remaster::scenery_value(feature.name(), v)
                     })
                     .and_then(|v| u32::try_from(v).ok()),
                 // A box the page ticked; a number the file holds otherwise (from an older
@@ -927,7 +948,8 @@ mod tests {
     }
 
     /// A profile from a build that had the earlier experimental effects still loads: their boxes
-    /// are not read, nothing of them is in effect, and neither is an error.
+    /// are not read, nothing of them is in effect, and neither is an error. So is the cliff
+    /// shelves menu that came before their box: the box stays unticked whatever the menu held.
     ///
     /// Behaviour: remaster.options.old-effects-boxes-are-ignored
     #[test]
@@ -937,7 +959,7 @@ mod tests {
             "[UI]\nInterface=Horizon\n[Fidelity]\nLighting=True\nShadows=True\n\
              GlobalIllumination=True\nAmbientOcclusion=True\nLamps=True\nSky=True\n\
              Weather=True\nRetailLook=True\nNoAntiAliasing=True\nNoSlopeMaterials=True\n\
-             Debug=3\nEnabled=1\nPreset=2\nRemaster=True\n",
+             Debug=3\nEnabled=1\nPreset=2\nRemaster=True\nRemasterCliffShelves=On\n",
         ));
         assert!(old.interface);
         assert!(old.remaster(), "the remaster's own box is still read");
@@ -945,6 +967,11 @@ mod tests {
             "[UI]\nInterface=Horizon\n[Fidelity]\nRemaster=True\n",
         ));
         assert_eq!(old, fresh, "the retired boxes change nothing");
+        assert!(!fresh.remaster_feature(FidelityFeature::RemasterCliffShelves));
+        let shelves = FidelityPreferences::from_preferences(&Preferences::parse(
+            "[UI]\nInterface=Horizon\n[Fidelity]\nRemaster=True\nRemasterCliffShelvesFar=True\n",
+        ));
+        assert!(shelves.remaster_feature(FidelityFeature::RemasterCliffShelves));
         let mut q = FidelityPreferences::default();
         for gone in ["Fidelity.Lighting", "Fidelity.Sky", "Fidelity.Debug"] {
             assert!(!q.set_named(gone, &dereth_client_contract::PrefValue::Bool(true)));
@@ -984,6 +1011,16 @@ mod tests {
             "[UI]\nInterface=Horizon\n[Fidelity]\nRemaster=True\nRemasterGodRays=Low\n",
         ));
         assert_eq!(read.effective(FidelityFeature::RemasterGodRays), 1);
+        let far = FidelityPreferences::from_preferences(&Preferences::parse(
+            "[UI]\nInterface=Horizon\n[Fidelity]\nRemaster=True\nRemasterScenery=Far\n",
+        ));
+        assert_eq!(far.effective(FidelityFeature::RemasterScenery), 3);
+        assert!(q.set_named(fidelity::REMASTER_SCENERY, &PrefValue::Int(9)));
+        assert_eq!(
+            q.effective(FidelityFeature::RemasterScenery),
+            4,
+            "very far is the most"
+        );
         assert!(q.set_named(fidelity::INTERFACE, &PrefValue::Bool(false)));
         assert_eq!(q.effective(FidelityFeature::RemasterShadows), 0);
         assert_eq!(

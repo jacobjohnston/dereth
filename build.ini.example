@@ -1,0 +1,37 @@
+# Settings for build.py and local.py: copy to build.ini, which git leaves out, and fill in.
+# Relative paths are relative to this file's folder.
+
+[signing]
+# The Apple certificate to sign with, by its SHA-1 hash. Two certificates in the keychain are named
+# "Apple Development: Jacob Johnston (T24CPK4YBN)", so the name alone is ambiguous to codesign.
+# List them with: security find-identity -v -p codesigning
+identity = 
+
+[build]
+# The GitHub repository the launcher takes its own updates from. One with no Dereth releases means
+# the launcher never replaces itself with someone else's build.
+source_url = https://github.com/jacobjohnston/dereth
+# MoltenVK's unpacked macOS release (MoltenVK-macos.tar from KhronosGroup).
+moltenvk_dir = moltenvk
+# The game's data files, which local.py serves with, and plays with when the launcher has
+# chosen none for the local world. Never committed.
+data_dir = data
+# Where Dereth.app, the plugin tool and Empyrean are written, unpacked, one folder per commit. Kept
+# out of Dropbox sync.
+out_dir = dist
+# Put before PATH, so cargo and rustup are found without a shell profile.
+path_prepend = /opt/homebrew/opt/rustup/bin, ~/.cargo/bin
+
+[install]
+# After a build, replace Dereth.app in this folder with the new one (for example /Applications).
+# Empty: leave the package in out_dir only.
+applications_dir =
+
+[local]
+# The world local.py runs. Keep its folder out of Dropbox: a sync can damage a live database.
+world_dir = ~/Empyrean
+world_name = Local
+# The game port; the world also takes the one after it, and the status endpoint the one 100 above.
+port = 9000
+# The account the client logs in with. The first account on a new world is its admin.
+account = admin

@@ -25,6 +25,7 @@
 //!   brought into an account here, when the operator allows it.
 //! - [`treasure`]: `import-treasure` and `roll-treasure`, new names: a world builder's loot tables
 //!   imported into the running world, and one drawn without anything made in it.
+//! - [`ai_players`]: `aiplayers`, a new name: the AI Players switched on and off.
 //!
 //! [`command_handlers`] is added to the table after every ported file, so a row here with an ACE
 //! command's name replaces ACE's row in its slot, and a new name is added at the end.
@@ -32,6 +33,7 @@
 //! A future Empyrean-only command goes in a file here and in [`command_handlers`]; where its
 //! behaviour is ACE's, it forwards to the ported handler rather than copying it.
 
+pub mod ai_players;
 pub mod character_file;
 pub mod dn;
 pub mod help_commands;
@@ -56,5 +58,6 @@ pub fn command_handlers() -> Vec<CommandHandlerInfo> {
     all.extend(save_world::command_handlers());
     all.extend(character_file::command_handlers());
     all.extend(treasure::command_handlers());
+    all.extend(ai_players::command_handlers());
     all
 }

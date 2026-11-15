@@ -211,11 +211,11 @@ pub fn handle_server_status(w: &mut World, session: Option<SessionId>, _paramete
         format(w.net.get_session_count(), "N0"),
         format(w.net.get_authenticated_session_count(), "N0"),
         format(w.net.get_unique_session_endpoint_count(), "N0"),
-        format(player_manager::get_online_count(w), "N0")
+        format(empyrean_world::ai_players::real_online_count(w), "N0")
     );
     let account_count = w.auth.lock().get_account_count();
     let characters = i32::try_from(player_manager::get_offline_count(w)).unwrap_or(i32::MAX)
-        + player_manager::get_online_count(w);
+        + empyrean_world::ai_players::real_online_count(w);
     sb += &format!(
         "Total Accounts Created: {}, Total Characters Created: {}\n",
         format(account_count, "N0"),

@@ -42,7 +42,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use empyrean_world::managers::world_manager::WorldStatusState;
-use empyrean_world::managers::{landblock_manager, player_manager};
+use empyrean_world::managers::landblock_manager;
 use empyrean_world::World;
 
 use crate::portal_table::PortalTable;
@@ -133,7 +133,7 @@ impl StatusSnapshot {
             shutting_down: w.server_manager.shutdown_initiated,
             connections: w.net.get_session_count(),
             authenticated_connections: w.net.get_authenticated_session_count(),
-            players_online: player_manager::get_online_count(w),
+            players_online: empyrean_world::ai_players::real_online_count(w),
             landblocks_loaded: landblock_manager::get_loaded_landblocks(w).len(),
             content_hash: w.content.content_hash(),
             corrections_digest: empyrean_content::corrections::digest().to_owned(),

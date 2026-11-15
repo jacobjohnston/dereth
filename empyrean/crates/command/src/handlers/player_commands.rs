@@ -131,7 +131,7 @@ fn property_manager_get_bool(w: &World, key: &str) -> bool {
 // ACE: PlayerCommands.HandlePop
 /// `pop`: Show current world population.
 pub fn handle_pop(w: &mut World, session: Option<SessionId>, _parameters: &[String]) {
-    let count = empyrean_world::managers::player_manager::get_online_count(w);
+    let count = empyrean_world::ai_players::real_online_count(w);
     command_handler_helper::write_output_info(
         w,
         session,

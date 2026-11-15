@@ -130,6 +130,22 @@ pub fn create(
     result: &Path,
 ) -> Result<dereth_progression::order::Made, String> {
     let order: Order = super::read_order(input)?;
+    let made = create_from_order(w, account, name, &order)?;
+    let text = serde_json::to_vec_pretty(&made).map_err(|e| e.to_string())?;
+    std::fs::write(result, text).map_err(|e| e.to_string())?;
+    Ok(made)
+}
+
+/// Make the character `name` on account `account` from `order`: [`create`] without its files.
+///
+/// # Errors
+/// Why nothing was made.
+pub fn create_from_order(
+    w: &mut World,
+    account: &str,
+    name: &str,
+    order: &Order,
+) -> Result<dereth_progression::order::Made, String> {
     let account = w
         .auth
         .lock()
@@ -153,7 +169,7 @@ pub fn create(
         .unwrap_or(dereth_progression::heritage::ALUVIAN);
     let gender = order.gender.unwrap_or(dereth_progression::gender::MALE);
     // Everything the apply would refuse, refused before anything is saved.
-    super::checked_build(w, &order, heritage)?;
+    super::checked_build(w, order, heritage)?;
     let classes = order.items.iter().map(|i| i.class);
     for class in classes.chain(order.slots.values().filter_map(|s| s.class)) {
         if w.content.get_cached_weenie(class).is_none() {
@@ -188,5 +204,5 @@ pub fn create(
         db.commit_batch().map_err(|e| e.to_string())?;
     }
     player_manager::add_offline_player_biota(w, player);
-    super::apply_recipe(w, name, input, None, result, true)
+    super::apply_order(w, name, order, None)
 }

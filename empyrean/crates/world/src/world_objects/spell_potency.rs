@@ -178,7 +178,7 @@ pub fn after_successful_cast(
         return;
     }
     let now = w.now.unix_time;
-    let active = usize::try_from(crate::managers::player_manager::get_online_count(w)).unwrap_or(1);
+    let active = usize::try_from(crate::ai_players::real_online_count(w)).unwrap_or(1);
     let weight = spell.spell_economy_mod();
     w.spell_economy.spend(spell.id(), weight, active, now);
     let text = crate::world_objects::spell_economy::line(used.economy);

@@ -629,7 +629,7 @@ pub fn apply_recipe(
     replacing: bool,
 ) -> Result<Made, String> {
     let order = read_order(input)?;
-    let (id, old) = offline(w, name)?;
+    let (id, _) = offline(w, name)?;
     if !replacing {
         let made: Option<Made> = std::fs::read(result)
             .ok()
@@ -640,6 +640,24 @@ pub fn apply_recipe(
             );
         }
     }
+    let made = apply_order(w, name, &order, recovery)?;
+    let text = serde_json::to_vec_pretty(&made).map_err(|e| e.to_string())?;
+    std::fs::write(result, text).map_err(|e| e.to_string())?;
+    Ok(made)
+}
+
+/// Make the character `name` from `order`, keeping a backup of it in `recovery` first (none for
+/// a character just made): [`apply_recipe`] without its files.
+///
+/// # Errors
+/// Why nothing was changed.
+pub fn apply_order(
+    w: &mut World,
+    name: &str,
+    order: &Order,
+    recovery: Option<&Path>,
+) -> Result<Made, String> {
+    let (id, old) = offline(w, name)?;
     let of = |p: PropertyInt| old.get_property(p).and_then(|h| u32::try_from(h).ok());
     let was = (
         of(PropertyInt::HeritageGroup).unwrap_or(dereth_progression::heritage::ALUVIAN),
@@ -649,7 +667,7 @@ pub fn apply_recipe(
         order.heritage.unwrap_or(was.0),
         order.gender.unwrap_or(was.1),
     );
-    let built = checked_build(w, &order, body.0)?;
+    let built = checked_build(w, order, body.0)?;
     // Another heritage or gender: the body creation makes of it, where the old one stood.
     let mut remade = None;
     let mut player = old;
@@ -699,7 +717,7 @@ pub fn apply_recipe(
         worn,
         ammunition,
         carried,
-    } = given(w, &order, &built)?;
+    } = given(w, order, &built)?;
 
     // With no gear given, what it has it keeps; with gear, only the underclothes it wore.
     let kept: Vec<Biota> = {
@@ -775,8 +793,6 @@ pub fn apply_recipe(
         new.push(item);
     }
     commit(w, id, &new, record.as_ref(), recovery)?;
-    let text = serde_json::to_vec_pretty(&made).map_err(|e| e.to_string())?;
-    std::fs::write(result, text).map_err(|e| e.to_string())?;
     Ok(made)
 }
 

@@ -2594,6 +2594,10 @@ fn do_enqueue(
 
     let next_delay = execute_emote(w, this, emote_set, emote, target_object);
 
+    // Not ACE: the emote may have taken its own object out of the world.
+    if !w.objects.contains(this) {
+        return;
+    }
     if em(w, this).debug {
         log::debug!(" - {next_delay}");
     }

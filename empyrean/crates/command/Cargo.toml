@@ -1,7 +1,7 @@
 [package]
 name = "empyrean-command"
 description = "The port of Source/ACE.Server/Command: the console and in-game admin commands, with Empyrean's own commands kept apart."
-version = "0.3.13" # Empyrean's own version, shared by every empyrean-* crate (not the workspace's)
+version = "0.3.14" # Empyrean's own version, shared by every empyrean-* crate (not the workspace's)
 edition.workspace = true
 rust-version.workspace = true
 license = "AGPL-3.0-only"
@@ -25,6 +25,8 @@ empyrean-content.workspace = true
 empyrean-dat.workspace = true
 dereth-physics.workspace = true
 dereth-primitives.workspace = true
+# The name rule character creation shares with the client.
+dereth-rules.workspace = true
 # The playtest characters: their budget, how it is spent, and the checks they pass.
 dereth-progression.workspace = true
 empyrean-tables.workspace = true

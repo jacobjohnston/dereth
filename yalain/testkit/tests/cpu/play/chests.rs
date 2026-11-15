@@ -569,7 +569,7 @@ fn an_item_in_the_pack_its_quest_keeps_is_refused_by_its_use() {
     let def = |hidden: bool| QuestDef {
         timed_phase: 0,
         id: QUEST,
-        name: (0xA860_7CEC, 0x2500_17EE),
+        name: yalain_content::Words::Ref(0xA860_7CEC, 0x2500_17EE),
         description: (0x6C45_9364, 0x2500_17EE),
         icon: 0,
         play_fx: false,
@@ -585,9 +585,11 @@ fn an_item_in_the_pack_its_quest_keeps_is_refused_by_its_use() {
         subquests: Vec::new(),
         min_level: 0,
         fails_on_death: false,
+        fails_on_logout: false,
+        fails_on_teleport: false,
         once: false,
         fellows: yalain_content::quests::Fellows::default(),
-        last_waits: false,
+        ranges: Vec::new(),
         hero_only: false,
         pay: yalain_content::quests::CompletionPay::default(),
         required: None,
@@ -662,6 +664,150 @@ fn an_item_in_the_pack_its_quest_keeps_is_refused_by_its_use() {
     );
 }
 
+/// An item in the pack whose template names a quest for its use as well as one for its taking is
+/// judged by the one for its use: with its taking's quest under way, as its taking left it, it is
+/// used while its use's quest can be given; with that quest under way it is refused with the use's
+/// own refusal, not a take's.
+/// Behaviour: server.inventory.use-judged-by-its-own-quest
+#[test]
+fn an_item_in_the_pack_naming_a_quest_for_its_use_is_judged_by_that_quest() {
+    use yalain_content::quests::{QuestDef, QuestTable};
+    use yalain_world::effect_defs::{EffectDef, Kind as EffectKind, Scale};
+    use yalain_world::item_use::{refusal, UsageEffect, CAN_BE_BESTOWED};
+    use yalain_world::quests::status;
+    use yalain_world::state::QuestState;
+    const TAKEN: u32 = 0x8000_01D1;
+    const USED: u32 = 0x8000_01C7;
+    const BOOK: u32 = 0x4700_7B0A;
+    const TEACHES: u32 = 0x6F00_1CAD;
+    const RECIPE: u32 = 0x6F00_1CAE;
+    let mut h = hall(SMALL, false, false);
+    let mut book = Props::default();
+    book.set("Usage_RequiredQuest_ForTaking", Prop::Word(TAKEN))
+        .set(
+            "Usage_RequiredQuestStatus_ForTaking",
+            Prop::Word(CAN_BE_BESTOWED),
+        )
+        .set("Usage_RequiredQuest", Prop::Word(USED))
+        .set("Usage_RequiredQuestStatus", Prop::Word(CAN_BE_BESTOWED));
+    h.server
+        .catalog
+        .insert(yalain_testkit::test_template(BOOK, 0x200, book));
+    h.server.item_uses.insert(
+        BOOK,
+        vec![UsageEffect {
+            state: TEACHES,
+            spellcraft: 1.0,
+        }],
+    );
+    h.server.effect_table.effects.insert(
+        TEACHES,
+        EffectDef {
+            state: TEACHES,
+            kind: EffectKind::GrantRecipe(RECIPE),
+            duration: Scale(Vec::new()),
+            priority: Scale(Vec::new()),
+            fx: 0,
+            external_flags: 0,
+            internal_flags: 0x4040_0012,
+            ends_at_logout: false,
+            ends_at_teleport: false,
+            enum_value: 0,
+            eq_class: 0,
+            name: None,
+        },
+    );
+    let def = |id: u32| QuestDef {
+        timed_phase: 0,
+        id,
+        name: yalain_content::Words::Ref(0xA860_7CEC, 0x2500_17EE),
+        description: (0x6C45_9364, 0x2500_17EE),
+        icon: 0,
+        play_fx: false,
+        journals: Vec::new(),
+        challenge: -999,
+        duration: 0.0,
+        retry: 0.0,
+        xp: 0,
+        cancellable: false,
+        placed: "authored for a test".into(),
+        hidden: false,
+        effects: Vec::new(),
+        subquests: Vec::new(),
+        min_level: 0,
+        fails_on_death: false,
+        fails_on_logout: false,
+        fails_on_teleport: false,
+        once: false,
+        fellows: yalain_content::quests::Fellows::default(),
+        ranges: Vec::new(),
+        hero_only: false,
+        pay: yalain_content::quests::CompletionPay::default(),
+        required: None,
+        cancel_wait: None,
+    };
+    h.server.quests = QuestTable {
+        quests: vec![def(TAKEN), def(USED)],
+        steps: Vec::new(),
+        gives: Vec::new(),
+        rooms: Vec::new(),
+    };
+    let (a, me) = h.player_in_world("one", "Elara");
+    h.run(10);
+    let world = *h.server.players.keys().next().expect("in");
+    let under_way = |quest: u32| QuestState {
+        quest,
+        status: status::UNDERWAY,
+        phase: 1,
+        started: 0,
+        updated: 0,
+    };
+    let give_book = |h: &mut Harness| {
+        yalain_world::inventory::give(&mut h.server, &mut h.net, world, BOOK, 1);
+        h.run(3);
+        h.server.players[&world]
+            .play
+            .items
+            .iter()
+            .find(|i| i.template == BOOK)
+            .expect("given")
+            .id
+    };
+    let taught = |h: &Harness, from: usize| {
+        h.calls(a, from).iter().any(|(f, v)| {
+            *f == yalain_world::craft::function::ADD_RECIPE
+                && v.iter().any(|x| matches!(x, Value::Int(r) if *r == RECIPE))
+        })
+    };
+    let item = give_book(&mut h);
+    h.server.players.get_mut(&world).expect("in").play.quests = vec![under_way(TAKEN)];
+    let from = h.bots[a].inbox.len();
+    send_use(&mut h, a, me, item, 0, 3.0);
+    let done: Vec<String> = seen(&h, a, from)
+        .into_iter()
+        .filter(|s| s.starts_with("done"))
+        .collect();
+    assert!(
+        done.len() == 1 && done[0].starts_with("done 0 "),
+        "used: {done:?}"
+    );
+    assert!(taught(&h, from), "what its use does, done");
+    let item = give_book(&mut h);
+    h.server.players.get_mut(&world).expect("in").play.quests =
+        vec![under_way(TAKEN), under_way(USED)];
+    let from = h.bots[a].inbox.len();
+    send_use(&mut h, a, me, item, 0, 3.0);
+    let done: Vec<String> = seen(&h, a, from)
+        .into_iter()
+        .filter(|s| s.starts_with("done"))
+        .collect();
+    assert!(
+        done.len() == 1 && done[0].starts_with(&format!("done {} ", refusal::WRONG_QUEST_STATUS)),
+        "its use's own refusal: {done:?}"
+    );
+    assert!(!taught(&h, from), "nothing done");
+}
+
 /// An item its quest keeps from the player is not taken out of a chest: refused at once, the
 /// request's flags kept, for a quest the player never had (10022), for one not where the item
 /// needs it (10021), for a hidden one either way (10042); with the quest where it needs it, the
@@ -693,7 +839,7 @@ fn an_item_its_quest_keeps_is_refused_when_taken_until_the_quest_is_where_it_nee
         .insert(yalain_testkit::test_template(GEM, 0x3A1, gem));
     let def = |hidden: bool| QuestDef {
         id: QUEST,
-        name: (0xA860_7CEC, 0x2500_17EE),
+        name: yalain_content::Words::Ref(0xA860_7CEC, 0x2500_17EE),
         description: (0x6C45_9364, 0x2500_17EE),
         icon: 0,
         play_fx: false,
@@ -710,9 +856,11 @@ fn an_item_its_quest_keeps_is_refused_when_taken_until_the_quest_is_where_it_nee
         subquests: Vec::new(),
         min_level: 0,
         fails_on_death: false,
+        fails_on_logout: false,
+        fails_on_teleport: false,
         once: false,
         fellows: yalain_content::quests::Fellows::default(),
-        last_waits: false,
+        ranges: Vec::new(),
         hero_only: false,
         pay: yalain_content::quests::CompletionPay::default(),
         required: None,
@@ -975,6 +1123,38 @@ fn a_chests_draw_is_treasure_of_the_level_its_row_names() {
     );
 }
 
+/// A chest's profile draws at the operator's loot rate: none of its gems at 0, twice its one or two
+/// at 2; its extra (the crystal) is drawn as it is.
+/// Behaviour: server.operator.loot-rate
+#[test]
+fn a_chests_draw_is_at_the_operators_loot_rate() {
+    let opened = |rate: f64| {
+        let mut h = hall(SMALL, false, false);
+        h.server.cfg.rates.loot = rate;
+        let (a, me) = h.player_in_world("one", "Elara");
+        h.run(10);
+        send_use(&mut h, a, me, CHEST, 0, 1.6);
+        let c = h.server.chests.by_id[&CHEST].contents.clone();
+        let of = |template: u32| {
+            c.iter()
+                .filter(|i| {
+                    h.server
+                        .things
+                        .get(**i)
+                        .is_some_and(|t| t.template == template)
+                })
+                .count()
+        };
+        (of(GEM), of(CRYSTAL))
+    };
+    assert_eq!(opened(0.0), (0, 1));
+    let (gems, crystals) = opened(2.0);
+    assert!([2, 4].contains(&gems), "{gems}");
+    assert_eq!(crystals, 1);
+    let (gems, _) = opened(1.0);
+    assert!([1, 2].contains(&gems), "{gems}");
+}
+
 /// A hidden quest of one phase, as a chest's own quest is, its id and its name in the install.
 const CHEST_QUEST: u32 = 0x8000_02CE;
 
@@ -984,7 +1164,7 @@ fn hidden_quest(h: &mut Harness) {
         .quests
         .push(yalain_content::quests::QuestDef {
             id: CHEST_QUEST,
-            name: (0, 0),
+            name: yalain_content::Words::Ref(0, 0),
             description: (0, 0),
             icon: 0,
             play_fx: false,
@@ -1001,9 +1181,11 @@ fn hidden_quest(h: &mut Harness) {
             subquests: Vec::new(),
             min_level: 0,
             fails_on_death: false,
+            fails_on_logout: false,
+            fails_on_teleport: false,
             once: false,
             fellows: yalain_content::quests::Fellows::default(),
-            last_waits: false,
+            ranges: Vec::new(),
             hero_only: false,
             pay: yalain_content::quests::CompletionPay::default(),
             required: None,
@@ -1069,6 +1251,53 @@ fn a_chest_that_completes_its_own_quest_opens_once() {
             yalain_world::item_use::refusal::MYSTERIOUS_USE,
             chests::WRONG_QUEST_FLAGS
         )]
+    );
+}
+
+/// A chest whose kind needs its quest able to be given opens for a player who has never had it, the
+/// quest given as it begins to open, and refuses that player while the quest is under way.
+/// Behaviour: server.places.chest-for-a-quest-able-to-be-given
+#[test]
+fn a_chest_needing_its_quest_able_to_be_given_opens_for_one_who_may_be_given_it() {
+    let mut h = hall(SMALL, false, false);
+    hidden_quest(&mut h);
+    let mut chest = Props::default();
+    chest
+        .set("GeneratorProfile", Prop::Word(PROFILE))
+        .set("Usage_RequiredQuest", Prop::Word(CHEST_QUEST))
+        .set("Usage_RequiredQuestStatus", Prop::Word(0x5000_0000))
+        .set(
+            "Usage_Effect1",
+            Prop::Text("Eff_BestowQuestTestChestControl".into()),
+        );
+    h.server
+        .catalog
+        .insert(yalain_testkit::test_template(SMALL, PACKAGE, chest));
+    let (a, me) = h.player_in_world("one", "Elara");
+    h.run(10);
+    let fa = h.bots[a].inbox.len();
+    send_use(&mut h, a, me, CHEST, 0, 2.0);
+    assert!(
+        seen(&h, a, fa).iter().any(|s| s.starts_with("opened")),
+        "never had: it opens"
+    );
+    let p = h.server.players.values().next().expect("in the world");
+    assert_eq!(
+        yalain_world::quests::phase_of(&p.play.quests, CHEST_QUEST),
+        1,
+        "given as it opens"
+    );
+    close(&mut h, a, 2.0);
+    let fa = h.bots[a].inbox.len();
+    send_use(&mut h, a, me, CHEST, 0, 2.0);
+    assert_eq!(
+        seen(&h, a, fa),
+        [format!(
+            "done {} flags {}",
+            yalain_world::item_use::refusal::MYSTERIOUS_USE,
+            chests::WRONG_QUEST_FLAGS
+        )],
+        "under way: not to be given now"
     );
 }
 
@@ -1147,6 +1376,7 @@ fn a_chests_quest_effect_held_as_a_state_moves_its_quest_once() {
             external_flags: 0,
             internal_flags: 0,
             ends_at_logout: false,
+            ends_at_teleport: false,
             enum_value: 0,
             eq_class: 0,
             name: None,
@@ -1180,6 +1410,7 @@ fn a_chests_death_treasure_comes_only_with_an_opening_its_key_paid_for() {
             from: yalain_content::Dropper::Template(template),
             item: TREASURE,
             chance: 1.0,
+            requires: None,
             placed: "authored for a test".into(),
             confidence: "authored".into(),
         }];
@@ -1231,4 +1462,118 @@ fn a_chests_death_treasure_comes_only_with_an_opening_its_key_paid_for() {
         [0, 0, 0],
         "no key"
     );
+}
+
+/// What an open chest holds of a template.
+fn held_of(h: &Harness, template: u32) -> Vec<u64> {
+    h.server.chests.by_id[&CHEST]
+        .contents
+        .iter()
+        .copied()
+        .filter(|i| {
+            h.server
+                .things
+                .get(*i)
+                .is_some_and(|t| t.template == template && t.container == Some(CHEST))
+        })
+        .collect()
+}
+
+/// A chest's death treasure that names a quest is in the chest for an opener whose quest is where
+/// it needs it, at every such opening, though no key opens the chest: a chest with no draw and no
+/// lock holds nothing for a player without the quest; with the quest at its phase it holds the item
+/// at each opening, the one left from before cleared, so one is in the world at a time; taken, and
+/// the quest moved on as its taking moves it, the next opening holds nothing, and the one taken
+/// stays in the pack.
+/// Behaviour: server.places.chest-holds-a-quests-item
+#[test]
+fn a_chest_holds_a_quests_item_for_its_opener_only_while_the_quest_is_where_it_needs_it() {
+    const PIECE: u32 = 0x4700_0F23;
+    const QUEST: u32 = 0x4000_0D6D;
+    let mut h = hall(SMALL, false, false);
+    // No draw of its own and no lock, as a quest's chest is.
+    h.server.catalog.insert(yalain_testkit::test_template(
+        SMALL,
+        PACKAGE,
+        Props::default(),
+    ));
+    h.server.catalog.insert(yalain_testkit::test_template(
+        PIECE,
+        0x3A1,
+        Props::default(),
+    ));
+    h.server.loot.treasures = vec![yalain_content::DeathTreasure {
+        from: yalain_content::Dropper::Template(SMALL),
+        item: PIECE,
+        chance: 1.0,
+        requires: Some(yalain_content::QuestGate {
+            quest: QUEST,
+            status: yalain_world::quests::status::UNDERWAY | 1,
+        }),
+        placed: "authored for a test".into(),
+        confidence: "authored".into(),
+    }];
+    let (a, me) = h.player_in_world("one", "Elara");
+    h.run(10);
+    let world = *h.server.players.keys().next().expect("in");
+    send_use(&mut h, a, me, CHEST, 0, 4.0);
+    assert_eq!(
+        held_of(&h, PIECE),
+        Vec::<u64>::new(),
+        "nothing without the quest"
+    );
+    close(&mut h, a, 3.0);
+    h.server
+        .players
+        .get_mut(&world)
+        .expect("in")
+        .play
+        .quests
+        .push(yalain_world::state::QuestState {
+            quest: QUEST,
+            status: yalain_world::quests::status::UNDERWAY,
+            phase: 1,
+            started: 0,
+            updated: 0,
+        });
+    send_use(&mut h, a, me, CHEST, 0, 4.0);
+    let first = held_of(&h, PIECE);
+    assert_eq!(first.len(), 1, "at its phase");
+    close(&mut h, a, 3.0);
+    send_use(&mut h, a, me, CHEST, 0, 4.0);
+    let again = held_of(&h, PIECE);
+    assert_eq!(again.len(), 1, "again at the next opening");
+    assert_ne!(again, first, "made anew");
+    assert!(
+        h.server.things.get(first[0]).is_none(),
+        "the one left before is gone from the world"
+    );
+    h.bots[a].send(
+        true,
+        queue::WEENIE,
+        &server_call(
+            yalain_world::pack::function::TAKE_ALL,
+            &[take_all_request(CHEST, me)],
+        ),
+    );
+    run_for(&mut h, 3.0);
+    let pack = |h: &Harness| -> Vec<u64> {
+        h.server.players[&world]
+            .play
+            .items
+            .iter()
+            .filter(|i| i.template == PIECE)
+            .map(|i| i.id)
+            .collect()
+    };
+    assert_eq!(pack(&h), again, "taken into the pack");
+    h.server.players.get_mut(&world).expect("in").play.quests[0].phase = 2;
+    close(&mut h, a, 3.0);
+    send_use(&mut h, a, me, CHEST, 0, 4.0);
+    assert_eq!(
+        held_of(&h, PIECE),
+        Vec::<u64>::new(),
+        "nothing once the quest has moved on"
+    );
+    assert_eq!(pack(&h), again, "the one taken is kept");
 }

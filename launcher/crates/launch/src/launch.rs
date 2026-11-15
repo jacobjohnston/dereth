@@ -9,7 +9,7 @@
 //!
 //! | client | form |
 //! |---|---|
-//! | Dereth | `dereth-client.exe -a <account> -v <password> -h <host> -p <port> --dat-dir <dir> [--classic-dat-dir <dir>] [--world-base <set>] [--era <era>] [--era-features <version>:<bits>] [--logon-version <string>] [--world-profile <name>]` |
+//! | Dereth | `dereth-client.exe -a <account> -v <password> -h <host> -p <port> --dat-dir <dir> [--classic-dat-dir <dir>] [--overlay-address <host>:<port>] [--world-status <url>] [--world-base <set>] [--era <era>] [--era-features <version>:<bits>] [--logon-version <string>] [--world-profile <name>]` |
 //! | retail, ACE or Empyrean | `acclient.exe -a <account> -v <password> -h <host>:<port>` |
 //! | retail, GDLE | `acclient.exe -h <host> -p <port> -a <account>:<password>` |
 //!
@@ -23,7 +23,10 @@
 //! client is told nothing: it plays the end of retail from the later files its world is drawn
 //! from. A world that runs a client of its own
 //! ([`crate::known`]) also names the set its world is drawn from, the logon version its server
-//! accepts and the rules its client played by.
+//! accepts and the rules its client played by. A world whose status the launcher may read is
+//! named by its status's address, where the client finds what the server publishes of its world.
+//! A world played through a relay on this computer names its server's own address too, which the
+//! client keeps the world's files under while it connects to the relay.
 
 use std::path::PathBuf;
 
@@ -94,6 +97,9 @@ pub struct LaunchRequest<'a> {
     /// The art packs the player turned on, in the order they are drawn: a later one wins where two
     /// replace the same thing ([`crate::art::Shelf::stack`]).
     pub art_packs: Vec<PathBuf>,
+    /// The interface every world starts in until the player changes it there in game
+    /// ([`crate::interface::default_of`]); `None` while the player has chosen none.
+    pub interface: Option<crate::interface::Interface>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,7 +155,15 @@ pub fn describe(world: &World) -> WorldLaunch {
     let some = |v: Option<&str>| v.filter(|s| !s.is_empty()).map(str::to_owned);
     WorldLaunch {
         set: crate::choices::required_set_for(world),
-        world_base: some(world.world_base.as_deref()),
+        // The client knows two bases, the later files and the older pair: a world that names the
+        // 1999 pair (as one written when it was a kind of its own does) names the older pair.
+        world_base: some(world.world_base.as_deref()).map(|b| {
+            if b.eq_ignore_ascii_case("original") {
+                "classic".to_owned()
+            } else {
+                b
+            }
+        }),
         era: some(world.era.as_deref()),
         era_features: era_feature_bits(world).map(|b| b.to_string()),
         logon_version: some(world.logon_version.as_deref()),
@@ -173,6 +187,18 @@ impl WorldLaunch {
         .flatten()
         .collect()
     }
+}
+
+/// The address of `world`'s status document when a launcher may read it
+/// ([`crate::direct::is_status_url`]): where the Dereth client finds what the world's server
+/// publishes (its portal table and its places), for its journeys and its map.
+#[must_use]
+pub fn world_status(world: &World) -> Option<&str> {
+    world
+        .status_url
+        .as_deref()
+        .filter(|u| crate::direct::is_status_url(u))
+        .map(str::trim)
 }
 
 /// Build the command line for a launch.
@@ -202,6 +228,20 @@ pub fn plan(req: &LaunchRequest<'_>) -> Result<LaunchPlan, PlanError> {
                     plain("--classic-dat-dir"),
                     plain(classic.display().to_string()),
                 ]);
+            }
+            if let Some(server) = &req.world.upstream {
+                args.extend([
+                    plain("--overlay-address"),
+                    plain(format!("{}:{}", server.address, server.port)),
+                ]);
+            }
+            args.extend(
+                crate::interface::args(&req.world.slug, req.interface)
+                    .into_iter()
+                    .map(Arg::Plain),
+            );
+            if let Some(status) = world_status(req.world) {
+                args.extend([plain("--world-status"), plain(status)]);
             }
             args.extend(describe(req.world).args().into_iter().map(Arg::Plain));
             // The world's plugin policy, for the client's plugin host to honour and show.
@@ -344,7 +384,19 @@ mod tests {
             plugin_policy_file: None,
             plugins: Vec::new(),
             art_packs: Vec::new(),
+            interface: None,
         }
+    }
+
+    /// The client knows the later files and the older pair: a world naming the 1999 pair as its
+    /// base names the older pair.
+    #[test]
+    fn a_world_naming_the_1999_pair_as_its_base_tells_the_client_the_older_pair() {
+        let mut w = world(Emulator::Empyrean);
+        w.world_base = Some("original".into());
+        assert_eq!(describe(&w).world_base.as_deref(), Some("classic"));
+        w.world_base = Some("modern".into());
+        assert_eq!(describe(&w).world_base.as_deref(), Some("modern"));
     }
 
     #[test]
@@ -391,6 +443,32 @@ mod tests {
     }
 
     #[test]
+    fn a_worlds_status_reaches_the_dereth_client_when_a_launcher_may_read_it_and_never_retail() {
+        let (mut w, i) = (world(Emulator::Empyrean), inst(ClientKind::Dereth));
+        let status = |w: &World, i: &Installation| {
+            let argv = plan(&req(w, i)).unwrap().argv("x");
+            argv.iter()
+                .position(|a| a == "--world-status")
+                .map(|at| argv[at + 1].clone())
+        };
+        assert_eq!(status(&w, &i), None, "a world with no status");
+        w.status_url = Some("https://eulmore.example/status".into());
+        assert_eq!(
+            status(&w, &i).as_deref(),
+            Some("https://eulmore.example/status")
+        );
+        w.status_url = Some("http://127.0.0.1:9100/status".into());
+        assert_eq!(
+            status(&w, &i).as_deref(),
+            Some("http://127.0.0.1:9100/status")
+        );
+        w.status_url = Some("http://eulmore.example/status".into());
+        assert_eq!(status(&w, &i), None, "plain http to another machine");
+        w.status_url = Some("https://eulmore.example/status".into());
+        assert_eq!(status(&w, &inst(ClientKind::Retail)), None);
+    }
+
+    #[test]
     fn the_plugins_the_launcher_installed_are_offered_to_the_dereth_client_and_never_retail() {
         let (w, i) = (world(Emulator::Empyrean), inst(ClientKind::Dereth));
         let mut r = req(&w, &i);
@@ -432,7 +510,9 @@ mod tests {
                 "-p",
                 "19000",
                 "--dat-dir",
-                "/lib/eor"
+                "/lib/eor",
+                "--world-slug",
+                "eulmore"
             ]
         );
         assert_eq!(p.working_dir, PathBuf::from("/games/ac"));
@@ -503,6 +583,8 @@ mod tests {
                 "/lib/eor",
                 "--classic-dat-dir",
                 "/lib/feb2005",
+                "--world-slug",
+                "eulmore",
                 "--era",
                 "infiltration",
                 "--era-features",
@@ -547,6 +629,38 @@ mod tests {
             dereth_client_contract::EraView::era_of_dats(ContainerEra::Modern),
             EraId::Eor
         );
+    }
+
+    /// The Dereth client is told the launcher's interface for every world and the world's name,
+    /// which a change made in game is kept under; a retail client is told neither.
+    #[test]
+    fn the_dereth_client_is_told_the_default_interface_and_the_world_it_keeps_its_own_under() {
+        use crate::interface::Interface;
+        let (w, i) = (world(Emulator::Ace), inst(ClientKind::Dereth));
+        let parse = |argv: &[String]| {
+            dereth_client_runtime::config::Config::from_args_and_prefs_with(
+                argv,
+                &dereth_client_runtime::config::Preferences::default(),
+            )
+            .unwrap()
+        };
+        let cfg = parse(&plan(&req(&w, &i)).unwrap().argv("pw"));
+        assert_eq!(
+            (cfg.interface, cfg.world_slug.as_deref()),
+            (None, Some("eulmore"))
+        );
+        for choice in crate::interface::OFFERED {
+            let mut r = req(&w, &i);
+            r.interface = Some(choice);
+            let cfg = parse(&plan(&r).unwrap().argv("pw"));
+            assert_eq!(cfg.interface, Some(choice));
+            assert_eq!(cfg.world_slug.as_deref(), Some("eulmore"));
+        }
+        let retail = inst(ClientKind::Retail);
+        let mut r = req(&w, &retail);
+        r.interface = Some(Interface::Classic);
+        let argv = plan(&r).unwrap().argv("pw");
+        assert!(!argv.iter().any(|a| a.starts_with("--")), "{argv:?}");
     }
 
     /// A world's status document, read as the launcher reads it, reaches the Dereth client's era
@@ -689,6 +803,8 @@ mod tests {
                     port,
                     "--dat-dir",
                     "/lib/world",
+                    "--world-slug",
+                    w.slug.as_str(),
                     "--world-base",
                     "modern",
                     "--era",
@@ -718,6 +834,56 @@ mod tests {
             Some(dereth_primitives::ContainerEra::Modern)
         );
         assert_eq!(cfg.era, Some(EraId::Infiltration));
+    }
+
+    /// Two launches through relays on different ports keep the world's files in one folder, the
+    /// world's server's, while each client connects to its own relay; a world reached directly
+    /// keeps them under the address it connects to.
+    #[test]
+    fn a_world_played_through_a_relay_keeps_one_overlay_folder_whatever_the_relays_port() {
+        use dereth_client_runtime::world_overlay;
+        let i = inst(ClientKind::Dereth);
+        let client = |w: &World| {
+            dereth_client_runtime::config::Config::from_args_and_prefs_with(
+                &plan(&req(w, &i)).unwrap().argv("pw"),
+                &dereth_client_runtime::config::Preferences::default(),
+            )
+            .unwrap()
+        };
+        let relayed = crate::relayed::RELAYED_WORLDS[0].to_world();
+        let first = client(&crate::relayed::on_relay(relayed.clone(), 9400));
+        let second = client(&crate::relayed::on_relay(relayed, 9402));
+        assert_eq!(
+            [
+                (first.host.as_str(), first.port),
+                (second.host.as_str(), second.port)
+            ],
+            [("127.0.0.1", 9400), ("127.0.0.1", 9402)],
+            "each connects to its relay"
+        );
+        assert_eq!(
+            world_overlay::server_folder_name(&first),
+            "ac1999.cobradragon.com-9110"
+        );
+        assert_eq!(
+            world_overlay::server_folder_name(&second),
+            world_overlay::server_folder_name(&first)
+        );
+        assert_eq!(
+            world_overlay::address_folder(&second),
+            world_overlay::address_folder(&first)
+        );
+
+        let direct = client(&world(Emulator::Ace));
+        assert_eq!(direct.overlay_address, None);
+        assert_eq!(
+            world_overlay::server_folder_name(&direct),
+            "eulmore.example-19000"
+        );
+        let retail = inst(ClientKind::Retail);
+        let relayed = crate::relayed::on_relay(crate::relayed::RELAYED_WORLDS[0].to_world(), 9400);
+        let argv = plan(&req(&relayed, &retail)).unwrap().argv("pw");
+        assert!(!argv.iter().any(|a| a.starts_with("--")), "{argv:?}");
     }
 
     #[test]

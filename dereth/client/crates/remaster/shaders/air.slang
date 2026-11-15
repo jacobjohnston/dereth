@@ -9,6 +9,7 @@
 import atmosphere;
 import bindless;
 import intent;
+import lod;
 import retail;
 
 struct Push
@@ -71,11 +72,16 @@ float ground_at(float2 xy)
     return lerp(lerp(h[0], h[1], f.x), lerp(h[2], h[3], f.x), f.y);
 }
 
-// How far into the low fog the eye sees a point `dist` metres away at height `z` over its ground
-// `gz`, from the eye at `eye_z` over its ground `ge`: its extinction integrated along the line, the
-// fog thinning by e every `height` metres over the ground under it, and thicker the lower that
-// ground lies toward the lowest round the eye. Nothing within the first 25 metres from the eye, and no
-// more than a kilometre and a half of it, past which the air's own haze takes over.
+// How far along the line from the eye the low fog lies, metres: past it the air's own haze takes
+// over.
+static const float LOW_FOG_REACH = 1500.0;
+
+// How far into the low fog the eye sees a point `dist` metres away, along a line that stands at
+// height `z` over its ground `gz` where the fog along it ends (the point itself, when it is nearer
+// than that), from the eye at `eye_z` over its ground `ge`: its extinction integrated along the
+// line, the fog thinning by e every `height` metres over the ground under it, and thicker the lower
+// that ground lies toward the lowest round the eye. Nothing within the first 25 metres from the eye,
+// and nothing past `LOW_FOG_REACH`.
 float low_fog_depth(float4 fog, float dist, float eye_z, float ge, float z, float gz)
 {
     float he = clamp((eye_z - ge) / fog.y, -3.0, 40.0);
@@ -83,7 +89,7 @@ float low_fog_depth(float4 fog, float dist, float eye_z, float ge, float z, floa
     float dz = hp - he;
     float shape = abs(dz) > 1e-3 ? (exp(-he) - exp(-hp)) / dz : exp(-he);
     float low = exp(-max(0.5 * (ge + gz) - fog.z, 0.0) / (fog.y * 6.0));
-    return fog.x * clamp(dist - 25.0, 0.0, 1500.0) * shape * low;
+    return fog.x * clamp(dist - 25.0, 0.0, LOW_FOG_REACH) * shape * low;
 }
 
 // The shadow cascades' rows, as the sun's visibility pass reads them.
@@ -91,35 +97,82 @@ static const uint CASCADE_FAR = 16;
 static const uint CASCADE_MAPS = 18;
 static const uint CASCADE_FADE = 19;
 
-// How much of the sun reaches the point `p`, `ahead` metres along the view: one look into the
-// first cascade that covers it.
-float sunlit(uint cascades, float3 p, float ahead)
+// How many looks into the sun's shadows the low fog takes along the line to a point.
+static const uint SHAFT_LOOKS = 12;
+
+// How far along its step each of the low fog's looks into the shadows lies at pixel `p`, 0 to 1:
+// the fades' screen pattern, turned each frame as the trees' pictures' patterns are while frames
+// are laid over each other, so that between them the frames look all along each step.
+float shaft_jitter(int2 p)
+{
+    float4 turns = row(push.frame, FRAME_DITHER);
+    float t = fade_threshold(p);
+    return turns.z > 0.5 ? frac(t + turns.x) : t;
+}
+
+// How much of the light the low fog along the line from the eye toward `dir` sends toward the eye
+// comes from fog the sun reaches: 1 where nothing shadows it. The line runs `len` metres to where
+// it is measured, `forward` metres along the view for each metre along it, from `he` to `hp` of
+// the fog's heights over its ground as `low_fog_depth` has it, through fog of extinction `density`
+// per metre on the ground; `kept` is what all of the fog along it lets through.
+// The shadows are looked into at even steps out to where they reach, each look `jitter` of the
+// way along its step, so a shadow's edge spreads over a step instead of standing in the fog as a
+// sharp copy of the shadow. Each look counts for what its step of fog sends toward the eye through
+// the fog in front of it. The fog past the shadows' reach counts as sunlit, as the land there is,
+// and the shadows fade out toward their reach and in as the sun rises, as the land's do.
+float shafts(uint cascades, float3 eye, float3 dir, float forward, float len, float he, float hp,
+             float density, float kept, float jitter)
 {
     float4 far = row(cascades, CASCADE_FAR);
     uint4 maps = row_u(cascades, CASCADE_MAPS);
     float4 fade = row(cascades, CASCADE_FADE);
-    if (ahead >= fade.y)
-    {
-        return 1.0;
-    }
     int size = int(fade.w);
+    float reach = min(len, fade.y / max(forward, 1e-3));
+    float step = reach / float(SHAFT_LOOKS);
+    // Each cascade's place for the eye, and how far it moves for each metre along the line.
+    float4 from[4];
+    float4 along[4];
     for (uint c = 0; c < 4; c++)
     {
-        if (ahead > far[c])
-        {
-            continue;
-        }
-        float4 q = transform(cascades, c * 4, float4(p, 1.0));
-        float2 uv = float2(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5);
-        if (any(uv < 0.0) || any(uv > 1.0) || q.z < 0.0 || q.z > 1.0)
-        {
-            continue;
-        }
-        int2 t = clamp(int2(uv * float(size)), int2(0, 0), int2(size - 1, size - 1));
-        float d = textures[NonUniformResourceIndex(maps[c])].Load(int3(t, 0)).x;
-        return q.z <= d + 1e-4 ? 1.0 : 0.0;
+        from[c] = transform(cascades, c * 4, float4(eye, 1.0));
+        along[c] = transform(cascades, c * 4, float4(dir, 0.0));
     }
-    return 1.0;
+    float depth = 0.0;
+    float sunlit = 0.0;
+    float sent = 0.0;
+    for (uint k = 0; k < SHAFT_LOOKS; k++)
+    {
+        float t = (float(k) + jitter) * step;
+        float h = clamp(lerp(he, hp, saturate(t / max(len, 1e-3))), -3.0, 40.0);
+        float next = depth + (t > 25.0 ? density * exp(-h) * step : 0.0);
+        float w = exp(-depth) - exp(-next);
+        depth = next;
+        float ahead = t * forward;
+        float lit = 1.0;
+        for (uint c = 0; c < 4; c++)
+        {
+            if (ahead > far[c])
+            {
+                continue;
+            }
+            float4 q = from[c] + along[c] * t;
+            float2 uv = float2(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5);
+            if (any(uv < 0.0) || any(uv > 1.0) || q.z < 0.0 || q.z > 1.0)
+            {
+                continue;
+            }
+            int2 cell = clamp(int2(uv * float(size)), int2(0, 0), int2(size - 1, size - 1));
+            float d = textures[NonUniformResourceIndex(maps[c])].Load(int3(cell, 0)).x;
+            lit = q.z <= d + 1e-4 ? 1.0 : 0.0;
+            break;
+        }
+        lit = lerp(lit, 1.0, saturate((ahead - fade.x) / max(fade.y - fade.x, 1e-3)));
+        sunlit += w * lit;
+        sent += w;
+    }
+    float beyond = max(exp(-depth) - kept, 0.0);
+    float share = sent + beyond > 1e-6 ? (sunlit + beyond) / (sent + beyond) : 1.0;
+    return lerp(1.0, share, fade.z);
 }
 
 // 1 well inside where the land ends, falling toward it to leave a share, by how far along the way
@@ -182,22 +235,26 @@ float4 fs_air(float4 position : SV_Position) : SV_Target0
     if (low.w > 0.5)
     {
         // The low fog: the haze's own light toward the eye, all of its glow toward the sun built up,
-        // a little brighter for the sun lighting it from above; dimmer where the sun's shadows lie
-        // across the line to the point, at four places along it.
+        // a little brighter for the sun lighting it from above; dimmer for the share of it the
+        // sun's shadows keep from the sun.
+        // The line is measured where the fog along it ends. A point farther than that says nothing
+        // of the fog, and how high it stands over its own ground is not known there: the depth
+        // places a far point only to within tens of metres, differently as the view moves by a
+        // hair, and the fog thins by e every few metres of that height.
+        float3 end = dist > LOW_FOG_REACH ? eye + dir * LOW_FOG_REACH : world;
         float ge = ground_at(eye.xy);
-        float gz = ground_at(world.xy);
-        float through_fog = exp(-low_fog_depth(low, dist, eye.z, ge, world.z, gz));
+        float gz = ground_at(end.xy);
+        float through_fog = exp(-low_fog_depth(low, dist, eye.z, ge, end.z, gz));
         uint cascades = asuint(row(a, ATM_LOW_FOG_GROUND).w);
         float lit = 1.0;
         if (cascades != 0xFFFFFFFF && through_fog < 0.999)
         {
-            lit = 0.0;
-            float reach = min(dist, 400.0);
-            for (int k = 0; k < 4; k++)
-            {
-                float t = (float(k) + 0.5) / 4.0 * reach;
-                lit += sunlit(cascades, eye + dir * t, t) * 0.25;
-            }
+            float forward = transform(push.frame, FRAME_VIEW, float4(eye + dir, 1.0)).z
+                            - transform(push.frame, FRAME_VIEW, float4(eye, 1.0)).z;
+            float density = low.x * exp(-max(0.5 * (ge + gz) - low.z, 0.0) / (low.y * 6.0));
+            lit = shafts(cascades, eye, dir, forward, min(dist, LOW_FOG_REACH),
+                         (eye.z - ge) / low.y, (end.z - gz) / low.y, density, through_fog,
+                         shaft_jitter(p));
         }
         float3 fog_light = haze_light(a, push.sky_view, push.sampler, dir, 1.0) * 1.15 * lerp(0.55, 1.0, lit);
         seen = seen * through_fog + fog_light * (1.0 - through_fog);

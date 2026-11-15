@@ -112,6 +112,9 @@ pub(crate) enum Place {
     /// tilt, behind a player whose feet are at block-local `feet` in `block` and who faces `yaw`
     /// radians from north. No body is drawn.
     Orbit { block: u16, feet: Vec3, yaw: f32 },
+    /// The free camera a scene of `block` with no body starts with: where the screens before the
+    /// world show it.
+    Start { block: u16 },
 }
 
 /// One station.
@@ -139,7 +142,8 @@ impl Station {
             | Place::Ground { block, .. }
             | Place::Look { block, .. }
             | Place::Facing { block, .. }
-            | Place::Orbit { block, .. } => block,
+            | Place::Orbit { block, .. }
+            | Place::Start { block } => block,
             #[allow(clippy::cast_possible_truncation)] // LINT-OK: the high half of a cell id
             Place::Body { cell, .. } => (cell >> 16) as u16,
         }
@@ -160,6 +164,62 @@ fn block_record(
         *o = table[usize::from(*h)];
     }
     Some((heights, lb.terrain))
+}
+
+/// The world's landscape vertices as the dats hold them, each block read once, for the drawn
+/// ground's own arithmetic.
+#[cfg(feature = "remaster")]
+pub(crate) struct DatGround {
+    store: Arc<RetailDatStore>,
+    table: Vec<f32>,
+    blocks: std::sync::Mutex<std::collections::HashMap<u16, Option<BlockRecord>>>,
+}
+
+/// A block's vertex heights and terrain words, as [`block_record`] reads them.
+#[cfg(feature = "remaster")]
+type BlockRecord = ([f32; 81], [u16; 81]);
+
+#[cfg(feature = "remaster")]
+impl DatGround {
+    pub(crate) fn new(store: &Arc<RetailDatStore>) -> Self {
+        let region = dereth_world_data::landblock::load_region(store).expect("the region decodes");
+        Self {
+            store: Arc::clone(store),
+            table: region.land_defs.land_height_table.clone(),
+            blocks: std::sync::Mutex::default(),
+        }
+    }
+}
+
+#[cfg(feature = "remaster")]
+impl dereth_terrain::land::drawn::GroundSource for DatGround {
+    fn vertex(&self, gx: i32, gy: i32) -> Option<dereth_terrain::land::drawn::Vertex> {
+        let last = dereth_terrain::land::drawn::WORLD_VERTICES - 1;
+        if !(0..=last).contains(&gx) || !(0..=last).contains(&gy) {
+            return None;
+        }
+        // A block's last vertex is the next block's first; the world's last is its own block's.
+        let (bx, by) = ((gx / 8).min(254), (gy / 8).min(254));
+        let (i, j) = (gx - bx * 8, gy - by * 8);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        // LINT-OK: block coordinates, 0..255. Not a float conversion.
+        let block = ((bx as u16) << 8) | by as u16;
+        let mut blocks = self
+            .blocks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let record = blocks
+            .entry(block)
+            .or_insert_with(|| block_record(&self.store, &self.table, block));
+        let (heights, words) = record.as_ref()?;
+        #[allow(clippy::cast_sign_loss)]
+        // LINT-OK: 0..=8 each. Not a float conversion.
+        let k = (i * 9 + j) as usize;
+        Some(dereth_terrain::land::drawn::Vertex {
+            height: heights[k],
+            word: words[k],
+        })
+    }
 }
 
 /// The blocks within `r` of Holtburg, nearest first.
@@ -1552,6 +1612,8 @@ impl Shot {
             particles: station.weather
                 || std::env::var("DERETH_STATIONS_PARTICLES").is_ok_and(|v| v.trim() == "1"),
             land_radius: station.land_radius,
+            // The landscape full detail as far as the scenery grows, as the client meshes it.
+            full_detail_scenery: true,
             time_of_day: match clock {
                 Clock::Rainy(f) => Some(f),
                 _ => None,
@@ -1681,6 +1743,7 @@ impl Shot {
                 scene.camera.pitch = DEFAULT_PITCH;
                 scene.set_weather_enabled(station.weather);
             }
+            Place::Start { .. } => scene.set_weather_enabled(station.weather),
             Place::Body { cell, origin, yaw } => {
                 let region =
                     dereth_world_data::landblock::load_region(store).expect("the region decodes");
@@ -1923,9 +1986,10 @@ impl Shot {
     }
 
     /// Hold the camera at `position`, turned `yaw` and pitched `pitch` (radians), over the chase
-    /// camera, from the next step on.
+    /// camera and over a report's camera, from the next step on.
     pub(crate) fn hold_camera(&mut self, position: Vec3, yaw: f32, pitch: f32) {
         self.front = Some((position, yaw, pitch));
+        self.held = None;
     }
 
     /// Draw the station again as it stands, without stepping it.
@@ -1955,6 +2019,20 @@ impl Shot {
         (x, y): (f32, f32),
         heading: f32,
     ) {
+        self.create_object_moving(id, (setup, mtable), block, (x, y), heading, None);
+    }
+
+    /// [`Self::create_object`], its motion given as the server gives a created object's: a
+    /// movement body as it is written (a corpse made lying dead, say).
+    pub(crate) fn create_object_moving(
+        &mut self,
+        id: u32,
+        (setup, mtable): (u32, Option<u32>),
+        block: u16,
+        (x, y): (f32, f32),
+        heading: f32,
+        movement: Option<Vec<u8>>,
+    ) {
         use dereth_protocol::types::{physicsdesc::flags, ObjDesc, PhysicsDesc, PublicWeenieDesc};
         let region =
             dereth_world_data::landblock::load_region(&self.store).expect("the region decodes");
@@ -1972,9 +2050,15 @@ impl Shot {
             physicsdesc: PhysicsDesc {
                 bitfield: flags::POSITION
                     | flags::SETUP
-                    | if mtable.is_some() { flags::MTABLE } else { 0 },
+                    | if mtable.is_some() { flags::MTABLE } else { 0 }
+                    | if movement.is_some() {
+                        flags::MOVEMENT
+                    } else {
+                        0
+                    },
                 setup_id: Some(setup),
                 mtable_id: mtable,
+                movement: movement.map(|m| (m, 0)),
                 state: 0,
                 position: Some(dereth_protocol::types::PositionWire {
                     objcell_id: cell,
@@ -2052,6 +2136,93 @@ impl Shot {
             LocalTime(self.now),
         );
         self.stream.world.update_visible_object_list();
+    }
+
+    /// Hand the station a message the server sent about the world (`opcode`, its body), as it
+    /// arrives now, from the next step on.
+    pub(crate) fn send(&mut self, opcode: dereth_protocol::Opcode, body: Vec<u8>) {
+        self.stream.apply_event(
+            &dereth_client_net::client_session::SessionEvent::WorldObject { opcode, body },
+            LocalTime(self.now),
+        );
+    }
+
+    /// Have the objects the station is sent read the data files from here on, as the client's
+    /// own do: an object can only be held by one created after this.
+    pub(crate) fn read_data_files(&mut self) {
+        self.stream.set_store(Arc::clone(&self.store));
+    }
+
+    /// Create an object of `setup`, `id` its own, held by object `holder` at its holding location
+    /// `location`, as the server creates a wielded item, from the next step on (see
+    /// [`Self::read_data_files`]).
+    pub(crate) fn create_held(&mut self, id: u32, setup: u32, holder: u32, location: u32) {
+        use dereth_protocol::types::{physicsdesc::flags, ObjDesc, PhysicsDesc, PublicWeenieDesc};
+        let payload = dereth_protocol::objects::ObjectCreatePayload {
+            id: dereth_primitives::ObjectId(id),
+            objdesc: ObjDesc::default(),
+            physicsdesc: PhysicsDesc {
+                bitfield: flags::SETUP | flags::PARENT | flags::ANIMFRAME,
+                setup_id: Some(setup),
+                parent: Some((dereth_primitives::ObjectId(holder), location)),
+                animframe_id: Some(location),
+                timestamps: dereth_protocol::types::PhysicsTimestamps {
+                    instance: 1,
+                    ..dereth_protocol::types::PhysicsTimestamps::default()
+                },
+                ..PhysicsDesc::default()
+            },
+            wdesc: PublicWeenieDesc::default(),
+        };
+        let body =
+            dereth_protocol::write_body(&dereth_protocol::objects::ItemCreateObject(payload))
+                .expect("encode");
+        self.stream.apply_event(
+            &dereth_client_net::client_session::SessionEvent::WorldObject {
+                opcode: dereth_protocol::Opcode::ITEM_CREATE_OBJECT,
+                body,
+            },
+            LocalTime(self.now),
+        );
+    }
+
+    /// Delete object `id`, as the server would once it is out of the viewer's range, from the
+    /// next step on.
+    pub(crate) fn delete_object(&mut self, id: u32) {
+        let body = dereth_protocol::write_body(&dereth_protocol::objects::ItemDeleteObject {
+            id: dereth_primitives::ObjectId(id),
+            instance_sequence: 1,
+        })
+        .expect("encode");
+        self.stream.apply_event(
+            &dereth_client_net::client_session::SessionEvent::WorldObject {
+                opcode: dereth_protocol::Opcode::ITEM_DELETE_OBJECT,
+                body,
+            },
+            LocalTime(self.now),
+        );
+        self.stream.world.update_visible_object_list();
+    }
+
+    /// Stand the body at `(x, y)` on the ground, the station's block's own coordinates (a place
+    /// past its edge is in the block there), facing `yaw` radians from north.
+    pub(crate) fn place_body(&mut self, block: u16, (x, y): (f32, f32), ground: f32, yaw: f32) {
+        let (bx, by) = ((x / 192.0).floor(), (y / 192.0).floor());
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        // LINT-OK: a run of a few blocks at most, inside the map
+        let next = ((i32::from(block >> 8) + bx as i32) << 8
+            | (i32::from(block & 0xFF) + by as i32)) as u32;
+        let (lx, ly) = (x - bx * 192.0, y - by * 192.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        // LINT-OK: a block-local position, 0..192, to its outdoor cell's index
+        let cell = (next << 16) | ((lx / 24.0) as u32 * 8 + (ly / 24.0) as u32 + 1);
+        let q = Quat::new(math::cosf(yaw * 0.5), 0.0, 0.0, math::sinf(yaw * 0.5));
+        if let Some(c) = self.scene.character.as_mut() {
+            c.teleport(Position::new(
+                CellId(cell),
+                Frame::new(Vec3::new(lx, ly, ground), q),
+            ));
+        }
     }
 
     /// Apply the scene's own preferences poll, as the application does once a frame.

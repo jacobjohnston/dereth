@@ -19,7 +19,11 @@
 //!
 //! **An update's effects.** A quest's definition names effects for kinds of update (a recipe
 //! taught as it is given, a reward quest given as it completes, a place it sends the player); an
-//! update puts them on the player before anything else of it is told.
+//! update puts them on the player before anything else of it is told. A recall among them takes
+//! the player at once through portal space, as the recall's skill would, and the update is told as
+//! the player comes out (2017: the Gauntlets' advances, 47 of 47); a recall with no place in the
+//! world leaves the player where it is. A step or an order of uses that names a place of its own
+//! takes the player there instead, and its update's recall stays put.
 //!
 //! **Time running out.** A quest with a duration fails when its time runs out: its update of the
 //! fail kind tells it failed, with the whole of its wait to be taken again. A few quests' durations
@@ -33,8 +37,35 @@
 //! the time played where all of it was recorded; 1,651 waits to be taken again fell by the time
 //! that passed, of which 1,583 had a character away a minute or more.
 //!
+//! **Death, leaving and portals.** A quest may fail when its player dies, when its player leaves
+//! the world, or when its player is taken through portal space; the quest's setup in the install
+//! says which, and a world's row may say otherwise. A death fails it in the death's tick, before
+//! the death's message (2017: the Mist Opal's, 2 of 2). Leaving fails it as a logging off goes into
+//! its last portal space, with the effects that end at logout, or as a character whose client went
+//! away goes out of the world; one the server never saw leave (it stopped) fails as the character
+//! next enters, as of when it was last kept. Any trip through portal space
+//! fails it once the player is in portal space: a portal, a door, a recall, a shard, a step's or an
+//! item's or an effect's sending, an operator's; not the return of a dead player, which its death
+//! has already settled (2017: a totem's quest and its companion failed in the tick the player went
+//! into portal space at a town's portal, after its portal space's call and effect; of 1,981 times
+//! some other quest was under way as its player went into portal space, 205 quests, none failed
+//! then). Of the install's 584 setups, 5 fail their quest on its player's death, 2 on leaving the
+//! world and 2 on portal space.
+//!
 //! **A fellowship's step.** A step may make its update for the player's fellows too: each fellow
 //! in the world for whom it may run is given the same update, told it alone.
+//!
+//! **An item handed back.** A give's step that hands its item back may put effects on it first (an
+//! imbuer's spell on the weapon given), each for its own time whoever holds the item after.
+//!
+//! **Companion quests.** A quest may go with another's holder (the fellows sworn to protect the one
+//! who carries a quest's burden): as a player's quest that others go with is done, each of those
+//! under way, the player's own and each of its fellows' in the world, is done after it, paying
+//! its own; as it fails (its player's death, its time running out, a step) or is cancelled, they
+//! fail after it. A fellow who has left the fellowship by then keeps its own as it is (2017: a
+//! totem gave its player both its quest and its companion, and both failed in one tick at the
+//! player's portal; the companions' setups spread them to the fellowship and fail them on none of
+//! their own holder's deaths, and their journals fail them as the bearer dies).
 //!
 //! **Subquests.** A phase of a quest may be done by doing other quests: they are given with the
 //! phase, hidden, and each of their moves is told as the quest's own record, its phase kept, its
@@ -43,8 +74,7 @@
 //!
 //! **Waits, levels and deaths.** A quest that failed or was cancelled is given again only once its
 //! wait is over, as a done one is; one with a least level is given only to a player of that level,
-//! the person saying why when it is not; one that fails when its player dies fails as the player
-//! dies.
+//! the person saying why when it is not.
 //!
 //! **Kills.** A creature's template names the effects its death has, and a quest effect moves its
 //! quest for the killer (the one credited with the kill) and, where the quest says so, for the
@@ -71,6 +101,13 @@
 //! to move: those limits are the rule's, and the fellows' share range's; the level limit is
 //! inferred. A quest with no setup and no recording to say otherwise stays the killer's.
 //!
+//! **Deaths nearby.** A step may be moved by a creature's death within some meters of the player,
+//! whoever killed it (another creature, or nobody the player knows): it runs for every player in
+//! the world, out of portal space and alive, that far from where the creature fell or nearer.
+//! Inferred: the install's one such death (a strike's target, which players may not harm) moves
+//! its quest by an area effect of 150 m on the players there, and players' guides say only those
+//! inside saw it move.
+//!
 //! **Hidden quests.** A quest the world keeps without showing it (its definition shows none:
 //! no description, or it is set not to be shown) is held and moved on like any other, but never
 //! listed at entry and never told in an update; a use that needs one and finds it not where it
@@ -87,7 +124,7 @@ use yalain_store::{Store, StoredPosition};
 use crate::graph::Builder;
 use crate::levels::LevelTable;
 use crate::progress::{self, Award};
-use crate::state::QuestState;
+use crate::state::{PlayState, QuestState};
 use crate::{session, Clock, Server};
 
 /// The client function quest updates call.
@@ -124,23 +161,6 @@ pub const CANCEL_QUEST: u32 = 0x8213_0027;
 /// The wait a cancelled quest names before it may be taken again, in seconds, where its row names
 /// none: five minutes (2017: one value per quest, 29 of 29 cancels, 16 quests of 27 at this).
 pub const CANCEL_WAIT: f64 = 300.0;
-
-/// The five-hour cancel waits 2017 named (11 quests of the 27 cancelled), for a world whose quest
-/// rows name no cancel wait at all.
-const LONG_CANCEL_WAIT: f64 = 18_000.0;
-const LONG_CANCEL_WAIT_QUESTS: [u32; 11] = [
-    0x8000_00E0,
-    0x8000_02D3,
-    0x8000_02E3,
-    0x8000_02EE,
-    0x8000_02F4,
-    0x8000_02FA,
-    0x8000_02FB,
-    0x8000_0303,
-    0x8000_0338,
-    0x8000_0355,
-    0x8000_035A,
-];
 
 /// The variable naming the player in a person's line (a string reference whose literal is the
 /// player's name in the world).
@@ -242,21 +262,6 @@ pub fn wait_after(q: &QuestDef, status: u32) -> f64 {
     }
 }
 
-/// A world whose quest rows name no cancel wait at all waits 2017's five hours after a cancel of
-/// the eleven quests that named it; one that names any has its rows' alone. Returns whether the
-/// world named none.
-pub fn cancel_waits_or_2017(table: &mut QuestTable) -> bool {
-    if table.quests.iter().any(|q| q.cancel_wait.is_some()) {
-        return false;
-    }
-    for q in &mut table.quests {
-        if LONG_CANCEL_WAIT_QUESTS.contains(&q.id) {
-            q.cancel_wait = Some(LONG_CANCEL_WAIT);
-        }
-    }
-    true
-}
-
 /// What a quest's time counts from (world seconds), if its time is running: under way, with a
 /// duration, in the phase its duration runs in if it names one. The quest's giving, or the coming of
 /// a later phase its duration runs in.
@@ -269,6 +274,20 @@ fn time_since(q: &QuestDef, st: &QuestState) -> Option<i64> {
         n if n != st.phase => None,
         1 => Some(st.started),
         _ => Some(st.updated),
+    }
+}
+
+/// A quest's name as the client is sent it: its reference, or the literal text standing in for one
+/// the install can't write.
+#[must_use]
+pub fn name_text(name: &Words) -> TextInfo {
+    match name {
+        Words::Ref(string, table) => progress::text((*string, *table)),
+        Words::Literal(l) => TextInfo {
+            has_literal: 1,
+            literal: Some(l.encode_utf16().collect()),
+            ..TextInfo::default()
+        },
     }
 }
 
@@ -295,7 +314,7 @@ fn write_record(
         );
     };
     w32(&mut b, q.id);
-    ti(&mut b, q.name);
+    b.extend_from_slice(&name_text(&q.name).pack());
     ti(&mut b, q.description);
     w32(&mut b, q.icon);
     w32(&mut b, st.status);
@@ -363,7 +382,7 @@ fn write_refused(q: &QuestDef, st: &QuestState, game_epoch: f64) -> Vec<u8> {
         );
     };
     w32(&mut b, q.id);
-    ti(&mut b, q.name);
+    b.extend_from_slice(&name_text(&q.name).pack());
     ti(&mut b, q.description);
     w32(&mut b, q.icon);
     w32(&mut b, st.status);
@@ -483,6 +502,17 @@ pub fn tell<S: Store>(
         return;
     };
     let msg = crate::talk::text_for(line, &crate::player::world_name(&p.name, p.sex));
+    tell_text(net, world, teller, teller_name, msg);
+}
+
+/// A person tells the player a text as it is.
+pub fn tell_text(
+    net: &mut ServerNet,
+    world: ConnId,
+    teller: u64,
+    teller_name: TextInfo,
+    msg: TextInfo,
+) {
     let m = session::call(
         crate::chat::function::HEAR_TELL,
         &[
@@ -511,11 +541,52 @@ pub fn done(held: &[QuestState], quest: u32) -> bool {
         .any(|q| q.quest == quest && q.status == status::COMPLETED)
 }
 
+/// Has a player ever completed a quest: done now, or done before it was given again?
+#[must_use]
+pub fn ever_done(play: &PlayState, quest: u32) -> bool {
+    done(&play.quests, quest) || play.completed_before.contains(&quest)
+}
+
+/// A quest is about to be given to a player again: if it holds it completed, it is remembered as
+/// completed before.
+fn remember_done(play: &mut PlayState, quest: u32) {
+    if done(&play.quests, quest) && !play.completed_before.contains(&quest) {
+        play.completed_before.push(quest);
+    }
+}
+
+/// Has a quest of a player's failed (a step failed it, or its time ran out), not given again since:
+/// while `during` is under way, a failure of a giving that came after that quest's own (a timer
+/// given in an earlier run of it does not count).
+#[must_use]
+pub fn failed_during(held: &[QuestState], quest: u32, during: Option<u32>) -> bool {
+    let Some(f) = held
+        .iter()
+        .find(|q| q.quest == quest && q.status == status::FAILED)
+    else {
+        return false;
+    };
+    during
+        .and_then(|d| {
+            held.iter()
+                .find(|q| q.quest == d && q.status == status::UNDERWAY)
+        })
+        .is_none_or(|own| f.started >= own.started)
+}
+
 /// May a step run for a player now: its quest at the phase it needs (to be given: not under way,
 /// its wait to be taken again over, the player of its least level), the quests it requires where
-/// it requires them, and the items it takes held.
+/// it requires them, the craft skills it waits on at their levels, an untraining under way where it
+/// waits on one, a hero where it is for heroes alone, the orders of uses it waits on where they
+/// stand, a player who fought the camps' creatures it waits on, and the items it takes held.
 fn may_run<S: Store>(s: &Server<S>, world: ConnId, st: &Step, now_unix: i64) -> bool {
-    may_run_at_any_level(s, world, st, now_unix) && level_allows(s, world, st)
+    may_run_at_any_level(s, world, st, now_unix)
+        && level_allows(s, world, st)
+        && crate::craft::step_allows(s, world, st)
+        && crate::skills::untraining_allows_step(s, world, st)
+        && crate::focus::allows_step(s, world, st)
+        && crate::puzzles::allows_step(s, world, st)
+        && crate::fought::allows_step(s, world, st)
 }
 
 /// May a step run for a player now (a step due after a wait runs only if it still may).
@@ -542,17 +613,27 @@ fn level_allows<S: Store>(s: &Server<S>, world: ConnId, st: &Step) -> bool {
     level >= s.quests.quest(st.quest).map_or(0, |d| d.min_level)
 }
 
-/// May a step run for a player now, its quest's least level aside.
+/// May a step run for a player now, its quest's least level and the craft skills it waits on
+/// aside.
 fn may_run_at_any_level<S: Store>(s: &Server<S>, world: ConnId, st: &Step, now_unix: i64) -> bool {
     let Some(p) = s.players.get(&world) else {
         return false;
     };
     let held = &p.play.quests;
-    if phase_of(held, st.quest) != st.needs || !crate::events::step_runs(s, st) {
+    if phase_of(held, st.quest) != st.needs
+        || !crate::events::step_runs(s, st)
+        || !crate::tallies::step_for(s, st)
+    {
         return false;
     }
     // A step whose gift can't be made doesn't run: it would take what it takes for nothing.
-    if !st.gives.iter().all(|t| crate::makes::can_make(s, *t)) {
+    let picked = s.item_rows.step_pick(st).unwrap_or_default();
+    if !st
+        .gives
+        .iter()
+        .chain(picked.iter().map(|(t, _)| t))
+        .all(|t| crate::makes::can_make(s, *t))
+    {
         return false;
     }
     if !st.races.is_empty() && !st.races.contains(&p.race) {
@@ -562,6 +643,9 @@ fn may_run_at_any_level<S: Store>(s: &Server<S>, world: ConnId, st: &Step, now_u
         .kingdom_rows
         .step_for(st, crate::kingdoms::counted_of(&p.qualities))
     {
+        return false;
+    }
+    if !s.story.step_for(st, &p.play.scenes) {
         return false;
     }
     if st.needs == 0 {
@@ -584,6 +668,8 @@ fn may_run_at_any_level<S: Store>(s: &Server<S>, world: ConnId, st: &Step, now_u
                     .quest(*q)
                     .is_none_or(|d| given_again(d, held, now_unix))
         }
+        Need::Failed => failed_during(held, *q, Some(st.quest)),
+        Need::NeverDone => !ever_done(&p.play, *q),
     });
     requires
         && st
@@ -615,7 +701,7 @@ fn setup_allows(
 /// one's the same; a cancelled one's its cancel wait). 2017: a failed quest's shrine said only its
 /// refusal while the wait ran, 2 of 2; quests whose completion named no wait were given again 23
 /// times (9 of 31), never one done once.
-fn given_again(def: &QuestDef, held: &[QuestState], now_unix: i64) -> bool {
+pub(crate) fn given_again(def: &QuestDef, held: &[QuestState], now_unix: i64) -> bool {
     held.iter().find(|q| q.quest == def.id).is_none_or(|q| {
         #[allow(clippy::cast_precision_loss)]
         let waited = (now_unix - q.updated) as f64;
@@ -629,7 +715,8 @@ fn given_again(def: &QuestDef, held: &[QuestState], now_unix: i64) -> bool {
 }
 
 /// The quest a trigger would give a player but for the player's level (it is under the quest's
-/// least level), if any.
+/// least level), craft skills (under a level its step waits on) or not being a hero (its step is
+/// for heroes alone), if any.
 #[must_use]
 pub fn too_low<S: Store>(
     s: &Server<S>,
@@ -644,10 +731,12 @@ pub fn too_low<S: Store>(
         .iter()
         .filter(|st| st.trigger == trigger && st.needs == 0 && st.update == Update::Bestow)
         .find(|st| {
-            s.quests
-                .quest(st.quest)
-                .is_some_and(|d| level < d.min_level && phase_of(&p.play.quests, d.id) == 0)
-                && may_run_at_any_level(s, world, st, now_unix)
+            s.quests.quest(st.quest).is_some_and(|d| {
+                (level < d.min_level
+                    || !crate::craft::step_allows(s, world, st)
+                    || !crate::focus::allows_step(s, world, st))
+                    && phase_of(&p.play.quests, d.id) == 0
+            }) && may_run_at_any_level(s, world, st, now_unix)
         })
         .map(|st| st.quest)
 }
@@ -737,15 +826,35 @@ fn run_triggered<S: Store>(
         Trigger::Use(_) => givings(s, trigger),
         _ => Vec::new(),
     };
-    // A step that leads somewhere is run by a use of a person or an object, or a kill; an item's use
-    // on one is the trip's first, its update on arrival.
+    // A step that leads somewhere is run by a use of a person or an object, a give to one, a kill
+    // or a take; an item's use on one is the trip's first, its update on arrival. A take's trip
+    // flashes on the item taken.
+    let by = who.map(|(id, _)| id).or_else(|| match trigger {
+        Trigger::Take(t) => s.players.get(&world).and_then(|p| {
+            p.play
+                .items
+                .iter()
+                .rev()
+                .find(|h| h.template == t)
+                .map(|h| h.id)
+        }),
+        _ => None,
+    });
     let leads_on = matches!(
         trigger,
-        Trigger::Use(_) | Trigger::Kill(_) | Trigger::KillIn(..)
-    ) && who.is_some();
+        Trigger::Use(_)
+            | Trigger::Give(..)
+            | Trigger::GiveClass(..)
+            | Trigger::Take(_)
+            | Trigger::Kill(_)
+            | Trigger::KillIn(..)
+            | Trigger::KillNear(..)
+    ) && by.is_some();
     let used = matches!(trigger, Trigger::Use(_));
     // A use runs one step of the server's errands: the person's next comes at the next use.
     let mut errand_ran = false;
+    // A step whose chance did not come up stays out of the rest of this trigger's steps.
+    let mut missed: Vec<Step> = Vec::new();
     loop {
         // Reckoned at each step: one given (now under way) blocks the rest.
         let blocked = several.len() >= 2 && person_blocks(s, world, &several, clock.unix);
@@ -758,6 +867,7 @@ fn run_triggered<S: Store>(
                 && !seen.contains(&st.quest)
                 && !(blocked && st.needs == 0 && several.contains(&st.quest))
                 && !(errand_done && errand(st.quest))
+                && !missed.contains(st)
                 && may_run(s, world, st, clock.unix)
         };
         // A use moves on a quest under way before it gives one.
@@ -783,6 +893,11 @@ fn run_triggered<S: Store>(
             let i = s.rng.below(may.len());
             step = may[i].clone();
         }
+        // A step with a chance runs only when it comes up.
+        if step.chance.is_some_and(|c| !s.rng.chance(c)) {
+            missed.push(step);
+            continue;
+        }
         moved.push(step.quest);
         errand_ran |= errand(step.quest);
         let trip = s.players.get(&world).and_then(|p| p.trip.as_ref());
@@ -791,22 +906,32 @@ fn run_triggered<S: Store>(
             continue;
         }
         let free = trip.is_none();
-        let sent = step.to.zip(who);
-        let kill = matches!(trigger, Trigger::Kill(_) | Trigger::KillIn(..));
-        if let (true, true, Some((place, (by, _)))) = (free, kill, sent) {
+        let sent = step.to.zip(by);
+        let kill = matches!(
+            trigger,
+            Trigger::Kill(_) | Trigger::KillIn(..) | Trigger::KillNear(..)
+        );
+        if let (true, true, Some((place, by))) = (free, kill, sent) {
             // A kill's step goes with the trip, its update told on landing (2017: 47 of 47 Gauntlet
             // kills, in portal space's exit's tick; the trip within 0.1 s of the death, 42 of 42
             // whose death was seen).
-            let place = room_for(s, place);
-            crate::places::sends_on(s, world, by, place, Some(step), clock);
+            let carries = step.to_fellows;
+            let room = room_for(s, place);
+            crate::places::sends_on(s, world, by, room, Some(step), clock);
+            if carries {
+                fellows_go(s, world, by, place, clock);
+            }
             continue;
         }
         let received = run_with(s, net, world, &step, who, given, clock);
-        if let Some((place, (by, _))) = sent {
+        if let Some((place, by)) = sent {
             // One already on its way goes nowhere, whichever room.
             if s.players.get(&world).is_some_and(|p| p.trip.is_none()) {
-                let place = room_for(s, place);
-                crate::places::sends_on(s, world, by, place, None, clock);
+                let room = room_for(s, place);
+                crate::places::sends_on(s, world, by, room, None, clock);
+            }
+            if step.to_fellows {
+                fellows_go(s, world, by, place, clock);
             }
         }
         // The item given is kept by the first step that takes it.
@@ -856,11 +981,14 @@ pub(crate) fn room_for<S: Store>(
     let taken: Vec<bool> = {
         let mut taken = vec![false; row.len()];
         for p in s.players.values() {
+            // A player on its way to a room has taken it already: a fellowship sent along in one
+            // moment is split over the row, each landing somewhere its fellows aren't headed.
+            let there = p.trip.as_ref().map_or(&p.position, |trip| &trip.to);
             let nearest = row
                 .iter()
                 .enumerate()
                 .filter_map(|(i, r)| {
-                    crate::presence::distance(&at(r.place), &p.position)
+                    crate::presence::distance(&at(r.place), there)
                         .filter(|d| *d <= ROOM_REACH)
                         .map(|d| (i, d))
                 })
@@ -893,6 +1021,32 @@ pub(crate) fn room_for<S: Store>(
         .collect();
     let i = s.rng.below(among.len());
     among[i]
+}
+
+/// A step that takes its player somewhere takes the player's fellowship along: each fellow in the
+/// world goes there too, through portal space, wherever it is, unless it is dead or already on its
+/// way somewhere. Where the place is one of a row of like rooms, each fellow is sent to a room of
+/// its own. A fellow is only sent: what the step does to a quest reaches it only as the step says.
+pub(crate) fn fellows_go<S: Store>(
+    s: &mut Server<S>,
+    world: ConnId,
+    by: u64,
+    place: yalain_content::quests::Place,
+    clock: Clock,
+) {
+    let going: Vec<ConnId> = crate::fellowship::fellows_in_world(s, world)
+        .into_iter()
+        .filter(|w| {
+            s.players
+                .get(w)
+                .is_some_and(|p| p.scene_drawn && !crate::combat::is_dead(p))
+        })
+        .collect();
+    // One already on its way somewhere keeps going there.
+    for w in going {
+        let room = room_for(s, place);
+        crate::places::sends_on(s, w, by, room, None, clock);
+    }
 }
 
 /// What a quest effect does to its quest.
@@ -985,8 +1139,11 @@ pub fn acquiring_does_more_than_quests(props: &yalain_content::Props) -> bool {
 
 /// An item came into a player's hands: the steps its taking triggers run, then the quest effects
 /// its template names on being acquired on each quest no step moved (2017: 38 of 54 acquirings
-/// moved their quest in the same second; 14 of the rest were past that phase, 2 a hidden quest's).
-/// Nothing is said of a quest the effect could not move.
+/// moved their quest in the same second; 14 of the rest were past that phase, 2 a hidden quest's),
+/// then on the taker's fellows the effects whose quests reach them, as a kill's do (2017: an item
+/// picked up, recorded from both sides, moved the fellow's quest in the same moment, the fellow
+/// doing nothing and standing 1.6 m off; 34 levels apart, its quest limiting neither). Nothing is
+/// said of a quest the effect could not move.
 pub fn took<S: Store>(
     s: &mut Server<S>,
     net: &mut ServerNet,
@@ -1006,6 +1163,21 @@ pub fn took<S: Store>(
     for e in named.iter().filter(|e| !moved.contains(&e.quest)) {
         moves(s, net, world, *e, false, clock);
     }
+    if named.is_empty() {
+        return;
+    }
+    // Every effect reaches the fellows, a quest a step moved too: a step that moved its fellows
+    // already left them past the phase a giving, an advance or a completion moves from. An
+    // increment would move them twice, so one a step moved stays the taker's.
+    let fellows = crate::fellowship::fellows_in_world(s, world);
+    for w in fellows {
+        for e in &named {
+            let twice = e.act == Move::Increment && moved.contains(&e.quest);
+            if !twice && reaches(s, *e, world, w) {
+                moves(s, net, w, *e, false, clock);
+            }
+        }
+    }
 }
 
 /// How far apart in level a fellow and a killer may be for a move limited by level to reach the
@@ -1016,13 +1188,14 @@ pub const KILL_LEVELS: i32 = 10;
 /// A creature died with its kill credited to a player: the steps the kill triggers run for the
 /// killer (those of its template, then those of the one camp that made it, each quest moved at most
 /// once), then the template's quest effects on each quest no step moved, then on the killer's
-/// fellows the effects whose quests reach them.
+/// fellows the effects whose quests reach them. Each effect names with its stat the range of its
+/// quest's phases it moves.
 pub fn killed<S: Store>(
     s: &mut Server<S>,
     net: &mut ServerNet,
     killer: ConnId,
     (creature, template, camp): (u64, u32, Option<usize>),
-    effects: &[String],
+    effects: &[(String, u32)],
     clock: Clock,
 ) {
     let mut moved = Vec::new();
@@ -1033,22 +1206,64 @@ pub fn killed<S: Store>(
         let trigger = Trigger::KillIn(template, camp);
         run_triggered(s, net, killer, trigger, who, None, clock, &mut moved);
     }
-    let named: Vec<QuestEffect> = effects
+    let named: Vec<(QuestEffect, u32)> = effects
         .iter()
-        .filter_map(|n| effect_named(n, |q| s.quest_ids.get(q).copied()))
+        .filter_map(|(n, range)| Some((effect_named(n, |q| s.quest_ids.get(q).copied())?, *range)))
         .collect();
     if named.is_empty() {
         return;
     }
-    for e in named.iter().filter(|e| !moved.contains(&e.quest)) {
-        moves(s, net, killer, *e, true, clock);
+    for (e, range) in named.iter().filter(|(e, _)| !moved.contains(&e.quest)) {
+        moves_by_kill(s, net, killer, *e, *range, true, clock);
     }
     let fellows = crate::fellowship::fellows_in_world(s, killer);
     for w in fellows {
-        for e in &named {
+        for (e, range) in &named {
             if reaches(s, *e, killer, w) {
-                moves(s, net, w, *e, false, clock);
+                moves_by_kill(s, net, w, *e, *range, false, clock);
             }
+        }
+    }
+}
+
+/// A creature died: the steps a death of its template within some meters triggers run for each
+/// player that far from where it died or nearer, whoever killed it: in the world, out of portal
+/// space and alive.
+pub fn died_near<S: Store>(
+    s: &mut Server<S>,
+    net: &mut ServerNet,
+    (creature, template): (u64, u32),
+    at: &StoredPosition,
+    clock: Clock,
+) {
+    let mut reaches: Vec<u32> = s
+        .quests
+        .steps
+        .iter()
+        .filter_map(|st| match st.trigger {
+            Trigger::KillNear(t, m) if t == template => Some(m),
+            _ => None,
+        })
+        .collect();
+    reaches.sort_unstable();
+    reaches.dedup();
+    for meters in reaches {
+        #[allow(clippy::cast_precision_loss)]
+        let within = meters as f32;
+        let near: Vec<ConnId> = s
+            .players
+            .iter()
+            .filter(|(_, p)| p.scene_drawn && p.trip.is_none() && !crate::combat::is_dead(p))
+            .filter(|(_, p)| {
+                crate::presence::distance(at, &p.position).is_some_and(|d| d <= within)
+            })
+            .map(|(w, _)| *w)
+            .collect();
+        let trigger = Trigger::KillNear(template, meters);
+        for world in near {
+            let mut moved = Vec::new();
+            let who = Some((creature, None));
+            run_triggered(s, net, world, trigger, who, None, clock, &mut moved);
         }
     }
 }
@@ -1062,13 +1277,13 @@ pub fn named_for_use<S: Store>(s: &Server<S>, props: &yalain_content::Props) -> 
         .collect()
 }
 
-/// Does an effect a killer's kill has on a quest reach this fellow: the quest shares, and the fellow
-/// is within the limits it names?
-fn reaches<S: Store>(s: &Server<S>, e: QuestEffect, killer: ConnId, fellow: ConnId) -> bool {
+/// Does an effect a killer's kill (or a taker's take) has on a quest reach this fellow: the quest
+/// shares, and the fellow is within the limits it names?
+fn reaches<S: Store>(s: &Server<S>, e: QuestEffect, by: ConnId, fellow: ConnId) -> bool {
     let Some(f) = s.quests.quest(e.quest).map(|d| d.fellows) else {
         return false;
     };
-    let (Some(a), Some(b)) = (s.players.get(&killer), s.players.get(&fellow)) else {
+    let (Some(a), Some(b)) = (s.players.get(&by), s.players.get(&fellow)) else {
         return false;
     };
     let levels = crate::examine::level_of(&a.qualities) - crate::examine::level_of(&b.qualities);
@@ -1089,7 +1304,37 @@ pub fn moves<S: Store>(
     told: bool,
     clock: Clock,
 ) {
-    match decide(s, world, e, clock) {
+    let decision = decide(s, world, e, None, clock);
+    carry_out(s, net, world, e, decision, told, clock);
+}
+
+/// A kill's quest effect on a player, as [`moves`] but for its increment: that moves only a phase
+/// of the range its creature's death names (`range`, the effect's stat), and from the last phase of
+/// that range ends the quest. A phase of another range is counted by other kills, or waits for
+/// something other than a kill.
+fn moves_by_kill<S: Store>(
+    s: &mut Server<S>,
+    net: &mut ServerNet,
+    world: ConnId,
+    e: QuestEffect,
+    range: u32,
+    told: bool,
+    clock: Clock,
+) {
+    let decision = decide(s, world, e, Some(range), clock);
+    carry_out(s, net, world, e, decision, told, clock);
+}
+
+fn carry_out<S: Store>(
+    s: &mut Server<S>,
+    net: &mut ServerNet,
+    world: ConnId,
+    e: QuestEffect,
+    decision: Decision,
+    told: bool,
+    clock: Clock,
+) {
+    match decision {
         Decision::Moves(up) => apply(s, net, world, e.quest, up, 0, clock),
         Decision::Fails => fail(s, net, world, e.quest, clock),
         Decision::Refused(def, why) => refuse(s, net, world, &def, why, told, clock),
@@ -1102,7 +1347,7 @@ pub fn moves<S: Store>(
 #[must_use]
 pub fn would_move<S: Store>(s: &Server<S>, world: ConnId, e: QuestEffect, clock: Clock) -> bool {
     matches!(
-        decide(s, world, e, clock),
+        decide(s, world, e, None, clock),
         Decision::Moves(_) | Decision::Fails
     )
 }
@@ -1116,7 +1361,15 @@ enum Decision {
     Nothing,
 }
 
-fn decide<S: Store>(s: &Server<S>, world: ConnId, e: QuestEffect, clock: Clock) -> Decision {
+/// What a quest effect does to a player's quest now; an increment of a kill's moves only a phase of
+/// its `range`.
+fn decide<S: Store>(
+    s: &Server<S>,
+    world: ConnId,
+    e: QuestEffect,
+    range: Option<u32>,
+    clock: Clock,
+) -> Decision {
     let Some(def) = s.quests.quest(e.quest) else {
         return Decision::Nothing;
     };
@@ -1151,8 +1404,11 @@ fn decide<S: Store>(s: &Server<S>, world: ConnId, e: QuestEffect, clock: Clock) 
             }
         }
         _ if phase == 0 => return Decision::Nothing,
+        Move::Increment if range.is_some_and(|r| def.range(phase) != r) => {
+            return Decision::Nothing;
+        }
         Move::Increment if phase < last => Update::Advance(phase + 1),
-        Move::Increment if def.last_waits => return Decision::Nothing,
+        Move::Increment if range.is_none() && def.last_waits() => return Decision::Nothing,
         Move::Increment => Update::Complete,
         Move::Advance(n) if n == phase + 1 => Update::Advance(n),
         Move::Advance(_) => return Decision::Nothing,
@@ -1304,8 +1560,31 @@ pub fn step_for_give<S: Store>(
         .cloned()
 }
 
+/// Does a template count in a class (a script package: its own, or one its package derives from)?
+#[must_use]
+pub fn in_class<S: Store>(s: &Server<S>, template: u32, class: u32) -> bool {
+    s.catalog
+        .get(template)
+        .is_some_and(|t| s.item_classes.counts_in(t.description.package, class))
+}
+
+/// The triggers a give of an item of a template to one of another makes: the give of the template,
+/// then the give of each class a step names for that person or object that the template counts in.
+#[must_use]
+pub fn give_triggers<S: Store>(s: &Server<S>, template: u32, to: u32) -> Vec<Trigger> {
+    let mut out = vec![Trigger::Give(template, to)];
+    for st in &s.quests.steps {
+        if let Trigger::GiveClass(c, t) = st.trigger {
+            if t == to && !out.contains(&st.trigger) && in_class(s, template, c) {
+                out.push(st.trigger);
+            }
+        }
+    }
+    out
+}
+
 /// The give that moves no quest a person takes so many of an item by: its row for that item, else
-/// one for any item. A row for the item wanting another count refuses it; so does a row whose
+/// one for a class the item counts in, else one for any item. A row for the item wanting another count refuses it; so does a row whose
 /// requirements the player does not meet, or one that would do nothing for the player (it gives
 /// nothing and its only effects are points bonuses at their caps already), unless one for any item
 /// takes it.
@@ -1322,31 +1601,61 @@ pub fn give_for<S: Store>(
     let kingdom = crate::kingdoms::counted_of(&p.qualities);
     let meets = |g: &&yalain_content::quests::Give| {
         // One whose gift can't be made takes nothing: the item goes back to its giver.
-        g.gives.iter().all(|t| crate::makes::can_make(s, *t))
+        let picked = s.item_rows.give_pick(g).unwrap_or_default();
+        g.gives
+            .iter()
+            .chain(picked.iter().map(|(t, _)| t))
+            .all(|t| crate::makes::can_make(s, *t))
             && s.kingdom_rows.give_for(g, kingdom)
+            && crate::tallies::give_for(s, g)
+            && crate::craft::give_allows(s, world, g)
+            && crate::skills::untraining_allows_give(s, world, g)
+            && crate::focus::allows_give(s, world, g)
+            && crate::puzzles::allows_give(s, world, g)
+            && crate::fought::allows_give(s, world, g)
             && !crate::kingdom_skills::would_do_nothing(s, &p.qualities, g)
             && g.requires.iter().all(|(q, need)| match need {
                 Need::Phase(n) => phase_of(held, *q) == *n,
                 Need::Done => done(held, *q),
                 Need::Free => phase_of(held, *q) == 0,
+                Need::Failed => failed_during(held, *q, None),
+                Need::NeverDone => !ever_done(&p.play, *q),
             })
     };
-    let rows: Vec<&yalain_content::quests::Give> = s
+    // Each with the class it takes, if it names one.
+    let rows: Vec<(&yalain_content::quests::Give, Option<u32>)> = s
         .quests
         .gives
         .iter()
-        .filter(|g| g.to == to)
-        .filter(meets)
+        .enumerate()
+        .filter(|(_, g)| g.to == to)
+        .filter(|(_, g)| meets(g))
+        .map(|(i, g)| (g, s.content.class_gives.get(&i).copied()))
         .collect();
-    let named: Vec<&&yalain_content::quests::Give> =
-        rows.iter().filter(|g| g.item == Some(item)).collect();
-    if !named.is_empty() {
-        return named
-            .into_iter()
+    let wanting = |of: Vec<&yalain_content::quests::Give>| {
+        of.into_iter()
             .find(|g| g.wants.is_none_or(|n| n == quantity))
-            .map(|g| (*g).clone());
+            .cloned()
+    };
+    let named: Vec<&yalain_content::quests::Give> = rows
+        .iter()
+        .filter(|(g, _)| g.item == Some(item))
+        .map(|(g, _)| *g)
+        .collect();
+    if !named.is_empty() {
+        return wanting(named);
     }
-    rows.into_iter().find(|g| g.item.is_none()).cloned()
+    let of_class: Vec<&yalain_content::quests::Give> = rows
+        .iter()
+        .filter(|(_, c)| c.is_some_and(|c| in_class(s, item, c)))
+        .map(|(g, _)| *g)
+        .collect();
+    if !of_class.is_empty() {
+        return wanting(of_class);
+    }
+    rows.into_iter()
+        .find(|(g, c)| g.item.is_none() && c.is_none())
+        .map(|(g, _)| g.clone())
 }
 
 /// The quest of a step a give would run now but for its count, if any.
@@ -1393,6 +1702,9 @@ fn run_with<S: Store>(
     given: Option<crate::gives::Given>,
     clock: Clock,
 ) -> Vec<u32> {
+    // What it adds to the world's tallies comes first, so what is said with it names the count it
+    // made.
+    crate::tallies::step_ran(s, step, clock);
     if let Some((teller, name)) = who {
         if let Some(line) = &step.tell {
             let told = crate::presence::content_by_id(&s.content.objects, teller)
@@ -1406,11 +1718,12 @@ fn run_with<S: Store>(
             // The move that finishes a quest's last subquests is said as that quest's completion
             // (2017: the last element handed over, 1 of 1), and one that finishes an earlier
             // phase's as its next phase where the person has a line for that.
+            let item = given.map(|g| g.template);
             let parents = finishes_parent(s, world, step).map_or_else(Vec::new, |(q, up)| {
-                crate::talk::with_update(s, template, Some(i), q, up)
+                crate::talk::with_update(s, template, Some(i), (q, up), item)
             });
             let lines = if parents.is_empty() {
-                crate::talk::with_update(s, template, Some(i), step.quest, step.update)
+                crate::talk::with_update(s, template, Some(i), (step.quest, step.update), item)
             } else {
                 parents
             };
@@ -1439,6 +1752,15 @@ fn run_with<S: Store>(
             }
         }
     }
+    // One more item, of several, picked by weight.
+    let pick = s.item_rows.step_pick(step).map(<[(u32, u32)]>::to_vec);
+    if let Some(g) = pick.and_then(|p| crate::makes::pick_one(s, &p)) {
+        match given {
+            Some(from) => crate::inventory::give_from(s, net, world, g, 1, from.target),
+            None => crate::inventory::give(s, net, world, g, 1),
+        };
+        received.push(g);
+    }
     for t in &step.takes {
         if kept.is_some_and(|g| g.template == *t) {
             kept = None;
@@ -1446,13 +1768,20 @@ fn run_with<S: Store>(
         }
         crate::inventory::take_from_pack(s, net, world, *t);
     }
+    // What it puts on the item it hands back goes on before the item is back.
+    if let Some(g) = given.filter(|g| !step.takes.contains(&g.template)) {
+        given_effects(s, net, step, g.item, clock);
+    }
     // Its effects come before the update, or for some steps after it.
+    // A step that leads somewhere itself takes the player there, not the update's own recall.
+    let up = (step.quest, step.update, step.xp);
+    let led = step.to.is_some();
     if step.effects_last {
-        apply(s, net, world, step.quest, step.update, step.xp, clock);
+        apply_led(s, net, world, up, led, clock);
         step_effects(s, net, world, step, who, clock);
     } else {
         step_effects(s, net, world, step, who, clock);
-        apply(s, net, world, step.quest, step.update, step.xp, clock);
+        apply_led(s, net, world, up, led, clock);
     }
     if step.xp_share > 0.0 {
         let level = s
@@ -1467,7 +1796,31 @@ fn run_with<S: Store>(
     if step.fellows {
         for_fellows(s, net, world, step, clock);
     }
+    crate::escorts::step_ran(s, net, world, step, clock);
     received
+}
+
+/// A give's step puts the effects the world's rows give it on the item it hands back, each at
+/// spellcraft 1 as a step's own effects are, for its time on the game clock whoever holds the item
+/// after ([`crate::effects::put_on_item`]).
+fn given_effects<S: Store>(
+    s: &mut Server<S>,
+    net: &mut ServerNet,
+    step: &Step,
+    item: u64,
+    clock: Clock,
+) {
+    let Some(list) = s
+        .content
+        .given_effects
+        .get(&(step.quest, step.key.clone()))
+        .cloned()
+    else {
+        return;
+    };
+    for state in list {
+        crate::effects::put_on_item(s, net, item, state, 1.0, clock);
+    }
 }
 
 /// A step whose update is the fellowship's: the same update made for each of the player's fellows
@@ -1505,13 +1858,16 @@ fn for_fellows<S: Store>(
     };
     for w in fellows {
         if may_run(s, w, &theirs, clock.unix) {
-            apply(s, net, w, step.quest, step.update, 0, clock);
+            let up = (step.quest, step.update, 0);
+            apply_led(s, net, w, up, step.to.is_some(), clock);
         }
     }
 }
 
 /// A step's effects on the player (a reward, a recipe learned), cast by the player itself, then
-/// what they say; a step that transforms its player makes it a hero first.
+/// what they say (a text one of them told already is not told again; none of their own lines for a
+/// step whose effects are quiet), then the recipes it teaches by name; a step that transforms its
+/// player makes it a hero first.
 fn step_effects<S: Store>(
     s: &mut Server<S>,
     net: &mut ServerNet,
@@ -1524,23 +1880,23 @@ fn step_effects<S: Store>(
     if let Some(t) = &step.transforms {
         crate::gives::made_hero(s, net, world, t);
     }
+    let mut told = Vec::new();
     for e in &step.effects {
-        crate::effects::apply(
-            s,
-            net,
-            world,
-            *e,
-            crate::effects::Cast {
-                caster: me,
-                spellcraft: 1.0,
-                giver: who,
-                ..crate::effects::Cast::default()
-            },
-            clock,
-        );
+        let cast = crate::effects::Cast {
+            caster: me,
+            spellcraft: 1.0,
+            giver: who,
+            quiet: step.effects_quiet,
+            ..crate::effects::Cast::default()
+        };
+        told.extend(crate::effects::recipe_line(&s.effect_table, *e, cast));
+        crate::effects::apply(s, net, world, *e, cast, clock);
     }
-    if let Some(t) = step.text {
+    if let Some(t) = step.text.filter(|t| !told.contains(t)) {
         progress::private(net, world, &crate::chat::show_text(2, progress::text(t)));
+    }
+    for r in &step.recipes {
+        crate::craft::learn(s, net, world, *r, clock);
     }
 }
 
@@ -1609,6 +1965,21 @@ pub fn apply<S: Store>(
     xp: u64,
     clock: Clock,
 ) {
+    apply_led(s, net, world, (quest, up, xp), false, clock);
+}
+
+/// Make a quest update (the quest, the update, the experience the step pays) and tell the player.
+/// `led`: what made it takes the player somewhere itself (a step's place, an order's), so a recall
+/// among the update's effects stays put and the row's place is the one the player goes to. An
+/// update whose recall sends the player is told as the player comes out of portal space.
+pub fn apply_led<S: Store>(
+    s: &mut Server<S>,
+    net: &mut ServerNet,
+    world: ConnId,
+    (quest, up, xp): (u32, Update, u64),
+    led: bool,
+    clock: Clock,
+) {
     let Some(def) = s.quests.quest(quest).cloned() else {
         s.unhandled.note(format!(
             "a step of quest {quest:08X}, which has no definition"
@@ -1630,7 +2001,7 @@ pub fn apply<S: Store>(
     // A subquest of a quest the player has at the phase it belongs to: its move is told as that
     // quest's.
     let parent = parent_held(s, world, quest);
-    update_effects(s, net, world, &def, effects_of, clock);
+    let recalled = update_effects(s, net, world, &def, effects_of, led, clock);
     if xp > 0 {
         progress::award(s, net, world, xp, Award::Step);
     }
@@ -1645,7 +2016,7 @@ pub fn apply<S: Store>(
             let why = if is_hidden(&s.quests, &def) {
                 Award::Step
             } else {
-                Award::Quest(def.name)
+                Award::Quest(def.id)
             };
             progress::award(s, net, world, paid, why);
         }
@@ -1669,6 +2040,9 @@ pub fn apply<S: Store>(
             p.play.quests.len() - 1
         }
     };
+    if up == Update::Bestow {
+        remember_done(&mut p.play, quest);
+    }
     let st = &mut p.play.quests[i];
     let kind = match up {
         Update::Bestow => {
@@ -1701,9 +2075,18 @@ pub fn apply<S: Store>(
         give_subquests(s, world, quest, phase, clock);
     }
     if !is_hidden(&s.quests, &def) {
-        tell_record(s, net, world, &def, kind, clock);
+        let trip = s
+            .players
+            .get_mut(&world)
+            .and_then(|p| p.trip.as_mut())
+            .filter(|_| recalled);
+        match trip {
+            Some(t) => t.updates.push((quest, kind)),
+            None => tell_record(s, net, world, &def, kind, clock),
+        }
     }
     crate::world::keep_player(s, world);
+    crate::escorts::quest_moved(s, net, world, quest);
     if up == Update::Bestow {
         start_timer(s, world, &def, clock);
         triggered(s, net, world, Trigger::Given(quest), None, clock);
@@ -1714,7 +2097,59 @@ pub fn apply<S: Store>(
         subquest_moved(s, net, world, parent, at, clock);
     }
     if up == Update::Complete {
+        companions_end(s, net, world, quest, true, clock);
         triggered(s, net, world, Trigger::Done(quest), None, clock);
+    }
+}
+
+/// A player's quest is done (`done`), or has failed or been cancelled: the quests that go with it,
+/// under way, the player's and each of its fellows' in the world, are done or fail with it.
+fn companions_end<S: Store>(
+    s: &mut Server<S>,
+    net: &mut ServerNet,
+    world: ConnId,
+    quest: u32,
+    done: bool,
+    clock: Clock,
+) {
+    let Some(companions) = s.content.companions.get(&quest).cloned() else {
+        return;
+    };
+    let mut holders = vec![world];
+    holders.extend(crate::fellowship::fellows_in_world(s, world));
+    for w in holders {
+        for &c in &companions {
+            let under_way = s.players.get(&w).is_some_and(|p| {
+                p.play
+                    .quests
+                    .iter()
+                    .any(|q| q.quest == c && q.status == status::UNDERWAY)
+            });
+            if !under_way {
+                continue;
+            }
+            if done {
+                apply(s, net, w, c, Update::Complete, 0, clock);
+            } else {
+                fail(s, net, w, c, clock);
+            }
+        }
+    }
+}
+
+/// A player out of the portal space an update's recall sent it into is told the update: its record
+/// of the quest as it stands now, as an update of that kind (a quest taken off on the way is told
+/// nothing).
+pub(crate) fn told_on_arrival<S: Store>(
+    s: &Server<S>,
+    net: &mut ServerNet,
+    world: ConnId,
+    quest: u32,
+    kind: u32,
+    clock: Clock,
+) {
+    if let Some(def) = s.quests.quest(quest) {
+        tell_record(s, net, world, def, kind, clock);
     }
 }
 
@@ -1762,6 +2197,7 @@ pub fn remove<S: Store>(
     if held {
         remove_subquests(s, world, quest);
     }
+    crate::escorts::quest_moved(s, net, world, quest);
     held
 }
 
@@ -1821,6 +2257,7 @@ fn give_subquests<S: Store>(
             started: clock.unix,
             updated: clock.unix,
         };
+        remember_done(&mut p.play, sub);
         match p.play.quests.iter_mut().find(|q| q.quest == sub) {
             Some(q) => *q = fresh,
             None => p.play.quests.push(fresh),
@@ -1899,32 +2336,80 @@ fn subquest_moved<S: Store>(
 /// A player dies: its quests under way that fail when their player dies fail (2017: the Mist
 /// Opal's, 2 of 2, in the death's tick before the death's message).
 pub fn died<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, clock: Clock) {
-    let failing: Vec<u32> = s.players.get(&world).map_or_else(Vec::new, |p| {
-        p.play
-            .quests
-            .iter()
-            .filter(|q| q.status == status::UNDERWAY)
-            .filter(|q| s.quests.quest(q.quest).is_some_and(|d| d.fails_on_death))
-            .map(|q| q.quest)
-            .collect()
-    });
-    for q in failing {
+    for q in under_way_failing(s, world, |d| d.fails_on_death) {
         fail(s, net, world, q, clock);
     }
 }
 
+/// A player is in portal space on its way somewhere (not back from its death): its quests under way
+/// that fail when their player is taken through portal space fail. Called once the trip is the
+/// player's, so an effect of a failure that would send it somewhere leaves it to the trip it is on.
+pub fn teleported<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, clock: Clock) {
+    for q in under_way_failing(s, world, |d| d.fails_on_teleport) {
+        fail(s, net, world, q, clock);
+    }
+}
+
+/// A character is leaving the world (its logging off at its end, or going out of the world): its
+/// quests under way that fail when their player leaves fail, while its fellowship still holds it.
+pub fn leaves_world<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, clock: Clock) {
+    for q in under_way_failing(s, world, |d| d.fails_on_logout) {
+        fail(s, net, world, q, clock);
+    }
+}
+
+/// The quests under way that fail when their player leaves the world, still under way as the
+/// character enters (the server stopped before it saw the character leave), fail as of `left_unix`,
+/// when it was last kept.
+pub fn failed_on_leaving(
+    table: &yalain_content::QuestTable,
+    held: &mut [QuestState],
+    left_unix: i64,
+) {
+    for st in held.iter_mut().filter(|q| q.status == status::UNDERWAY) {
+        if table.quest(st.quest).is_some_and(|d| d.fails_on_logout) {
+            st.status = status::FAILED;
+            st.phase = 0;
+            st.updated = left_unix;
+        }
+    }
+}
+
+/// The quests a player holds under way whose definitions `fails` says fail now.
+fn under_way_failing<S: Store>(
+    s: &Server<S>,
+    world: ConnId,
+    fails: impl Fn(&QuestDef) -> bool,
+) -> Vec<u32> {
+    s.players.get(&world).map_or_else(Vec::new, |p| {
+        p.play
+            .quests
+            .iter()
+            .filter(|q| q.status == status::UNDERWAY)
+            .filter(|q| s.quests.quest(q.quest).is_some_and(&fails))
+            .map(|q| q.quest)
+            .collect()
+    })
+}
+
 /// Put on a player the effects a quest's definition names for an update of this kind, cast by the
-/// player itself.
+/// player itself; the first recall among them takes the player, unless the update is `led`.
+/// Returns whether one did.
 fn update_effects<S: Store>(
     s: &mut Server<S>,
     net: &mut ServerNet,
     world: ConnId,
     def: &QuestDef,
     kind: u32,
+    led: bool,
     clock: Clock,
-) {
+) -> bool {
     let me = s.players.get(&world).map_or(0, |p| p.character);
-    for (_, e) in def.effects.iter().filter(|(k, _)| *k == kind) {
+    let mut recalled = false;
+    for (_, e, spellcraft) in def.effects.iter().filter(|(k, _, _)| *k == kind) {
+        if !led && !recalled {
+            recalled = crate::skill_use::effect_recall(s, net, world, *e, clock);
+        }
         crate::effects::apply(
             s,
             net,
@@ -1932,12 +2417,13 @@ fn update_effects<S: Store>(
             *e,
             crate::effects::Cast {
                 caster: me,
-                spellcraft: 1.0,
+                spellcraft: *spellcraft,
                 ..crate::effects::Cast::default()
             },
             clock,
         );
     }
+    recalled
 }
 
 /// The timer that fails a quest of a player's when its time runs out, if its time is running.
@@ -2083,7 +2569,7 @@ pub fn fail<S: Store>(
     if !under_way {
         return;
     }
-    update_effects(s, net, world, &def, update::FAIL, clock);
+    let recalled = update_effects(s, net, world, &def, update::FAIL, false, clock);
     let game_now = net.game_time(clock.local);
     #[allow(clippy::cast_precision_loss)]
     let game_epoch = game_now - clock.unix as f64;
@@ -2100,10 +2586,21 @@ pub fn fail<S: Store>(
     st.updated = clock.unix;
     let st = *st;
     if !is_hidden(&s.quests, &def) {
-        let rec = record(&def, &st, game_now, game_epoch);
-        progress::private(net, world, &update_call(rec, update::FAIL));
+        let trip = s
+            .players
+            .get_mut(&world)
+            .and_then(|p| p.trip.as_mut())
+            .filter(|_| recalled);
+        if let Some(t) = trip {
+            t.updates.push((quest, update::FAIL));
+        } else {
+            let rec = record(&def, &st, game_now, game_epoch);
+            progress::private(net, world, &update_call(rec, update::FAIL));
+        }
     }
     crate::world::keep_player(s, world);
+    crate::escorts::quest_moved(s, net, world, quest);
+    companions_end(s, net, world, quest, false, clock);
 }
 
 /// Is a quest one the world keeps hidden?
@@ -2163,4 +2660,6 @@ pub fn cancel<S: Store>(
     );
     progress::private(net, world, &update_call(rec, update::CANCEL));
     crate::world::keep_player(s, world);
+    crate::escorts::quest_moved(s, net, world, quest);
+    companions_end(s, net, world, quest, false, clock);
 }

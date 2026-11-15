@@ -84,6 +84,7 @@ pub(super) fn with_natures_aid(h: &mut Harness) {
             external_flags: 177,
             internal_flags: 0x4140_8513,
             ends_at_logout: false,
+            ends_at_teleport: false,
             enum_value: 538,
             eq_class: 0,
             name: None,
@@ -1027,6 +1028,7 @@ fn a_pet_striking_a_holder_of_what_sends_harm_back_loses_it() {
                 against_a_player: 1.0,
                 shares: true,
                 watches: true,
+                effects: false,
                 ..Watcher::default()
             })),
             duration: Scale(vec![(0.0, 100_000.0)]),
@@ -1035,6 +1037,7 @@ fn a_pet_striking_a_holder_of_what_sends_harm_back_loses_it() {
             external_flags: 0,
             internal_flags: 0x1100_0003,
             ends_at_logout: false,
+            ends_at_teleport: false,
             enum_value: 0,
             eq_class: 43,
             name: None,

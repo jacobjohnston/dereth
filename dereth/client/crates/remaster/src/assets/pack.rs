@@ -39,7 +39,7 @@ impl Category {
 }
 
 use super::{AssetTables, MaterialKey, MeshKey, SurfaceRef, TextureKey};
-use crate::scene::{Block, Degrade, Part, SceneDelta};
+use crate::scene::{Block, Degrade, Object, Part, SceneDelta};
 
 /// What of a pack is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -57,6 +57,8 @@ pub struct PackSettings {
     pub ground: bool,
     /// The scree and rock its ground lays on steep ground, while its ground is drawn.
     pub slopes: bool,
+    /// Its bodies, drawn in place of the parts of the objects built on their setups.
+    pub characters: bool,
 }
 
 impl PackSettings {
@@ -71,6 +73,7 @@ impl PackSettings {
             materials: true,
             ground: true,
             slopes: true,
+            characters: true,
         }
     }
 
@@ -155,25 +158,32 @@ pub struct PackLevel {
 pub struct PackModel {
     pub category: Category,
     pub levels: Vec<PackLevel>,
+    /// The pack scatters it over the ground as cover: it casts the sun's shadows near the eye
+    /// alone.
+    pub cover: bool,
 }
 
 /// `block` with each placement the pack has a model for (`model` of the placement's object)
 /// drawn as that model: its parts made one, at the placement's own frame and scale, whose mesh
 /// is the model's nearest level and whose degrade record, added after the block's own, holds its
-/// levels. Returns how many placements it swapped.
+/// levels. A tree has a record even with one level: far off it is drawn as its impostor. Returns
+/// how many placements it swapped.
 pub fn swap_placements(
     block: &mut Block,
     model: &mut dyn FnMut(u32) -> Option<PackModel>,
 ) -> usize {
     let mut swapped = 0;
+    // Each object's model asked once: a block's ground cover is thousands of placements of a
+    // few.
+    let mut models: BTreeMap<u32, Option<PackModel>> = BTreeMap::new();
     for p in &mut block.placements {
-        let Some(m) = model(p.id) else {
+        let Some(m) = models.entry(p.id).or_insert_with(|| model(p.id)) else {
             continue;
         };
         let Some(first) = m.levels.first() else {
             continue;
         };
-        let degrade = (m.levels.len() > 1).then(|| {
+        let degrade = (m.levels.len() > 1 || m.category == Category::Tree).then(|| {
             // Its distance is measured from where the model stands, over its scale; it has no
             // bands of retail's, so the levels' own distances choose them.
             block.degrades.push(Degrade {
@@ -190,6 +200,28 @@ pub fn swap_placements(
             scale: glam::Vec3::splat(p.scale),
             degrade,
         }];
+        swapped += 1;
+    }
+    swapped
+}
+
+/// `object` with each part whose drawing the pack has a model for (`model` of the GfxObj the part
+/// draws nearest) drawn as the model's nearest level at every level, posed as the part is: a
+/// portal's or a lifestone's parts keep their animation and the parts the pack has no model for.
+/// Returns how many parts it swapped.
+pub fn swap_object_parts(
+    object: &mut Object,
+    model: &mut dyn FnMut(u32) -> Option<PackModel>,
+) -> usize {
+    let mut swapped = 0;
+    for part in &mut object.parts {
+        let Some(&drawn) = part.levels.iter().find(|g| **g != 0) else {
+            continue;
+        };
+        let Some(mesh) = model(drawn).and_then(|m| m.levels.first().map(|l| l.mesh)) else {
+            continue;
+        };
+        part.levels.fill(mesh);
         swapped += 1;
     }
     swapped
@@ -218,6 +250,11 @@ pub struct PackSwaps {
     meshes: BTreeSet<u32>,
     /// How far from the eye the pack says each of its levels is drawn, by the level's mesh.
     distances: BTreeMap<u32, f32>,
+    /// The meshes of the models the pack scatters as ground cover.
+    cover: BTreeSet<u32>,
+    /// How far from the eye a ground cover's model is drawn at all, by each of its levels' meshes:
+    /// its last level's distance, past which it draws nothing.
+    reaches: BTreeMap<u32, f32>,
 }
 
 impl PackSwaps {
@@ -228,22 +265,46 @@ impl PackSwaps {
         deltas: Vec<SceneDelta>,
         model: &mut dyn FnMut(u32) -> Option<PackModel>,
     ) -> Vec<SceneDelta> {
-        let (meshes, distances) = (&mut self.meshes, &mut self.distances);
+        let (meshes, distances, cover, reaches) = (
+            &mut self.meshes,
+            &mut self.distances,
+            &mut self.cover,
+            &mut self.reaches,
+        );
         let on = self.settings;
         let mut counted = |id: u32| {
             let m = model(id).filter(|m| on.models(m.category));
             if let Some(m) = &m {
-                for l in &m.levels {
+                // A level that draws nothing (past a ground cover's reach) is no mesh of the pack's.
+                let reach = m
+                    .levels
+                    .iter()
+                    .rev()
+                    .find(|l| l.mesh != 0)
+                    .map(|l| l.distance);
+                for l in m.levels.iter().filter(|l| l.mesh != 0) {
                     meshes.insert(l.mesh);
                     distances.insert(l.mesh, l.distance);
+                    if m.cover && l.mesh != 0 {
+                        cover.insert(l.mesh);
+                        if let Some(r) = reach.filter(|r| r.is_finite()) {
+                            reaches.insert(l.mesh, r);
+                        }
+                    }
                 }
             }
             m
         };
         let mut deltas = deltas;
         for d in &mut deltas {
-            if let SceneDelta::BlockIn(b) | SceneDelta::BlockChanged(b) = d {
-                self.placements += swap_placements(b, &mut counted) as u64;
+            match d {
+                SceneDelta::BlockIn(b) | SceneDelta::BlockChanged(b) => {
+                    self.placements += swap_placements(b, &mut counted) as u64;
+                }
+                SceneDelta::ObjectBuilt(o) | SceneDelta::ObjectChanged(o) => {
+                    self.placements += swap_object_parts(o, &mut counted) as u64;
+                }
+                _ => {}
             }
         }
         deltas
@@ -254,6 +315,20 @@ impl PackSwaps {
     #[must_use]
     pub fn distance(&self, mesh: u32) -> Option<f32> {
         self.distances.get(&mesh).copied()
+    }
+
+    /// How far from the eye the ground cover whose level's mesh is `mesh` is drawn at all, at its
+    /// own size: past it, it draws nothing. `None` for a mesh that is not ground cover's, or one
+    /// drawn however far.
+    #[must_use]
+    pub fn cover_reach(&self, mesh: u32) -> Option<f32> {
+        self.reaches.get(&mesh).copied()
+    }
+
+    /// Whether `mesh` is a level of a model the pack scatters as ground cover.
+    #[must_use]
+    pub fn is_cover(&self, mesh: u32) -> bool {
+        self.cover.contains(&mesh)
     }
 
     /// What of the pack `tables` hold, against what the swaps drew.

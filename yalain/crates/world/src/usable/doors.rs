@@ -23,6 +23,10 @@
 //! does not use doors (the summoned creatures) cannot: it stands at a closed door until someone
 //! else opens it. A lock holds a creature as it holds a player, from the door's front, except at
 //! the doors whose kind or template lets creatures through their locks.
+//!
+//! **Levers.** A world's lever ([`crate::usable::levers`]) opens a door as a use does, whatever its
+//! lock, and holds it open its own time in place of the ten seconds, or until a use closes it. A
+//! pull while the door is open holds it so again from then.
 
 use std::collections::{HashMap, HashSet};
 
@@ -200,6 +204,17 @@ pub struct Door {
     pub closing_since: f64,
     /// A use that shut it while it closed, answered when that closing would have ended.
     pub cut_short: Option<Waiting>,
+    /// How long a lever holds it open, from its next opening (or from now, when it is open).
+    pub held: Option<Held>,
+}
+
+/// How long a lever holds a door open.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Held {
+    /// This many seconds, then it closes by itself.
+    For(f64),
+    /// Until a use closes it.
+    UntilClosed,
 }
 
 /// The doors' states, the kinds of door by their script packages, and the packages whose doors
@@ -246,6 +261,24 @@ pub fn door<S: Store>(s: &Server<S>, id: u64) -> Option<(Kind, StoredPosition)> 
     ))
 }
 
+/// Every door of the world, by its id, and where it stands.
+#[must_use]
+pub fn places<S: Store>(s: &Server<S>) -> Vec<(u64, StoredPosition)> {
+    (0..s.content.objects.len())
+        .filter_map(|i| {
+            let id = presence::content_id(&s.content.objects, i);
+            door(s, id).map(|(_, at)| (id, at))
+        })
+        .collect()
+}
+
+/// Whether a door in a phase lets bodies through: from the moment it starts to open until it starts
+/// to close.
+#[must_use]
+pub const fn passable(phase: Phase) -> bool {
+    matches!(phase, Phase::Opening | Phase::Open)
+}
+
 /// Is a place in front of a door (on the side its facing points to)?
 #[must_use]
 pub fn in_front(door: &StoredPosition, at: &StoredPosition) -> bool {
@@ -276,7 +309,7 @@ pub fn waiting_on<S: Store>(s: &Server<S>, world: ConnId) -> bool {
 /// Is a door locked to a player standing at a place: locked, not unlocked by its key since it last
 /// closed, and the player in front of it?
 fn locked<S: Store>(s: &Server<S>, id: u64, at: &StoredPosition) -> bool {
-    s.locks.of(id).is_some()
+    crate::usable::lock_of(s, id).is_some()
         && !s.doors.by_id.get(&id).is_some_and(|d| d.unlocked)
         && door(s, id).is_some_and(|(_, d)| in_front(&d, at))
 }
@@ -476,7 +509,7 @@ pub fn key_at_door<S: Store>(
         return;
     }
     let key = s.things.get(u.item).map(|t| (t.id, t.template));
-    let wanted = s.locks.of(id).and_then(|l| l.key);
+    let wanted = crate::usable::lock_of(s, id).and_then(|l| l.key);
     let fits = key.is_some_and(|(_, template)| wanted.is_some() && key_id(s, template) == wanted);
     if !fits {
         refuse(s, net, world, &u, refusal::WRONG_KEY);
@@ -530,6 +563,11 @@ pub fn created<S: Store>(
     let mut m = crate::player::content_object(id, o);
     // An object placed again by a reload is made with its newer instance stamp.
     m.physics.instance_stamp = s.placed.instance(id);
+    // Made at the latest visual stamp it took, those taken while the player was away among them:
+    // a client that let it go starts from this one.
+    if let Some(stamp) = s.visuals.get(&id) {
+        m.physics.visual_ordering_stamp = *stamp;
+    }
     // A person walking its route is made with the stamp its place was last told with.
     if let Some(stamp) = crate::walkers::position_stamp(s, id) {
         m.physics.stamps[0] = stamp;
@@ -702,6 +740,9 @@ pub(crate) fn key_kept<S: Store>(s: &Server<S>, world: ConnId, key: Option<u64>)
 
 /// Tell everyone who sees a door it turns passable or solid and plays a mode.
 fn moving<S: Store>(s: &mut Server<S>, net: &mut ServerNet, id: u64, physics: i32, m: u32) {
+    if let Some(w) = s.walls.as_mut() {
+        w.set_door_open(id, physics == quality::PASSABLE);
+    }
     let q = ServerMessage::UpdateIntVisual(VisualQuality {
         object: places::object_stamp(s, id),
         quality: quality::PHYSICS,
@@ -723,6 +764,49 @@ fn shown_open<S: Store>(s: &mut Server<S>, net: &mut ServerNet, id: u64, open: b
         value: i32::from(open),
     });
     places::to_knowers(s, net, id, &m);
+}
+
+/// A lever opens a door for everyone, whatever its lock: one closed or closing opens as a use opens
+/// it (a use waiting on its closing answered first), one opening goes on; either then stays open as
+/// the lever holds it. One open already is held so from now.
+pub fn held_open<S: Store>(
+    s: &mut Server<S>,
+    net: &mut ServerNet,
+    id: u64,
+    held: Held,
+    clock: Clock,
+) {
+    let Some((kind, _)) = door(s, id) else {
+        return;
+    };
+    let d = s.doors.by_id.entry(id).or_default();
+    match d.phase {
+        Phase::Opening => d.held = Some(held),
+        Phase::Open => {
+            // The close its opening set is let go, and the hold's own set.
+            d.generation = d.generation.wrapping_add(1);
+            let generation = d.generation;
+            if let Held::For(seconds) = held {
+                s.after(
+                    clock,
+                    seconds,
+                    Timer::Door {
+                        door: id,
+                        generation,
+                        step: Step::Close,
+                    },
+                );
+            }
+        }
+        Phase::Closed | Phase::Closing => {
+            d.held = Some(held);
+            let waiting = d.waiting.take();
+            if let Some(w) = waiting {
+                answer_waiting(s, net, id, w);
+            }
+            open(s, net, id, kind, None, clock);
+        }
+    }
 }
 
 /// The door begins to open (a use waiting for it to be open, unless a creature opens it).
@@ -885,15 +969,23 @@ pub fn step<S: Store>(
                 }
                 None => shown_open(s, net, id, true),
             }
-            s.after(
-                clock,
-                STAYS_OPEN,
-                Timer::Door {
-                    door: id,
-                    generation,
-                    step: Step::Close,
-                },
-            );
+            // A lever's hold, once, in place of the door's own time.
+            let stays = match s.doors.by_id.get_mut(&id).and_then(|d| d.held.take()) {
+                Some(Held::For(seconds)) => Some(seconds),
+                Some(Held::UntilClosed) => None,
+                None => Some(STAYS_OPEN),
+            };
+            if let Some(seconds) = stays {
+                s.after(
+                    clock,
+                    seconds,
+                    Timer::Door {
+                        door: id,
+                        generation,
+                        step: Step::Close,
+                    },
+                );
+            }
         }
         Step::Close => close(s, net, id, kind, clock),
         Step::CutShortEnds => {}

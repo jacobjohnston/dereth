@@ -832,6 +832,65 @@ fn perks_read_with_their_kind_value_and_priority() {
     assert!((2053..=2058).all(|id| perk(id).kind == 19));
 }
 
+/// The install's barring skills: 47 skills name 164 in all. Each playable class's root names its
+/// race's other roots, Balance the five other human roots; the three Paragons name each other, Night
+/// and Day Stalker each other; Inspiration and Iron Pincers, a Defender's and a Feral Intendant's
+/// second root, name the race's other roots and no skill names them. A human holding Balance is
+/// refused Quickening, one holding none may train it.
+/// Behaviour: server.skills.barring-skills-read
+#[test]
+fn each_class_root_names_its_races_other_roots_as_barring_it() {
+    use yalain_world::skills::{refusal, Credits, Held};
+    let t = Portal::open().skills();
+    let barring: Vec<_> = t
+        .skills
+        .values()
+        .filter(|d| !d.barring.is_empty())
+        .collect();
+    assert_eq!(barring.len(), 47);
+    assert_eq!(barring.iter().map(|d| d.barring.len()).sum::<usize>(), 164);
+    let bars = |id: u32| {
+        t.skills[&id]
+            .barring
+            .iter()
+            .copied()
+            .collect::<BTreeSet<u32>>()
+    };
+    assert_eq!(bars(68), BTreeSet::from([116, 132, 148, 189, 235]));
+    assert_eq!(bars(150), BTreeSet::from([68, 116, 132, 189, 235]));
+    assert_eq!(bars(695), BTreeSet::from([642, 654, 731, 763, 769]));
+    assert_eq!(bars(1544), BTreeSet::from([1868, 1929]));
+    for (paragon, others) in [(5, [11, 16]), (11, [5, 16]), (16, [5, 11])] {
+        assert_eq!(bars(paragon), BTreeSet::from(others));
+    }
+    assert_eq!(bars(2028), BTreeSet::from([1958]));
+    assert_eq!(bars(1958), BTreeSet::from([2028]));
+    let named: BTreeSet<u32> = barring
+        .iter()
+        .flat_map(|d| d.barring.iter().copied())
+        .collect();
+    assert!(!named.contains(&150) && !named.contains(&695));
+
+    let balance = Held {
+        skill: 68,
+        granted: 0,
+        xp: 0,
+        mask: 0x3,
+        cost: 5,
+        children: 0,
+        dependents: 0,
+    };
+    let credits = Credits {
+        skill: 20,
+        hero: None,
+    };
+    assert_eq!(
+        t.train_refusal(&[balance], 116, 15, 1, credits),
+        Some(refusal::BARRED)
+    );
+    assert_eq!(t.train_refusal(&[], 116, 15, 1, credits), None);
+}
+
 /// The install's six Mining Master perks read as more units on each use of a summoned node: 2, 4,
 /// 6, 9, 14 and 20, each overriding the one before it.
 /// Behaviour: server.craft.mining-units-by-tool-and-perk
@@ -2444,4 +2503,33 @@ mod timings {
         assert_eq!(yalain_world::ai::harm_noticed(&t, 1076, 10_000), 10_350);
         assert_eq!(yalain_world::ai::harm_noticed(&t, 122, 10_000), 10_000);
     }
+}
+
+/// The skills whose definitions cost focus read with their lines, from rating 1 to the skill's
+/// cap: 310 of them, every one a hero skill; Tidal Wave 30 to 40 over 150 ratings (32 at 44),
+/// Tanua's Gift 80 to 40 over 100 (62 at 45), Living Armor 55 to 65 (60 at 89), Portal Recall 70
+/// to 1 over 10, the Forces 10. A skill that costs none reads as none.
+/// Behaviour: server.skills.focus-cost-read
+#[test]
+fn the_skills_that_cost_focus_read_with_their_lines_and_all_are_hero_skills() {
+    use yalain_world::skill_use::focus_cost;
+    let t = Portal::open().skills();
+    let costing: Vec<_> = t
+        .skills
+        .values()
+        .filter(|d| d.usage.as_ref().is_some_and(|u| u.focus_add != (0.0, 0.0)))
+        .collect();
+    assert_eq!(costing.len(), 310);
+    assert!(costing.iter().all(|d| d.hero_cost > 0), "hero skills");
+    let at = |skill: u32, rating: f32| {
+        let d = &t.skills[&skill];
+        let u = d.usage.as_ref().expect("used");
+        (u.focus_add, d.cap, focus_cost(u, d.cap, rating))
+    };
+    assert_eq!(at(1085, 44.0), ((-30.0, -40.0), 150, 32), "Tidal Wave");
+    assert_eq!(at(1061, 45.0), ((-80.0, -40.0), 100, 62), "Tanua's Gift");
+    assert_eq!(at(1081, 89.0), ((-55.0, -65.0), 150, 60), "Living Armor");
+    assert_eq!(at(2170, 1.0), ((-70.0, -1.0), 10, 70), "Portal Recall");
+    assert_eq!(at(1638, 5.0), ((-10.0, -10.0), 10, 10), "Armor Force");
+    assert_eq!(at(207, 30.0).2, 0, "Deadeye costs none");
 }

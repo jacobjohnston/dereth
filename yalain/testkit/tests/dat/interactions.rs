@@ -16,7 +16,7 @@ fn the_interaction_tables_read_as_the_data_defines_them() {
     let t = p.interactions(&[IRON_KEY, BELL], &[]);
     let key = p.template(IRON_KEY);
     let on = t
-        .between(&key.props, IRON_STOCKPILE)
+        .between(&key.props, IRON_STOCKPILE, 0)
         .expect("the stockpile");
     assert_eq!(on.targets, [IRON_STOCKPILE]);
     assert!((on.reach - 7.0).abs() < 1e-6);
@@ -32,7 +32,40 @@ fn the_interaction_tables_read_as_the_data_defines_them() {
     assert!(list
         .iter()
         .all(|i| !i.uses_up && i.message.is_none() && (i.reach - 8.0).abs() < 1e-6));
-    assert!(t.between(&bell.props, IRON_STOCKPILE).is_none());
+    assert!(t.between(&bell.props, IRON_STOCKPILE, 0).is_none());
+}
+
+const SIGNIFICATOR: u32 = 0x4700_13D7;
+const GATEWAY_APPRENTICE: u32 = 0x4700_13A9;
+const TWIN_MOONS: u32 = 0x4700_13B5;
+const ACE_OF_SWORDS: u32 = 0x4700_1375;
+
+/// A significator may be used on each of the eighteen melds, from 3 m, kept, its outcome taking
+/// the meld, with "Your significator passes through the gateway!"; a meld on a lesser trump is
+/// kept and takes the trump.
+/// Behaviour: server.interactions.an-outcome-that-destroys-its-target-takes-a-held-one
+#[test]
+fn a_significators_outcome_takes_the_meld_and_a_melds_the_lesser_trump() {
+    let p = Portal::open();
+    let t = p.interactions(&[SIGNIFICATOR, TWIN_MOONS], &[]);
+    let significator = p.template(SIGNIFICATOR);
+    let list = &t.tables[&significator
+        .props
+        .word("Usage_ItemInteractionTable")
+        .expect("a table")];
+    assert_eq!(list.len(), 18, "the melds");
+    let on = t
+        .between(&significator.props, GATEWAY_APPRENTICE, 0)
+        .expect("a gateway");
+    assert!(!on.uses_up && on.uses_up_target);
+    assert!((on.reach - 3.0).abs() < 1e-6);
+    assert_eq!(on.message, Some((0xBA0F_3786, 0x2500_1F24)));
+    assert!(list.iter().all(|i| !i.uses_up && i.uses_up_target));
+    let meld = p.template(TWIN_MOONS);
+    let on = t
+        .between(&meld.props, ACE_OF_SWORDS, 0)
+        .expect("a lesser trump");
+    assert!(!on.uses_up && on.uses_up_target);
 }
 
 const CAN: u32 = 0x4700_145F;
@@ -53,11 +86,11 @@ fn a_table_naming_a_class_counts_the_templates_of_that_class() {
         .collect();
     let t = p.interactions(&[CAN, REQUIESCAT], &targets);
     let can = p.template(CAN);
-    let on = t.between(&can.props, DYE_PLANT).expect("the dye plant");
+    let on = t.between(&can.props, DYE_PLANT, 0).expect("the dye plant");
     assert_eq!(on.behavior, None);
     assert!(!on.uses_up);
     assert!((on.reach - 4.0).abs() < 1e-6);
-    assert!(t.between(&can.props, IRON_STOCKPILE).is_none());
+    assert!(t.between(&can.props, IRON_STOCKPILE, 0).is_none());
     assert_eq!(
         p.template(DYE_PLANT)
             .props
@@ -65,15 +98,36 @@ fn a_table_naming_a_class_counts_the_templates_of_that_class() {
         Some(yalain_world::usable::interactions::PLANT_BEHAVIOR)
     );
     let requiescat = p.template(REQUIESCAT);
-    let on = t.between(&requiescat.props, AXE).expect("the axe");
+    let on = t.between(&requiescat.props, AXE, 0).expect("the axe");
     assert!(on.uses_up);
-    assert!(t.between(&requiescat.props, DYE_PLANT).is_none());
+    assert!(t.between(&requiescat.props, DYE_PLANT, 0).is_none());
     assert_eq!(
         requiescat
             .props
             .word(yalain_world::usable::interactions::USER_BEHAVIOR),
         Some(yalain_world::usable::interactions::REQUIESCAT_BEHAVIOR)
     );
+}
+
+const BLANK_EMBLEM: u32 = 0x4700_15BC;
+const AXES: u32 = 4184;
+const BOWS: u32 = 4205;
+
+/// The blank emblem's table names the weapons' classes one by one: an axe counts in the axes' class
+/// and not the bows', and the emblem used on it is used up with the axes' text.
+/// Behaviour: server.interactions.an-item-used-on-another-makes-what-its-row-gives
+#[test]
+fn a_tables_classes_count_their_own_templates_alone() {
+    let p = Portal::open();
+    let targets = [(AXE, p.template(AXE).description.package)];
+    let t = p.interactions(&[BLANK_EMBLEM], &targets);
+    assert!(t.counts_in(AXES, AXE));
+    assert!(!t.counts_in(BOWS, AXE));
+    let on = t
+        .between(&p.template(BLANK_EMBLEM).props, AXE, 0)
+        .expect("the axe");
+    assert!(on.uses_up);
+    assert_eq!(on.message, Some((0x401B_5816, 0x2500_1FE8)));
 }
 
 /// The kinds of placed objects that answer a use as a person does are the script library's person
@@ -219,4 +273,137 @@ fn a_placed_lifestone_of_the_lifestone_class_binds_its_user() {
             .any(|(k, _)| *k == kind::LIFESTONE);
         assert!(bound, "{t:08X} binds");
     }
+}
+
+/// The six card melds, Deck of Fortune to Twin Moons.
+const CARD_MELDS: [u32; 6] = [
+    0x4700_13B0,
+    0x4700_13B1,
+    0x4700_13B2,
+    0x4700_13B3,
+    0x4700_13B4,
+    0x4700_13B5,
+];
+/// The four suits' Aces (each suit's fourteen cards follow its Ace), in their tables' order, and
+/// their classes: swords, scepters, skulls, drums.
+const ACES: [(u32, u32); 4] = [
+    (0x4700_1375, 10262),
+    (0x4700_1359, 10260),
+    (0x4700_1367, 10261),
+    (0x4700_134B, 10259),
+];
+/// "You transform the lesser trump into an optimal fate card!" and "... into a fate card!"
+const OPTIMAL: u32 = 0x3EBB_8F3B;
+const PLAIN: u32 = 0xAF1E_F93B;
+
+/// Each card meld's table names each of the 56 lesser trumps for the characters whose number leaves
+/// its rank (Ace 0 to King 13) divided by 14, with the optimal text, then each suit's class for
+/// anyone, with the plain one, every interaction keeping the meld and taking the trump: a
+/// character of each of the fourteen numbers meets the optimal interaction on the trumps of its own
+/// rank alone.
+/// Behaviour: server.interactions.an-interaction-for-some-characters-only
+#[test]
+fn the_card_melds_tables_give_each_rank_of_lesser_trump_to_one_character_number_in_fourteen() {
+    use yalain_world::usable::interactions::Gate;
+    let p = Portal::open();
+    let mut targets = Vec::new();
+    for (ace, _) in ACES {
+        for r in 0..14 {
+            let t = ace + r;
+            targets.push((t, p.template(t).description.package));
+        }
+    }
+    let t = p.interactions(&CARD_MELDS, &targets);
+    for meld in CARD_MELDS {
+        let props = &p.template(meld).props;
+        let list = &t.tables[&props.word("Usage_ItemInteractionTable").expect("a table")];
+        assert_eq!(list.len(), 60, "{meld:08X}");
+        for (i, (ace, class)) in ACES.iter().enumerate() {
+            for r in 0..14u32 {
+                let entry = &list[i * 14 + r as usize];
+                assert_eq!(entry.targets, [ace + r], "{meld:08X}");
+                assert_eq!(
+                    entry.gate,
+                    Gate::of(14, i32::try_from(r).expect("a rank")),
+                    "{meld:08X}"
+                );
+                assert_eq!(entry.message.map(|m| m.0), Some(OPTIMAL));
+            }
+            assert!(t.counts_in(*class, *ace), "{meld:08X}");
+        }
+        for anyone in &list[56..] {
+            assert_eq!(anyone.gate, None, "{meld:08X}");
+            assert_eq!(anyone.message.map(|m| m.0), Some(PLAIN));
+        }
+        assert!(list.iter().all(|e| !e.uses_up && e.uses_up_target));
+        for number in 0..14u64 {
+            let character = yalain_world::login::PLAYER_ID_BASE | (1_000 + number);
+            for (ace, _) in ACES {
+                for r in 0..14u32 {
+                    let met = t
+                        .between(props, ace + r, character)
+                        .expect("an interaction");
+                    let own = (1_000 + number) % 14 == u64::from(r);
+                    assert_eq!(
+                        met.message.map(|m| m.0),
+                        Some(if own { OPTIMAL } else { PLAIN }),
+                        "{meld:08X} number {number} rank {r}"
+                    );
+                    assert_eq!(met.gate.is_some(), own);
+                }
+            }
+        }
+    }
+}
+
+const RECONDITE_MACHINE: u32 = 0x4700_1B34;
+const DIG_POINTS: std::ops::RangeInclusive<u32> = 0x4700_0F90..=0x4700_0F97;
+
+/// A recondite machine's table names each of the eight dig points, from 3 m, playing a behavior of
+/// its own, the machine kept and the point used up, and names nothing made: what the use uncovers
+/// is a row's to say.
+/// Behaviour: server.places.an-item-used-on-an-object-makes-a-chest-there
+#[test]
+fn a_recondite_machines_table_uses_up_the_dig_point_and_names_nothing_made() {
+    let p = Portal::open();
+    let t = p.interactions(&[RECONDITE_MACHINE], &[]);
+    let machine = p.template(RECONDITE_MACHINE);
+    for point in DIG_POINTS {
+        let on = t
+            .between(&machine.props, point, 0)
+            .unwrap_or_else(|| panic!("{point:08X}"));
+        assert!((on.reach - 3.0).abs() < 1e-6);
+        assert_eq!(on.behavior, Some(0x4100_0020));
+        assert!(!on.uses_up && on.uses_up_target);
+        assert_eq!(on.message, None);
+    }
+}
+
+/// The chests that go once closed are those of the script library's chest that deletes itself on
+/// closing, a chest's kind: the prospectors' corpses, a treasure map's cargo chest, a nut hoard's
+/// stump; an Arcanum cache is a plain chest.
+/// Behaviour: server.places.chest-gone-once-closed
+#[test]
+fn the_chests_that_go_once_closed_are_the_librarys_deleting_kind() {
+    use yalain_world::usable::chests::{GOES_ONCE_CLOSED, PACKAGE};
+    let p = Portal::open();
+    let lib = p.library();
+    let chest = lib.package_id(PACKAGE).expect("the chest");
+    let once = lib
+        .package_id(GOES_ONCE_CLOSED)
+        .expect("the kind that goes");
+    let goes = |t: u32| lib.derives_from(p.template(t).description.package, once);
+    for t in [
+        0x4700_12A1,
+        0x4700_12B2,
+        0x4700_12C5,
+        0x4700_12D8,
+        0x4700_0F01,
+        0x4700_0F2D,
+    ] {
+        assert!(goes(t), "{t:08X}");
+        assert!(lib.derives_from(p.template(t).description.package, chest));
+    }
+    assert!(!goes(0x4700_0F3A), "a cache stays its time");
+    assert!(lib.derives_from(p.template(0x4700_0F3A).description.package, chest));
 }

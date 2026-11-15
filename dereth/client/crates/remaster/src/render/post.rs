@@ -526,6 +526,25 @@ impl PostPass {
         held
     }
 
+    /// How far this frame's projection is moved, in clip space, by the anti-aliasing or an
+    /// upscaler: nothing while neither moves it.
+    #[must_use]
+    pub fn drawn_jitter(&self) -> [f32; 2] {
+        self.jitter
+    }
+
+    /// This frame's place in the anti-aliasing's sequence and the sequence's length, while the
+    /// anti-aliasing lays the frames of a sequence over each other; `None` while it does not.
+    #[must_use]
+    pub fn dither(&self) -> Option<(u32, u32)> {
+        let s = self.settings;
+        if !s.runs() || !s.taa || s.check {
+            return None;
+        }
+        let frames = s.frames.clamp(1, 8);
+        Some((self.frame % frames, frames))
+    }
+
     /// Move `camera`'s projection by this frame's part of a pixel, for a world of `extent`
     /// pixels, when the anti-aliasing runs; the camera as it was.
     pub fn jitter(&mut self, camera: &mut Camera, extent: (u32, u32)) -> Camera {
@@ -701,6 +720,9 @@ impl PostPass {
             rows.0.push([0, 0, 0, NONE]);
             rows.0.push([0; 4]);
         }
+        for c in reprojection(previous, view_proj, self.jitter).to_cols_array_2d() {
+            rows.0.push(c.map(f32::to_bits));
+        }
         self.constants.write(gfx, &rows.bytes())?;
         let command_bytes = super::command_bytes(gfx);
         let (moving, commands) = if gathers {
@@ -745,6 +767,23 @@ impl PostPass {
     }
 }
 
+/// What takes a point of this frame's clip space, as drawn (its projection moved by `jitter`), to
+/// where `previous`, last frame's view and projection unmoved, had it: `previous` after the inverse
+/// of this frame's `view_proj` moved by `jitter`, worked out in double precision. A pixel's last
+/// place is then found from its place and its depth alone, never through the frame's space, where
+/// dividing out a far point's barely known depth throws it off its line of sight by a share of
+/// its distance from the space's origin; here a depth's error moves the point along that line,
+/// which a turning view does not see.
+#[must_use]
+pub fn reprojection(previous: Mat4, view_proj: Mat4, jitter: [f32; 2]) -> Mat4 {
+    let drawn = glam::DMat4::from_translation(glam::DVec3::new(
+        f64::from(jitter[0]),
+        f64::from(jitter[1]),
+        0.0,
+    )) * view_proj.as_dmat4();
+    (previous.as_dmat4() * drawn.inverse()).as_mat4()
+}
+
 /// The parts of the frame's objects that moved since the last frame and that the G-buffer
 /// draws: a row of five for each of their opaque draw items (the item, then the part's last
 /// transform's four columns), and a draw command for each, naming its row.
@@ -768,12 +807,23 @@ fn moving_parts(
         ) else {
             continue;
         };
-        if pp.hidden || pp.previous == pp.transform {
-            continue;
-        }
         let Some(items) = p.levels.get(usize::from(pp.level)) else {
             continue;
         };
+        // A skinned body's vertices move however its anchor does: its items are drawn every
+        // frame, each naming where its vertices' last places are kept (one more than their first,
+        // so 0 says none).
+        let last_of = |i: u32| {
+            scene
+                .item_draws
+                .get(i as usize)
+                .and_then(|d| scene.previous.get(&d.vertex_base))
+                .map(|r| r.start + 1)
+        };
+        let skinned = items.clone().any(|i| last_of(i).is_some());
+        if pp.hidden || (pp.previous == pp.transform && !skinned) {
+            continue;
+        }
         for i in items.clone() {
             if matches!(
                 scene.buckets.get(i as usize),
@@ -784,11 +834,11 @@ fn moving_parts(
             let Some(d) = scene.item_draws.get(i as usize) else {
                 continue;
             };
-            rows.extend(push_words(&[i, 0, 0, 0]));
+            rows.extend(push_words(&[i, last_of(i).unwrap_or(0), 0, 0]));
             for c in pp.previous.to_cols_array() {
                 rows.extend(c.to_le_bytes());
             }
-            commands.extend(super::command(backend, d.index_count, d.first_index, k));
+            super::command_into(backend, d.index_count, d.first_index, k, &mut commands);
             k += 1;
         }
     }
@@ -1302,6 +1352,88 @@ impl super::Renderer {
 mod tests {
     //! Behaviour: none (experimental)
     use super::*;
+    use dereth_primitives::num::math;
+
+    /// Where a pixel's surface was last frame, in last frame's clip space, worked out exactly in
+    /// double precision from its place and its distance along its line of sight.
+    fn exact_last(
+        eye: glam::DVec3,
+        (yaw, pitch): (f64, f64),
+        last: glam::DMat4,
+        ndc: glam::DVec2,
+        projection: glam::DMat4,
+    ) -> glam::DVec2 {
+        let view = glam::DMat4::look_to_lh(
+            eye,
+            glam::DVec3::new(
+                -math::sin(yaw) * math::cos(pitch),
+                math::cos(yaw) * math::cos(pitch),
+                math::sin(pitch),
+            ),
+            glam::DVec3::Z,
+        );
+        let inv = (projection * view).inverse();
+        let far = inv * glam::DVec4::new(ndc.x, ndc.y, 0.5, 1.0);
+        let c = last * (far / far.w);
+        glam::DVec2::new(c.x / c.w, c.y / c.w)
+    }
+
+    /// **A turning view finds a far pixel's last place whatever its depth**: the camera of the
+    /// screens before the world, two hundred meters from the frame's space's origin, turning a
+    /// little, with the near plane a tenth of a meter off; a point three kilometers out, its depth
+    /// as the depth buffer holds it and a few steps of that either way, is found where it was to
+    /// within three hundredths of a pixel of a 1080-pixel-high picture, as it is by the exact sum
+    /// (taken through the frame's space in single precision, it was 0.17 pixels off).
+    #[test]
+    fn a_turning_view_finds_a_far_pixels_last_place_whatever_its_depth() {
+        let projection = Mat4::perspective_lh(1.0, 16.0 / 9.0, 0.1, 4000.0);
+        let eye = glam::Vec3::new(96.0, 124.8, 141.0);
+        let view_of = |yaw: f32, pitch: f32| {
+            Mat4::look_to_lh(
+                eye,
+                glam::Vec3::new(
+                    -math::sinf(yaw) * math::cosf(pitch),
+                    math::cosf(yaw) * math::cosf(pitch),
+                    math::sinf(pitch),
+                ),
+                glam::Vec3::Z,
+            )
+        };
+        let (yaw, pitch) = (0.2f32, -0.42f32);
+        let previous = projection * view_of(yaw - 0.0006, pitch - 0.0003);
+        let view_proj = projection * view_of(yaw, pitch);
+        let jitter = [0.3 / 1286.0, -0.2 / 724.0];
+        let m = reprojection(previous, view_proj, jitter);
+        // A point straight ahead and a little to the side, three kilometers out.
+        let drawn = Mat4::from_translation(glam::Vec3::new(jitter[0], jitter[1], 0.0)) * view_proj;
+        let forward = glam::Vec3::new(
+            -math::sinf(yaw) * math::cosf(pitch),
+            math::cosf(yaw) * math::cosf(pitch),
+            math::sinf(pitch),
+        );
+        let point = eye + forward * 3000.0 + glam::Vec3::new(200.0, 0.0, 0.0);
+        let c = drawn * point.extend(1.0);
+        let (ndc, depth) = (glam::Vec2::new(c.x / c.w, c.y / c.w), c.z / c.w);
+        // Unjittered, as the exact sum takes it.
+        let exact = exact_last(
+            eye.as_dvec3(),
+            (f64::from(yaw), f64::from(pitch)),
+            previous.as_dmat4(),
+            (ndc - glam::Vec2::from(jitter)).as_dvec2(),
+            projection.as_dmat4(),
+        );
+        for steps in -4i32..=4 {
+            let d = f32::from_bits(depth.to_bits().wrapping_add_signed(steps));
+            let l = m * glam::Vec4::new(ndc.x, ndc.y, d, 1.0);
+            let found = glam::DVec2::new(f64::from(l.x / l.w), f64::from(l.y / l.w));
+            // Clip space is two units high over 1080 pixels.
+            let off = (found - exact).length() * 540.0;
+            assert!(
+                off < 0.03,
+                "{steps} steps of depth off: {off} pixels from where it was"
+            );
+        }
+    }
 
     /// The 16-bit floats read back are their values: 1, -2, a half, the smallest normal, a
     /// denormal and infinity.

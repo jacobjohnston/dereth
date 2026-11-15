@@ -44,6 +44,7 @@ fn numeric(stat: u32, magnitude: Vec<(f32, f32)>) -> EffectDef {
         external_flags: 0,
         internal_flags: 0,
         ends_at_logout: false,
+        ends_at_teleport: false,
         enum_value: 0,
         eq_class: 0,
         name: None,
@@ -60,6 +61,7 @@ fn chain(state: u32, seconds: f32, class: u32, list: Vec<EffectDef>) -> EffectDe
         external_flags: 0,
         internal_flags: 0x0140_0713,
         ends_at_logout: false,
+        ends_at_teleport: false,
         enum_value: 0,
         eq_class: class,
         name: Some((0xA860_7CEC, 0x2500_06EC)),
@@ -511,7 +513,7 @@ fn a_skill_aimed_at_an_item_is_refused_elsewhere() {
             quantity: 1,
         });
         if let Some(t) = h.server.things.get_mut(id) {
-            t.container = Some((me, slot));
+            t.container = Some(me);
         }
     };
     mine(&mut h, ring, RING);
@@ -553,6 +555,55 @@ fn an_item_gone_from_its_users_hands_before_the_effect_lands_takes_nothing() {
     h.server.things.get_mut(sword).expect("it").container = None;
     h.run(steps(3.0));
     assert!(h.server.things.get(sword).expect("it").timed.is_empty());
+}
+
+/// An item whose effect runs ends up in a corpse a player has open: as the effect ends, that player
+/// is told its look stops, as it is told of everything else the item does.
+/// Behaviour: server.skills.an-effect-on-an-item-ends-and-does-not-stack
+#[test]
+fn an_effect_ending_on_an_item_in_an_open_corpse_is_told_to_its_viewer() {
+    use yalain_world::things::{Corpse, Kind as Made, Thing};
+    let (mut h, b, me) = world();
+    let sword = h.arm(b, me, SWORD);
+    cast(&mut h, b, BRIEF, sword);
+    assert!(!h.server.things.get(sword).expect("it").timed.is_empty());
+    let w = *h
+        .server
+        .players
+        .iter()
+        .find(|(_, p)| p.character == me)
+        .expect("in the world")
+        .0;
+    let template = h.server.catalog.get(SWORD).cloned().expect("there");
+    let corpse = h.server.things.new_id();
+    let mut c = Thing::of(corpse, &template, Made::Corpse);
+    c.at = Some(h.server.players[&w].position);
+    c.corpse = Some(Corpse {
+        killer: me,
+        contents: vec![sword],
+        killer_level: 1,
+        expires: 1.0e12,
+        ..Corpse::default()
+    });
+    h.server.things.insert(c);
+    h.server
+        .players
+        .get_mut(&w)
+        .expect("in")
+        .play
+        .items
+        .retain(|x| x.id != sword);
+    let t = h.server.things.get_mut(sword).expect("it");
+    (t.wielded, t.container) = (None, Some(corpse));
+    let use_it = yalain_testkit::play::use_of(corpse, me);
+    h.ask(b, yalain_world::requests::function::USE, &[use_it], 5);
+    assert_eq!(h.server.players[&w].open_container, Some(corpse));
+    let from = h.bots[b].inbox.len();
+    h.run(steps(61.0));
+    assert!(h.server.things.get(sword).expect("it").timed.is_empty());
+    assert!(h.world_messages(b, from).iter().any(|m| {
+        matches!(m, ServerMessage::StopFx(e) if e.sender.id == sword && e.action.0 == FX)
+    }));
 }
 
 /// Used on an item a blow binds, a use on it binds nothing: it is no blow.

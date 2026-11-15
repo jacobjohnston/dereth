@@ -312,6 +312,13 @@ impl Front {
             "classic_sets": choices::classic_sets_for(&self.state, &w),
             "launch": launch::describe(&w),
             "args": launch::describe(&w).args(),
+            // Put before `args`, as the desktop's command line has them.
+            "interface_args": dereth_launch::interface::args(
+                &w.slug,
+                dereth_launch::interface::default_of(&self.state),
+            ),
+            // Put between `interface_args` and `args`, likewise.
+            "where_args": where_args(&w),
             "prefs": self.state.world_prefs.get(slug),
             "accounts": self.state.accounts_for(&w.slug).collect::<Vec<_>>(),
             "address": address(&w),
@@ -575,6 +582,33 @@ impl Front {
         }
     }
 
+    /// The interface every world starts in until the player changes it there in game, and the
+    /// ones on offer, as the desktop launcher's page has them: `{ chosen, offers: [{ name, line }] }`,
+    /// `chosen` null while the player has chosen none. `saved` is the interface the client's kept
+    /// profile names, the answer an earlier page wrote there, which becomes the default for a
+    /// state that has none.
+    pub fn interface(&mut self, saved: Option<dereth_launch::interface::Interface>) -> Value {
+        use dereth_launch::interface;
+        interface::adopt(&mut self.state, saved);
+        json!({
+            "chosen": interface::default_of(&self.state).map(interface::Interface::label),
+            "offers": interface::offers(),
+        })
+    }
+
+    /// Start every world the player has not changed in game in the interface named `name`, in
+    /// any case.
+    ///
+    /// # Errors
+    /// No interface of that name.
+    pub fn set_interface(&mut self, name: &str) -> Result<(), String> {
+        use dereth_launch::interface;
+        let choice = interface::by_name(name)
+            .ok_or_else(|| format!("{name} is not an interface the client has."))?;
+        interface::set_default(&mut self.state, choice);
+        Ok(())
+    }
+
     /// Make the data set `id` the default of its kind, the one a world's page offers first.
     ///
     /// # Errors
@@ -613,15 +647,14 @@ impl Front {
             }
         }
         let mut ids = Vec::new();
-        // A pair from 1999 is its own kind, which a Launch world needs.
-        let pair = SetKind::of_pair(&classic);
-        for (kind, files) in [(SetKind::Modern, modern), (pair, classic)] {
+        for (kind, files) in [(SetKind::Modern, modern), (SetKind::Classic, classic)] {
             let existing = self.state.dat_sets.iter().position(|s| {
                 s.path == path && (s.kind == kind || s.kind.is_pair() && kind.is_pair())
             });
             if files.is_empty() {
                 if let Some(i) = existing {
-                    self.state.dat_sets.remove(i);
+                    let id = self.state.dat_sets[i].id.clone();
+                    self.state.remove_set(&id);
                 }
                 continue;
             }
@@ -648,6 +681,8 @@ impl Front {
                         last_patched_by_server: None,
                         created_by_launcher: true,
                     });
+                    // A set removed before and kept again is the same set to what was saved.
+                    self.state.reclaim(&id);
                     ids.push(id);
                 }
             }
@@ -696,6 +731,7 @@ impl Front {
             last_patched_by_server: None,
             created_by_launcher: true,
         });
+        self.state.reclaim(&id);
         vec![id]
     }
 
@@ -729,8 +765,17 @@ impl Front {
     /// Forget every set kept in the browser's folder `folder`.
     pub fn remove_sets(&mut self, folder: &str) {
         let path = PathBuf::from(folder);
-        self.state.dat_sets.retain(|s| s.path != path);
-        self.state.auberean.dat_sets.retain(|s| s.path != path);
+        let ids: Vec<String> = self
+            .state
+            .dat_sets
+            .iter()
+            .chain(&self.state.auberean.dat_sets)
+            .filter(|s| s.path == path)
+            .map(|s| s.id.clone())
+            .collect();
+        for id in ids {
+            self.state.remove_set(&id);
+        }
     }
 }
 
@@ -759,6 +804,21 @@ fn address(w: &World) -> Option<String> {
     w.endpoint
         .as_ref()
         .map(|e| format!("{}:{}", e.address, e.port))
+}
+
+/// Where world `w` is, for the client: its status address, where the client finds what its
+/// server publishes, as the desktop's command line has it; and the address the world is listed
+/// at, which the client keeps what it learns of the world under, since every server is one
+/// address to a client in a browser.
+fn where_args(w: &World) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(status) = launch::world_status(w) {
+        args.extend(["--world-status".to_owned(), status.to_owned()]);
+    }
+    if let Some(address) = address(w) {
+        args.extend(["--world-address".to_owned(), address]);
+    }
+    args
 }
 
 #[cfg(test)]
@@ -1606,6 +1666,89 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("--era-features")));
+    }
+
+    /// The page's interface is the default for every world, kept in the state record; a profile's
+    /// answer from an earlier page becomes it once; and the client in the browser is told it and
+    /// the world's name ahead of the world's own words, as the desktop's command line has them.
+    #[test]
+    fn the_interface_is_every_worlds_default_and_the_client_is_told_it_with_the_world() {
+        use dereth_launch::interface::Interface;
+        let mut f = Front::default();
+        f.set_state("").unwrap();
+        let slug = f
+            .add_world("", "127.0.0.1", "19960", "PvE", "empyrean")
+            .unwrap();
+        assert_eq!(f.interface(None)["chosen"], Value::Null, "the page asks");
+        let page = f.world(&slug, NOW).unwrap();
+        assert_eq!(page["interface_args"], json!(["--world-slug", slug]));
+
+        assert_eq!(f.interface(Some(Interface::Classic))["chosen"], "Classic");
+        assert_eq!(
+            f.interface(Some(Interface::Modern))["chosen"],
+            "Classic",
+            "taken once"
+        );
+        assert!(f.set_interface("Retail").is_err());
+        f.set_interface("horizon").unwrap();
+        let mut again = Front::default();
+        again.set_state(&f.state_json()).unwrap();
+        assert_eq!(again.interface(None)["chosen"], "Horizon");
+        let page = again.world(&slug, NOW).unwrap();
+        let words: Vec<String> = page["interface_args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(page["args"].as_array().unwrap())
+            .map(|a| a.as_str().unwrap().to_owned())
+            .collect();
+        let mut cfg = dereth_client_runtime::config::Config::default();
+        cfg.apply_args(&words).unwrap();
+        assert_eq!(cfg.interface, Some(Interface::Horizon));
+        assert_eq!(cfg.world_slug.as_deref(), Some(slug.as_str()));
+    }
+
+    /// The client in the browser is told where the world is, as the desktop client's command
+    /// line tells it: the world's status, where it finds what the server publishes, when the
+    /// launcher may read it; and the address the world is listed at, which the client keeps what
+    /// it learns of the world under.
+    #[test]
+    fn the_client_is_told_the_worlds_status_and_its_listed_address() {
+        let mut f = Front::default();
+        f.set_state("").unwrap();
+        let slug = f
+            .add_world("", "play.example.org", "9050", "PvE", "empyrean")
+            .unwrap();
+        let words = |f: &Front| -> Vec<String> {
+            f.world(&slug, NOW).unwrap()["where_args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(words(&f), ["--world-address", "play.example.org:9050"]);
+        f.added_by(&slug, "https://play.example.org/status");
+        let told = words(&f);
+        assert_eq!(
+            told,
+            [
+                "--world-status",
+                "https://play.example.org/status",
+                "--world-address",
+                "play.example.org:9050",
+            ]
+        );
+        let mut cfg = dereth_client_runtime::config::Config::default();
+        cfg.apply_args(&told).unwrap();
+        assert_eq!(
+            cfg.world_status.as_deref(),
+            Some("https://play.example.org/status")
+        );
+        assert_eq!(cfg.travel_world("W"), "W@play.example.org:9050");
+        // Plain http to another machine is no status a launcher reads.
+        f.added_by(&slug, "http://play.example.org/status");
+        assert!(!words(&f).contains(&"--world-status".to_owned()));
     }
 
     #[test]

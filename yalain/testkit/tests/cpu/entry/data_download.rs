@@ -145,6 +145,242 @@ fn a_landblock_sent_brings_its_landblock_information_right_after_it() {
     }
 }
 
+const SCRIPT_STATE: u32 = 0x4000_002F;
+
+/// A recipe the world defines is served from its record as the portal file would hold it, where
+/// the server's files lack it (and with no files at all); a record the files hold of the same id is
+/// served in its place; an id neither holds is refused.
+/// Behaviour: server.data.world-recipes-served
+#[test]
+fn a_recipe_the_world_defines_is_served_from_its_record_where_the_files_lack_one() {
+    const MADE: u32 = 0x6F7E_0001;
+    const HELD: u32 = 0x4100_4B93;
+    for data in [true, false] {
+        let mut h = Harness::new();
+        if data {
+            h.server.data = Some(Box::new(files()));
+        }
+        let made = short_record(MADE);
+        // At its list first: a retail client logging in to a world with recipes of its own is
+        // sent them before its list.
+        let b = at_character_list(&mut h, "tester");
+        h.server.crafting.records.insert(MADE, made.clone());
+        h.server.crafting.records.insert(HELD, short_record(0));
+        let held = if data {
+            short_record(HELD)
+        } else {
+            short_record(0)
+        };
+        for (id, want) in [(MADE, Some(made)), (HELD, Some(held)), (0x6F7E_0002, None)] {
+            let before = h.bots[b].inbox.len();
+            let m = ClientMessage::DataRequest(DataRequest {
+                kind: SCRIPT_STATE,
+                id,
+            });
+            h.bots[b].send(false, queue::DATABASE, &m);
+            assert!(h.run_until(STEPS, |h| h.bots[b].inbox.len() > before));
+            h.run(20);
+            let got: Vec<ServerMessage> = h.bots[b].inbox[before..]
+                .iter()
+                .filter_map(|r| r.message())
+                .collect();
+            assert_eq!(got.len(), 1, "{id:08X}: one answer");
+            match (&got[0], want) {
+                (ServerMessage::DataRecord(r), Some(w)) => {
+                    assert_eq!((r.dat_file, r.kind, r.id), (PORTAL_FILE, SCRIPT_STATE, id));
+                    assert_eq!(inflated(r), w, "{id:08X}");
+                }
+                (ServerMessage::DataRefused(r), None) => assert_eq!(r.id, id),
+                (other, w) => panic!("{id:08X} (files {data}): {other:?}, wanted {w:?}"),
+            }
+        }
+    }
+}
+
+/// How a client logging in tells of its data in [`world_recipes_at_login`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Told {
+    /// A retail client holding nothing past its files' own.
+    Nothing,
+    /// A retail client holding the world's recipes' iteration.
+    TheirIteration,
+    /// A client that keeps overlays.
+    KeepsOverlays,
+}
+
+/// A client logging in with the operator's retail patching on or off, told of its data: what came
+/// before its character list, and whether the list waited for it to store them.
+fn world_recipes_at_login(
+    records: &[(u32, Vec<u8>)],
+    patching: bool,
+    told: Told,
+) -> (Vec<ServerMessage>, bool) {
+    use auberean_protocol::login::{DataFileIterations, DataHeld, Empty, OverlayHeld};
+    use auberean_protocol::types::{IterationRun, IterationSet};
+    let mut h = Harness::new();
+    h.server.cfg.dat_overlay.enable_dat_patching = patching;
+    h.server.crafting.records.extend(records.iter().cloned());
+    let iteration = yalain_world::recipe_download::iteration(&h.server.crafting.records);
+    let b = h.logging_in("tester");
+    if told == Told::KeepsOverlays {
+        let keeps = OverlayHeld {
+            flags: 0,
+            bases: Vec::new(),
+        };
+        h.bots[b].send(false, queue::DATABASE, &ClientMessage::OverlayHeld(keeps));
+    }
+    let files = if told == Told::TheirIteration {
+        vec![DataFileIterations {
+            dat_file: PORTAL_FILE,
+            iterations: IterationSet {
+                total: 138,
+                runs: vec![
+                    IterationRun::Run {
+                        count: 137,
+                        first: 1,
+                    },
+                    IterationRun::One(iteration.cast_signed()),
+                ],
+            },
+        }]
+    } else {
+        Vec::new()
+    };
+    let before = h.bots[b].inbox.len();
+    let held = ClientMessage::DataHeld(DataHeld {
+        language: 0x8000_0001,
+        files,
+    });
+    h.bots[b].send(false, queue::DATABASE, &held);
+    h.run(20);
+    let got: Vec<ServerMessage> = h.bots[b].inbox[before..]
+        .iter()
+        .filter_map(|r| r.message())
+        .take_while(|m| !matches!(m, ServerMessage::CharacterList(_)))
+        .collect();
+    let listed = |h: &Harness| {
+        h.bots[b]
+            .messages(false)
+            .iter()
+            .any(|m| matches!(m, ServerMessage::CharacterList(_)))
+    };
+    let waited = !listed(&h);
+    if waited {
+        h.bots[b].send(false, queue::DATABASE, &ClientMessage::DownloadEnds(Empty));
+        assert!(h.run_until(STEPS, listed), "listed once it has stored them");
+    }
+    (got, waited)
+}
+
+/// A retail client never asks for a recipe's record, so the world's recipes go to it as it logs
+/// in, whether or not the operator turned on patching retail clients (a world with recipes of its
+/// own patches them): the download begins with their ids under the portal file's iteration for
+/// them, each record follows as the file would hold it, and its characters wait until it has
+/// stored them. A client listing that iteration, one that keeps overlays (it asks), and a world
+/// with no recipes of its own are sent none, and listed at once.
+/// Behaviour: server.data.world-recipes-sent-to-retail
+#[test]
+fn a_retail_client_is_sent_the_worlds_recipes_as_it_logs_in() {
+    use auberean_protocol::login::{DownloadBegins, MissingIterations};
+    use yalain_world::recipe_download::{FIRST_ITERATION, ITERATIONS};
+    let records = vec![
+        (0x6F7E_1606, short_record(0x6F7E_1606)),
+        (0x6F7E_1601, long_record(0x6F7E_1601)),
+    ];
+    let iteration = yalain_world::recipe_download::iteration(&records.iter().cloned().collect());
+    assert!((FIRST_ITERATION..FIRST_ITERATION + ITERATIONS).contains(&iteration));
+
+    for patching in [true, false] {
+        let (got, waited) = world_recipes_at_login(&records, patching, Told::Nothing);
+        assert!(
+            waited,
+            "patching {patching}: its characters wait for the recipes to be stored"
+        );
+        assert_eq!(got.len(), 3, "patching {patching}: {got:?}");
+        let ServerMessage::DownloadBegins(DownloadBegins { bytes, files }) = &got[0] else {
+            panic!("the download begins first, not {:?}", got[0]);
+        };
+        assert_eq!(
+            files,
+            &vec![MissingIterations {
+                dat_file: PORTAL_FILE,
+                iteration,
+                download: vec![0x6F7E_1601, 0x6F7E_1606],
+                purge: vec![],
+            }]
+        );
+        let sent: usize = got[1..].iter().map(|m| record(m).bytes.len()).sum();
+        assert_eq!(*bytes as usize, sent);
+        for (m, (id, want)) in got[1..].iter().zip([&records[1], &records[0]]) {
+            let r = record(m);
+            assert_eq!((r.dat_file, r.kind, r.id), (PORTAL_FILE, SCRIPT_STATE, *id));
+            assert_eq!(&inflated(r), want, "{id:08X}");
+        }
+    }
+
+    for (records, patching, told, case) in [
+        (
+            &records[..],
+            true,
+            Told::TheirIteration,
+            "it lists their iteration",
+        ),
+        (
+            &records[..],
+            false,
+            Told::TheirIteration,
+            "it lists their iteration, patching off",
+        ),
+        (&records[..], true, Told::KeepsOverlays, "it keeps overlays"),
+        (
+            &[][..],
+            true,
+            Told::Nothing,
+            "no recipes of the world's own",
+        ),
+        (
+            &[][..],
+            false,
+            Told::Nothing,
+            "no recipes of the world's own, patching off",
+        ),
+    ] {
+        let (got, waited) = world_recipes_at_login(records, patching, told);
+        assert!(!waited, "{case}: listed at once");
+        assert!(
+            !got.iter().any(|m| matches!(
+                m,
+                ServerMessage::DownloadBegins(_) | ServerMessage::DataRecord(_)
+            )),
+            "{case}: sent none: {got:?}"
+        );
+    }
+}
+
+/// The world's recipes go out under one iteration for one set of records, and another when any
+/// record changes, is added or is taken away.
+/// Behaviour: server.data.world-recipes-sent-to-retail
+#[test]
+fn the_worlds_recipes_go_out_under_another_iteration_when_they_change() {
+    use std::collections::HashMap;
+    use yalain_world::recipe_download::iteration;
+    let one: HashMap<u32, Vec<u8>> = [
+        (0x6F7E_1601, short_record(1)),
+        (0x6F7E_1604, short_record(4)),
+    ]
+    .into();
+    let mut changed = one.clone();
+    changed.insert(0x6F7E_1604, short_record(5));
+    let mut more = one.clone();
+    more.insert(0x6F7E_1606, short_record(6));
+    let mut fewer = one.clone();
+    fewer.remove(&0x6F7E_1604);
+    assert_eq!(iteration(&one), iteration(&one.clone()));
+    for other in [&changed, &more, &fewer] {
+        assert_ne!(iteration(&one), iteration(other));
+    }
+}
+
 const ROOM: u32 = 0x4000_0026;
 
 /// A record of this many bytes that compresses well.

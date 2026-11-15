@@ -7,6 +7,125 @@ what they see, not how it was done.
 
 ## Unreleased
 
+## 0.4.0 (2026-11-14)
+- Worlds can now give creatures lasting effects and enchant a weapon handed in for a quest.
+- Worlds can now have a quest item drop once for each fellow on the quest.
+- Fixed the fanatics' disguise doing nothing when used.
+- Worlds can now have creatures that leave alone a player carrying a certain item or effect.
+- Taunts now grow stronger with the skill's rating.
+- Hero skills now cost focus to use.
+- Worlds can now have quest steps and hand-ins for those who fought a creature.
+- Worlds can now have quest steps and hand-ins for those who never completed a quest.
+- Taunt Force now taunts whoever hits you; the Forces cost focus per hit, and only one can be on.
+- Fixed fellows sometimes landing in the same room as a fellow sent along with them.
+- Worlds can now have an order of uses a whole fellowship works through together.
+- Worlds can now give a portal they make a name of its own.
+- Worlds can now have an object that turns up somewhere else each time it's used.
+- Worlds can now have quest steps and hand-ins for heroes alone.
+- Fixed portals a quest makes letting in players of the wrong kingdom.
+- Worlds can now have events that follow the game's day, night and hours.
+- Worlds can now ask for several alike objects to be used in an order.
+- Worlds can now have a creature's death open a portal for a while.
+- Worlds can now have plants grown in a garden with care items of their own.
+- Worlds can now have a device you must defend from attackers until it opens the way.
+- Worlds can now have an object that works only while a creature lies dead.
+- Worlds can now have a person who finishes your untraining for a price.
+- Worlds can now have a chest turn up again now and then in the same area.
+- Prospectors' corpses and other one-time chests now vanish once closed.
+- Worlds can now have a map or a machine uncover a chest and its guards.
+- Treasure maps and reckoning gems now lead to their spot and work only there.
+- Worlds can now have an object that opens the way for a while once it's given a set of items.
+- Worlds can now have levers that open doors for a while.
+- Fixed taking everything from a corpse also taking items your quest won't let you take.
+- Wielding the Sword of the Doomed Hero now moves its quest on.
+- Weapons now put their effects on what they hit, so the Empowered Warath can be slain.
+- Fixed fellows' quests not moving when a fellow picks up a quest item.
+- Quests now fail on death, logout or portal as the game's own quest data says.
+- Fixed some chests opening empty.
+- Fixed some kill quests counting the wrong creatures or never finishing.
+- Worlds can now have a use, a quest or a hand-in give one of several items by chance.
+- World quests and hand-ins can now wait on a craft skill's level.
+- A quest step can now send the player's whole fellowship somewhere.
+- Worlds can now give a quest bearer's fellows a quest that fails with the bearer's.
+- Fixed some objects not showing their effects after you leave and come back.
+- The world check now refuses gates on objects that a quest's use would ignore.
+- Worlds can now make an item used on another give some characters a different result.
+- A quest's hand-in can now take any item of a kind.
+- A quest's hand-in can now send the player somewhere.
+- Worlds can now have creatures that follow a player for a quest.
+- Worlds can now put a quest's item in a chest.
+- Worlds can now say what an effect places in the world.
+- Worlds can now keep a shared count that players' errands fill.
+- Quests whose name the game files lack now show a readable name.
+- Worlds can now have items whose use opens a portal.
+- Worlds can now say what an effect that grants an item gives.
+- Fixed wide lifestones and people doing nothing after a player walks up to them.
+- Creatures can now follow players into and out of caves whose mouth opens on the land.
+- People now say a line meant for one item only when given that item.
+- Quests that reward craft experience now pay it.
+- Items used on another item the use consumes, like a meld, now take it.
+- Card melds and other recipes that work out their own product can now make something.
+- Worlds that change the game files now always patch retail clients.
+- Quests that recall the player to a place now take them there.
+- Federation links now tell a proxy's refusal from the hub's.
+- Worlds can now have puzzles: objects that items change, used in the right order.
+- Worlds can now have creatures that fight other creatures, and targets players can't harm.
+- Worlds can now add recipes of their own.
+- Worlds can now have locked doors whose key takes a player somewhere.
+- Worlds can now have seeds that plant several crops, which need no watering.
+- Recipes taught by using an item can now be crafted.
+- Worlds can now say what an item used on another item makes.
+- Fixed some quest items being refused when used from the pack.
+- Item, quest and crafting effects that chain others now put each of them on.
+- Bosses' corpses now hold their own quest items.
+- Quest steps can now wait for a hidden timer to run out.
+- Workshops inside dungeons now work for players standing near them.
+- Refining now yields as much as players measured in retail at every skill level.
+- `world compile` now builds a world's overlay of clearings and shop titles.
+- Worlds can give a shop a title of its own.
+- Items and places for heroes alone now refuse everyone else.
+- Characters at level 50 who aren't heroes no longer gain experience.
+- World: creatures with no recorded loot now drop all six talismans.
+- World: creatures and ways in for four dungeons no recording reached, from players' maps.
+- World: each city's nexus now teaches its recall once the continent's act is done.
+- World: players can now become heroes: the initiation's gems drop from bloodstones.
+- World: creatures with a set loot quality no longer drop items three levels above it.
+- Fixed returning or being moved beside someone in the wrong place in the same area.
+- Fixed unbound players resurrecting in midair beside a lifestone.
+- Fixed players being unable to move after resurrecting.
+- Players can no longer walk through walls or closed doors.
+- Quest steps and gives can now grant a recipe or skill without its message.
+- Fixed the wrong message when a recipe is taught or an item's effect comes on.
+- Fixed some magic potions from corpses having no effect, name or worth.
+- Gems from corpses now sell for their full worth.
+- Quest steps can now happen by chance.
+- Guards can now mark players for turrets, which shoot only the marked.
+- World rows can now train a skill and wait for a finished act.
+- Fixed the broker's message when a character has too many consignments.
+- Only a plant's planter can now water, fertilize or pollinate it.
+- Pets' Heal and Buff buttons now work.
+- World: Storm Tyrants now also live in a second place.
+- World: three more Sclavus forts are placed, and every preceptor drops its talisman.
+- World: a spirit in the Olthoi Wastes gives five hunts for maturing Olthoi.
+- World: the Sclavus Hierophant's temple is placed, so the talisman quest can be finished.
+- Fixed some creatures hitting heavily armored players too hard.
+- Creatures now cast up close too, and shooters switch to melee at their own reach.
+- /skills reset and /heroskills reset now work for players granted a reset.
+- New admin channel, so a program on the same computer can use the console.
+- New experience, loot and respawn rate settings.
+- Portal storm numbers can now be set in the config or by admins while running.
+- Admins can now move a player's quests with /qst.
+- A character can no longer train a second class.
+- /status now names the world release and what the server doesn't handle yet.
+- Deleted characters are now removed after their hour even if nobody logs in.
+- /uninscribe now takes an inscription off, for whoever wrote it.
+- A store's page now updates when a shopper levels up or finishes a quest.
+- More game content now comes only from the world database; see the release notes.
+- Fixed items on the ground or in corpses keeping an effect's look after it ended.
+- World: the Crystalabra gives its user and fellows back 2% vitae.
+- World: pollinated plants now give seeds for most pollens.
+- World: Shi Kahuawa now sends players to the duel and gives the dust a later quest needs.
+
 ## 0.3.1 (2026-11-10)
 - Fight timing now follows each body's own animations, as in retail.
 - Worlds can now have an effect give vitae back, as the Crystalabra does.

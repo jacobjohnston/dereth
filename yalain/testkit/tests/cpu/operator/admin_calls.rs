@@ -563,6 +563,151 @@ fn the_state_and_object_calls_act() {
     assert!(answers(&h, me, from)[0].contains("no template"));
 }
 
+/// An admin on the land teleported to a player inside, in the same landblock, comes out beside it in
+/// its cell and at its height, not in the admin's own land cell or at the admin's height.
+/// Behaviour: server.places.beside-lies-in-its-own-cell
+#[test]
+fn an_admin_teleported_to_a_player_inside_comes_out_in_its_cell() {
+    let mut h = Harness::new();
+    let (me, id) = admin_in_world(&mut h, "one", "Elara");
+    let (_, other) = h.player_in_world("two", "Sir Kara");
+    h.run(10);
+    let inside = yalain_store::StoredPosition {
+        cell: 0x3C73_0105,
+        origin: [60.0, 130.0, -40.0],
+        rotation: [1.0, 0.0, 0.0, 0.0],
+    };
+    for p in h.server.players.values_mut() {
+        p.position = if p.character == other {
+            inside
+        } else {
+            yalain_store::StoredPosition {
+                cell: 0x3C73_0017,
+                origin: [50.0, 120.0, 10.0],
+                rotation: [1.0, 0.0, 0.0, 0.0],
+            }
+        };
+    }
+    send(&mut h, me, 0x8201_0058, &[text(""), text("Sir Kara")]);
+    h.run_to(yalain_net::LocalTime(h.now.0 + 3.0));
+    let p = h
+        .server
+        .players
+        .values()
+        .find(|p| p.character == id)
+        .expect("in");
+    assert!(p.trip.is_none(), "arrived");
+    assert_eq!(p.position.cell, inside.cell, "its cell: {:?}", p.position);
+    let d = ((p.position.origin[0] - 60.0).powi(2) + (p.position.origin[1] - 130.0).powi(2)).sqrt();
+    assert!(
+        (d - yalain_world::places::BESIDE_LIFESTONE).abs() < 0.01,
+        "beside it: {:?}",
+        p.position
+    );
+    assert!(
+        (p.position.origin[2] - -40.0).abs() < 1e-4,
+        "at its height: {:?}",
+        p.position
+    );
+}
+
+/// An admin grants a player a reset of its skills by setting the quality that holds them
+/// (`/edit`), and the player may then use it; `/skill reset` resets a player's skills with no reset
+/// held, its credits back, and starts the hour in which it may reset again itself.
+/// Behaviour: server.admin.skill-resets-granted-and-forced
+#[test]
+fn an_admin_grants_a_skill_reset_and_forces_one() {
+    use yalain_world::skills::reset;
+    const EDIT: u32 = 0x8201_005F;
+    const SKILL_RESET: u32 = 0x8201_0128;
+    const SELL_BACK_ALL: u32 = 0x8212_0040;
+    const SKILL: u32 = 15;
+    let mut h = Harness::new();
+    let mut skills = std::collections::HashMap::new();
+    skills.insert(
+        SKILL,
+        yalain_world::skills::SkillDef {
+            id: SKILL,
+            name: (0xA860_7CEC, 0x2500_085B),
+            cost: 2,
+            flags: 0x1,
+            ..yalain_world::skills::SkillDef::default()
+        },
+    );
+    h.server.skill_table.skills = skills;
+    let (me, _) = admin_in_world(&mut h, "one", "Elara");
+    let (player, id) = h.player_in_world("two", "Bran");
+    let world = *h
+        .server
+        .players
+        .iter()
+        .find(|(_, p)| p.character == id)
+        .expect("in")
+        .0;
+    let train = |h: &mut Harness| {
+        let p = h.server.players.get_mut(&world).expect("in");
+        p.play.credits = 0;
+        p.play.skills = vec![yalain_world::state::SkillState {
+            skill: SKILL,
+            granted: 0,
+            mask: 0x3,
+            cost: 2,
+            children: 0,
+            dependents: 0,
+            spent: 0,
+        }];
+    };
+    let holds = |h: &Harness| {
+        h.server.players[&world]
+            .play
+            .skills
+            .iter()
+            .any(|s| s.skill == SKILL)
+    };
+    train(&mut h);
+    send(&mut h, player, SELL_BACK_ALL, &[]);
+    assert!(holds(&h), "granted none");
+    let from = h.bots[me].inbox.len();
+    send(
+        &mut h,
+        me,
+        EDIT,
+        &[
+            Arg::LongInt(id),
+            text(&reset::SKILLS_HELD.to_string()),
+            text("1"),
+        ],
+    );
+    assert_eq!(answers(&h, me, from), ["Bran's quality 9800 is 1."]);
+    send(&mut h, player, SELL_BACK_ALL, &[]);
+    assert!(!holds(&h), "the granted reset used");
+    assert_eq!(h.server.players[&world].play.credits, 2);
+
+    let p = h.server.players.get_mut(&world).expect("in");
+    quals::set_timestamp(&mut p.qualities, reset::SKILLS_LAST, -1.0e9);
+    train(&mut h);
+    let from = h.bots[me].inbox.len();
+    let shown = h.bots[player].inbox.len();
+    send(&mut h, me, SKILL_RESET, &[Arg::LongInt(id)]);
+    assert_eq!(
+        answers(&h, me, from),
+        ["Bran's skills are reset; for an hour they may reset them again with /skills reset."]
+    );
+    assert!(!holds(&h), "reset with none held");
+    assert_eq!(
+        h.texts(player, shown),
+        [(reset::SHOWN_AS, reset::SKILLS_DONE.0)]
+    );
+    assert_eq!(
+        quals::int(&h.server.players[&world].qualities, reset::SKILLS_HELD),
+        Some(0),
+        "none spent"
+    );
+    train(&mut h);
+    send(&mut h, player, SELL_BACK_ALL, &[]);
+    assert!(!holds(&h), "again within the hour it started");
+}
+
 /// `/generate` makes the number asked for, one if the number is not a count, and at most a hundred
 /// however many are asked for.
 /// Behaviour: server.admin.generate-makes-at-most-a-hundred
@@ -607,6 +752,46 @@ fn every_admin_call_answers_an_admin_character_even_with_no_values() {
         h.run(6);
         assert!(!answers(&h, me, from).is_empty(), "{f:#x} answers");
     }
+}
+
+/// `/stormthresh` sets the players a landblock must hold for a portal storm to brew and
+/// `/stormnumstormed` the fewest a storm sends away, until the server stops, each answered; a
+/// threshold of none is refused and changes nothing. A player's own call changes nothing.
+/// Behaviour: server.admin.portal-storm-numbers-set
+#[test]
+fn an_admin_sets_the_portal_storms_threshold_and_the_fewest_sent_away() {
+    const THRESHOLD: u32 = 0x8201_0030;
+    const SENT: u32 = 0x8201_0085;
+    let mut h = Harness::new();
+    let (me, _) = admin_in_world(&mut h, "one", "Elara");
+    let (player, _) = h.player_in_world("two", "Bran");
+    let was = (h.server.storms.threshold, h.server.storms.least);
+    send(&mut h, player, THRESHOLD, &[Arg::Int(2)]);
+    assert_eq!((h.server.storms.threshold, h.server.storms.least), was);
+    let from = h.bots[me].inbox.len();
+    send(&mut h, me, THRESHOLD, &[Arg::Int(2)]);
+    send(&mut h, me, SENT, &[Arg::Int(1)]);
+    assert_eq!((h.server.storms.threshold, h.server.storms.least), (2, 1));
+    assert_eq!(
+        answers(&h, me, from),
+        [
+            "A portal storm now brews in a landblock holding 2 or more players.",
+            "A portal storm now sends away at least 1 of the players there, and any past the threshold."
+        ]
+    );
+    let from = h.bots[me].inbox.len();
+    send(&mut h, me, THRESHOLD, &[Arg::Int(0)]);
+    assert_eq!(h.server.storms.threshold, 2, "none refused");
+    assert_eq!(
+        answers(&h, me, from),
+        ["Give the players a landblock holds for a portal storm, 1 or more."]
+    );
+    assert_eq!(
+        h.server
+            .unhandled
+            .count("admin call 0x82010030, which has no place here"),
+        0
+    );
 }
 
 /// A command the operator keeps to named groups is refused to an admin in none of them, in game and
@@ -1514,7 +1699,7 @@ fn a_quest_an_admin_takes_off_a_player_takes_its_subquests_too() {
     const UNRELATED: u32 = 0x4000_0106;
     let def = |id, subquests| QuestDef {
         id,
-        name: (1, 0x2500_0001),
+        name: yalain_content::Words::Ref(1, 0x2500_0001),
         description: (2, 0x2500_0001),
         icon: 0,
         play_fx: false,
@@ -1531,9 +1716,11 @@ fn a_quest_an_admin_takes_off_a_player_takes_its_subquests_too() {
         subquests,
         min_level: 0,
         fails_on_death: false,
+        fails_on_logout: false,
+        fails_on_teleport: false,
         once: false,
         fellows: yalain_content::quests::Fellows::default(),
-        last_waits: false,
+        ranges: Vec::new(),
         hero_only: false,
         required: None,
         pay: yalain_content::quests::CompletionPay::default(),
@@ -1559,6 +1746,7 @@ fn a_quest_an_admin_takes_off_a_player_takes_its_subquests_too() {
         ],
         steps: [(PARENT, 2u32), (PARENT, 3)]
             .map(|(quest, to)| Step {
+                key: String::new(),
                 quest,
                 needs: to - 1,
                 trigger: Trigger::Use(USED),
@@ -1569,17 +1757,21 @@ fn a_quest_an_admin_takes_off_a_player_takes_its_subquests_too() {
                 counts: Vec::new(),
                 effects: Vec::new(),
                 text: None,
+                recipes: Vec::new(),
                 placed: "authored for a test".into(),
                 requires: Vec::new(),
                 takes: Vec::new(),
                 races: Vec::new(),
                 effects_last: false,
+                effects_quiet: false,
                 wants: None,
                 fellows: false,
                 levels: None,
                 xp_share: 0.0,
                 to: None,
                 transforms: None,
+                chance: None,
+                to_fellows: false,
             })
             .to_vec(),
         gives: Vec::new(),
@@ -1672,6 +1864,103 @@ fn a_quest_an_admin_takes_off_a_player_takes_its_subquests_too() {
     assert_eq!(held(&h), [UNRELATED], "the shared one goes with its last");
 }
 
+/// `/qst bestow`, `advance`, `complete` and `fail` move a player's quest as its kind of update says,
+/// its client told each time: given, on to the next phase or a named one, done; failed only while
+/// under way; a quest the world doesn't define, and a kind of update with no counterpart here,
+/// change nothing and are answered so.
+/// Behaviour: server.admin.quest-moved-by-an-admin
+#[test]
+fn an_admin_gives_moves_on_and_finishes_a_players_quest() {
+    use yalain_world::quests::{status, update};
+    const QUEST: u32 = 0x8000_0101;
+    const UPDATE: u32 = 0x8201_0077;
+    let mut h = Harness::new();
+    let (victim, victim_id) = h.player_in_world("one", "Elara");
+    let (me, _) = admin_in_world(&mut h, "two", "Cara");
+    h.server.quests = yalain_content::QuestTable {
+        quests: vec![yalain_content::quests::QuestDef {
+            id: QUEST,
+            name: yalain_content::Words::Ref(1, 0x2500_0001),
+            description: (2, 0x2500_0001),
+            icon: 0,
+            play_fx: false,
+            journals: Vec::new(),
+            challenge: 0,
+            duration: 0.0,
+            timed_phase: 0,
+            retry: 0.0,
+            xp: 0,
+            cancellable: false,
+            placed: "authored for a test".into(),
+            hidden: false,
+            effects: Vec::new(),
+            subquests: Vec::new(),
+            min_level: 0,
+            fails_on_death: false,
+            fails_on_logout: false,
+            fails_on_teleport: false,
+            once: false,
+            fellows: yalain_content::quests::Fellows::default(),
+            ranges: Vec::new(),
+            hero_only: false,
+            required: None,
+            pay: yalain_content::quests::CompletionPay::default(),
+            cancel_wait: None,
+        }],
+        steps: Vec::new(),
+        gives: Vec::new(),
+        rooms: Vec::new(),
+    };
+    let held = |h: &Harness| {
+        h.server
+            .players
+            .values()
+            .find(|p| p.character == victim_id)
+            .expect("in the world")
+            .play
+            .quests
+            .iter()
+            .find(|q| q.quest == QUEST)
+            .map(|q| (q.status, q.phase))
+    };
+    let ask = |h: &mut Harness, quest: u32, kind: u32| {
+        let (from, told) = (h.bots[me].inbox.len(), h.bots[victim].inbox.len());
+        send(
+            h,
+            me,
+            UPDATE,
+            &[Arg::LongInt(victim_id), Arg::Int(quest), Arg::Int(kind)],
+        );
+        (answers(h, me, from), quest_updates(h, victim, told))
+    };
+    let (said, told) = ask(&mut h, QUEST, update::FAIL);
+    assert_eq!(said, ["Elara does not have quest 80000101 under way."]);
+    assert!(told.is_empty());
+    let (said, told) = ask(&mut h, QUEST, update::BESTOW);
+    assert_eq!(said, ["Elara's quest 80000101 is given."]);
+    assert_eq!(told, [(update::BESTOW, QUEST)]);
+    assert_eq!(held(&h), Some((status::UNDERWAY, 1)));
+    let (said, told) = ask(&mut h, QUEST, update::ADVANCE);
+    let next = 2;
+    assert_eq!(
+        said,
+        [format!("Elara's quest 80000101 is at phase {next}.")]
+    );
+    assert_eq!(told, [(update::ADVANCE | next, QUEST)]);
+    ask(&mut h, QUEST, update::ADVANCE | 5);
+    assert_eq!(held(&h), Some((status::UNDERWAY, 5)), "a named phase");
+    let (said, told) = ask(&mut h, QUEST, update::COMPLETE);
+    assert_eq!(said, ["Elara's quest 80000101 is done."]);
+    assert_eq!(told, [(update::COMPLETE, QUEST)]);
+    assert_eq!(held(&h), Some((status::COMPLETED, 0)));
+    let (said, _) = ask(&mut h, 0x8000_0999, update::BESTOW);
+    assert_eq!(said, ["The world defines no quest 80000999."]);
+    let (said, told) = ask(&mut h, QUEST, update::INCREMENT);
+    assert_eq!(said, ["This server has no quest update 0x60000000."]);
+    assert!(told.is_empty());
+    assert_eq!(held(&h), Some((status::COMPLETED, 0)));
+}
+
 /// `/qst remove` and `/qst retry` tell the player's client at once, as the update its own handling
 /// takes off the list; a quest its client never knew (a hidden one) goes without a word.
 /// Behaviour: server.admin.quest-removal-told-at-once
@@ -1688,7 +1977,7 @@ fn a_quest_an_admin_takes_off_a_player_leaves_its_clients_list_at_once() {
         let (me, _) = admin_in_world(&mut h, "two", "Cara");
         let def = |id, hidden| yalain_content::quests::QuestDef {
             id,
-            name: (1, 0x2500_0001),
+            name: yalain_content::Words::Ref(1, 0x2500_0001),
             description: (2, 0x2500_0001),
             icon: 0,
             play_fx: false,
@@ -1705,9 +1994,11 @@ fn a_quest_an_admin_takes_off_a_player_leaves_its_clients_list_at_once() {
             subquests: Vec::new(),
             min_level: 0,
             fails_on_death: false,
+            fails_on_logout: false,
+            fails_on_teleport: false,
             once: false,
             fellows: yalain_content::quests::Fellows::default(),
-            last_waits: false,
+            ranges: Vec::new(),
             hero_only: false,
             required: None,
             pay: yalain_content::quests::CompletionPay::default(),

@@ -383,7 +383,7 @@ fn entries(con: &Connection) -> BTreeMap<u64, Vec<Entry>> {
 fn timed_quest(id: u32, duration: f64, retry: f64) -> QuestDef {
     QuestDef {
         id,
-        name: (0, 0),
+        name: yalain_content::Words::Ref(0, 0),
         description: (0, 0),
         icon: 0,
         play_fx: false,
@@ -400,9 +400,11 @@ fn timed_quest(id: u32, duration: f64, retry: f64) -> QuestDef {
         subquests: Vec::new(),
         min_level: 0,
         fails_on_death: false,
+        fails_on_logout: false,
+        fails_on_teleport: false,
         once: false,
         fellows: yalain_content::quests::Fellows::default(),
-        last_waits: false,
+        ranges: Vec::new(),
         hero_only: false,
         pay: yalain_content::quests::CompletionPay::default(),
         required: None,

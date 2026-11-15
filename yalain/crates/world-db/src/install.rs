@@ -18,9 +18,10 @@ use auberean_script::opcode::{length, low_byte, signed, tag_of};
 use auberean_script::value::{join, tag, FunctionId};
 use yalain_content::props::{TAKING_QUEST, TAKING_STATUS};
 use yalain_content::stores::SaleGate;
+use yalain_content::talk::Words;
 use yalain_content::{FactIds, Prop, Props, FACT_NAMES};
 
-use crate::compile::{Install, InstallSale, QuestDefinition};
+use crate::compile::{FailsOn, Install, InstallSale, QuestDefinition};
 
 /// The generator-profile names' enumeration (loot profiles among them).
 pub const PROFILE_NAMES: u32 = 0x2300_0100;
@@ -112,6 +113,20 @@ impl<'a> DatInstall<'a> {
     }
 
     fn text(&self, string: u32, table: u32) -> Option<String> {
+        self.entry(table, string, |e| {
+            e.strings.iter().flatten().next().cloned()
+        })
+        .flatten()
+    }
+
+    /// What `read` makes of a token's entry in a table of the language file, when the table holds
+    /// the token.
+    fn entry<T>(
+        &self,
+        table: u32,
+        token: u32,
+        read: impl FnOnce(&auberean_assets::strings::StringEntry) -> T,
+    ) -> Option<T> {
         let local = self.local.as_ref()?;
         let mut cache = self.strings.borrow_mut();
         let t = cache.entry(table).or_insert_with(|| {
@@ -121,21 +136,42 @@ impl<'a> DatInstall<'a> {
         t.as_ref()?
             .entries
             .iter()
-            .find(|e| e.token == string)
-            .and_then(|e| e.strings.iter().flatten().next().cloned())
+            .find(|e| e.token == token)
+            .map(read)
+    }
+
+    /// Whether the language file writes a string reference as the client does: its table holds the
+    /// token and, where the token's entry sends it on to a table of its own, that table holds the
+    /// token too. `None` when there is no language file to tell.
+    fn writes(&self, string: u32, table: u32) -> Option<bool> {
+        self.local.as_ref()?;
+        Some(match self.entry(table, string, |e| e.table) {
+            None => false,
+            Some(0) => true,
+            Some(own) => self.entry(own, string, |_| ()).is_some(),
+        })
+    }
+
+    fn quest_names(&self) -> &HashMap<String, u32> {
+        self.quest_names.get_or_init(|| {
+            self.decode::<EnumMap>(QUEST_NAMES)
+                .map_or_else(HashMap::new, |m| {
+                    m.names.into_iter().map(|(v, n)| (n, v)).collect()
+                })
+        })
     }
 
     /// A quest's id by its name in the install's enumeration.
     fn quest_named(&self, name: &str) -> Option<u32> {
-        self.quest_names
-            .get_or_init(|| {
-                self.decode::<EnumMap>(QUEST_NAMES)
-                    .map_or_else(HashMap::new, |m| {
-                        m.names.into_iter().map(|(v, n)| (n, v)).collect()
-                    })
-            })
-            .get(name)
-            .copied()
+        self.quest_names().get(name).copied()
+    }
+
+    /// A quest's name in the install's enumeration.
+    fn name_of_quest(&self, id: u32) -> Option<&str> {
+        self.quest_names()
+            .iter()
+            .find(|(_, v)| **v == id)
+            .map(|(n, _)| n.as_str())
     }
 
     fn quest_states(&self) -> &HashMap<u32, u32> {
@@ -154,6 +190,39 @@ impl<'a> DatInstall<'a> {
             out
         })
     }
+}
+
+/// A quest's name in the install's enumeration as words: the leading `Quest` and underscores
+/// left out, and a word begun at each capital after a small letter or a digit, at the last capital
+/// of a run of them before a small letter, and where a number begins or ends
+/// (`Quest_MarshTerrorMustBeStopped`: "Marsh Terror Must Be Stopped", `QuestTOMortal`: "TO
+/// Mortal", `Quest_DeadlyDummy60`: "Deadly Dummy 60"). `None` for a name with nothing after it.
+#[must_use]
+pub fn spoken_name(name: &str) -> Option<String> {
+    let rest: Vec<char> = name.strip_prefix("Quest").unwrap_or(name).chars().collect();
+    let mut out = String::new();
+    for (i, &c) in rest.iter().enumerate() {
+        if c == '_' {
+            if !out.is_empty() && !out.ends_with(' ') {
+                out.push(' ');
+            }
+            continue;
+        }
+        let before = i.checked_sub(1).map(|j| rest[j]);
+        let after = rest.get(i + 1).copied();
+        let begins = before.is_some_and(|b| {
+            (c.is_uppercase() && (b.is_lowercase() || b.is_ascii_digit()))
+                || (c.is_uppercase() && b.is_uppercase() && after.is_some_and(char::is_lowercase))
+                || (c.is_ascii_digit() && b.is_alphabetic())
+                || (c.is_alphabetic() && b.is_ascii_digit())
+        });
+        if begins && !out.is_empty() && !out.ends_with(' ') {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    let out = out.trim_end().to_string();
+    (!out.is_empty()).then_some(out)
 }
 
 /// The quest a saved state defines, when it defines one: the enumeration value of a state with
@@ -316,6 +385,7 @@ impl Install for DatInstall<'_> {
             }
         }
         phases.sort_by_key(|(p, _)| *p);
+        ranges.sort_by_key(|(p, _)| *p);
         subquests.sort_by_key(|p| p.phase);
         // The effects each kind of update puts on: a list of effect records by the kind.
         let mut effects = Vec::new();
@@ -328,28 +398,43 @@ impl Install for DatInstall<'_> {
                 continue;
             };
             for r in nav.items(list).unwrap_or_default() {
-                let Some(state) = r
-                    .reference()
-                    .and_then(|r| nav.object(r))
-                    .and_then(|rec| nav.field(rec, "m_effect"))
-                    .and_then(|e| nav.state_of(e))
-                else {
+                let Some(rec) = r.reference().and_then(|r| nav.object(r)) else {
                     continue;
                 };
-                effects.push((kind, state));
+                let Some(state) = nav.field(rec, "m_effect").and_then(|e| nav.state_of(e)) else {
+                    continue;
+                };
+                // The spellcraft the record puts its effect on at (what a craft experience
+                // reward pays grows with it).
+                let spellcraft = nav.field(rec, "m_fSpellcraft").map_or(1.0, f32::from_bits);
+                effects.push((kind, state, spellcraft));
             }
         }
-        effects.sort_by_key(|(k, _)| *k);
-        // A last phase of one kill's range ends the quest as it is moved on; one of any other range
-        // waits for a use to end it (its journal says so: "Return to ...", "Report ...").
-        let last_waits = ranges
-            .iter()
-            .max_by_key(|(p, _)| *p)
-            .is_some_and(|(_, r)| *r != 1);
+        effects.sort_by_key(|(k, _, _)| *k);
+        // Each phase's range: a kill moves a phase of the range its death names alone (Rat-Smasher's
+        // Tanglefoot Vermin the ten phases of range 1, its Dank Vermin the ten of range 2), and a
+        // phase of a range no kill names waits for something else (its journal says so: "Return to
+        // ...", "Report ...", "Return the Tiny Wooden Talisman"). Kept only where some phase's
+        // isn't 1.
+        let ranges: Vec<u32> = if ranges.iter().all(|(_, r)| *r == 1) {
+            Vec::new()
+        } else {
+            ranges.into_iter().map(|(_, r)| r).collect()
+        };
         let setup = setup_of(self.lib, root.package_id());
+        // A name the language file can't write (its text was never shipped with the install) is
+        // said as the quest's own name in the enumeration, in words.
+        let (string, table) = text("m_siLongName")?;
+        let name = match self.writes(string, table) {
+            Some(false) => self
+                .name_of_quest(id)
+                .and_then(spoken_name)
+                .map_or(Words::Ref(string, table), Words::Literal),
+            _ => Words::Ref(string, table),
+        };
         Some(QuestDefinition {
             state,
-            name: text("m_siLongName")?,
+            name,
             description: text("m_siDescription")?,
             icon: nav.field(root, "m_didIcon")?,
             play_fx: nav.field(root, "m_bPlayFXOnUpdate").unwrap_or(0) != 0,
@@ -358,10 +443,11 @@ impl Install for DatInstall<'_> {
             subquests,
             once: setup.once,
             fellows: setup.fellows,
-            last_waits,
+            ranges,
             min_level: setup.min_level,
             hero_only: setup.hero_only,
             monarch_only: setup.monarch_only,
+            fails: setup.fails,
             xp: setup.xp,
             pay: setup.pay,
             // The status to be in; one naming no status is to be completed, as an item's is.
@@ -383,6 +469,14 @@ impl Install for DatInstall<'_> {
             _ => String::new(),
         }
     }
+
+    fn variables(&self, string: u32, table: u32) -> Option<Vec<u32>> {
+        self.local.as_ref()?;
+        Some(
+            self.entry(table, string, |e| e.variables.clone())
+                .unwrap_or_default(),
+        )
+    }
 }
 
 /// The calls a quest's setup makes to say how many times it may be done, and how a kill's move on
@@ -399,6 +493,12 @@ const SET_HERO_ONLY: u32 = 0x01A7_009A;
 const SET_REQUIRED_NAMED: u32 = 0x01A7_0091;
 const SET_REQUIRED_STATUS: u32 = 0x01A7_001B;
 const SET_MONARCH_ONLY: u32 = 0x01A7_0057;
+
+/// The calls a quest's setup makes to say what fails it: its player's death, its leaving the world,
+/// its being taken through portal space.
+const SET_FAILS_ON_DEATH: u32 = 0x01A7_0011;
+const SET_FAILS_ON_LOGOUT: u32 = 0x01A7_004A;
+const SET_FAILS_ON_TELEPORT: u32 = 0x01A7_0068;
 
 /// The calls a quest's setup makes to say what its completion pays: an amount, or a share of what
 /// the player's level takes to reach the next, with what limits that, and whether the amount is
@@ -427,6 +527,9 @@ struct Setup {
     hero_only: bool,
     /// For the monarch of an allegiance alone.
     monarch_only: bool,
+    /// What fails it: its player's death, its leaving the world, its being taken through portal
+    /// space; a setup that says nothing of one is not failed by it.
+    fails: FailsOn,
     /// What its completion pays: an amount, or how a share works out.
     xp: u64,
     pay: yalain_content::quests::CompletionPay,
@@ -514,6 +617,9 @@ fn read_setup(lib: &Library, start: usize, end: usize) -> Setup {
                         out.required_status = literal.and_then(|v| u32::try_from(v).ok());
                     }
                     SET_MONARCH_ONLY => out.monarch_only = literal == Some(1),
+                    SET_FAILS_ON_DEATH => out.fails.death = literal == Some(1),
+                    SET_FAILS_ON_LOGOUT => out.fails.logout = literal == Some(1),
+                    SET_FAILS_ON_TELEPORT => out.fails.teleport = literal == Some(1),
                     SET_XP => out.xp = amount(literal),
                     SET_XP_SHARE => out.pay.share = float.unwrap_or(0.0),
                     SET_XP_LEAST => out.pay.least = amount(literal),
@@ -551,8 +657,8 @@ fn read_setup(lib: &Library, start: usize, end: usize) -> Setup {
 /// says: a weapon's damage, variance, vigor and speed; its value; a garment's and a shield's armor
 /// and delay; its least level and race; the quest and its status that taking it asks; how long a
 /// creature's corpse lasts; whether it is bound to whoever holds it; the key it carries; whether
-/// its use destroys it.
-const CLASS_SETTERS: [(u32, &str); 19] = [
+/// its use destroys it; the generator profile a chest's contents come from.
+const CLASS_SETTERS: [(u32, &str); 20] = [
     (0x019E_000D, "Weapon_Damage"),
     (0x019E_000E, "Weapon_Variance"),
     (0x019E_001E, "Weapon_VigorCost"),
@@ -572,6 +678,7 @@ const CLASS_SETTERS: [(u32, &str); 19] = [
     (0x0172_005D, ATTUNABLE),
     (0x0172_008A, KEY_ID),
     (0x0172_0035, DESTROYED_ON_USE),
+    (0x0137_0013, "GeneratorProfile"),
 ];
 
 /// The key a key's or a glyph's class gives it.

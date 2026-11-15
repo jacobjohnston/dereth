@@ -26,6 +26,7 @@ pub mod play;
 pub mod session;
 #[cfg(feature = "retail-dats")]
 pub mod treasure_drops;
+mod worn_rows;
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
@@ -37,6 +38,7 @@ use yalain_world::start::StartArea;
 use yalain_world::{CharGenRules, Clock, Server, ServerConfig, StartRules};
 
 pub use bot::{Bot, Received};
+pub use worn_rows::{test_worn_looks, TEST_WORN};
 
 /// The virtual clock's step.
 pub const STEP: f64 = 0.05;
@@ -910,6 +912,7 @@ pub fn test_effects() -> yalain_world::effect_defs::EffectTable {
         external_flags: 0,
         internal_flags: REMOVED_ON_DEATH,
         ends_at_logout: false,
+        ends_at_teleport: false,
         enum_value: 0,
         eq_class: 0,
         name: None,
@@ -1165,6 +1168,11 @@ pub fn test_effects() -> yalain_world::effect_defs::EffectTable {
     for d in creature_effects() {
         t.effects.insert(d.state, d);
     }
+    // Of their names' tables only the mines' recipe's holds its application's line.
+    t.lines.insert(
+        GRANT_MINES_RECIPE,
+        (yalain_world::effects::learned::LINE, 0x2500_1070),
+    );
     t
 }
 
@@ -1214,6 +1222,7 @@ pub fn creature_effects() -> Vec<yalain_world::effect_defs::EffectDef> {
         external_flags: 0,
         internal_flags: 0x340_0713,
         ends_at_logout: false,
+        ends_at_teleport: false,
         enum_value,
         eq_class,
         name: None,
@@ -1459,6 +1468,7 @@ pub fn plain_effect(state: u32) -> yalain_world::effect_defs::EffectDef {
         external_flags: 0,
         internal_flags: 0,
         ends_at_logout: false,
+        ends_at_teleport: false,
         enum_value: 0,
         eq_class: 0,
         name: None,
@@ -1977,15 +1987,35 @@ pub struct Harness<S: Store = MemoryStore> {
 }
 
 impl Harness<MemoryStore> {
-    /// A server with an in-memory store, the default settings and the test bodies.
+    /// A server with an in-memory store, the default settings and the test bodies. Its dice are
+    /// the default seed's, or `YALAIN_TEST_SEED`'s when that is set (hex with `0x`, or decimal;
+    /// `_` allowed), so a run under another seed shows a test that passes only on a lucky draw.
+    ///
+    /// # Panics
+    ///
+    /// When `YALAIN_TEST_SEED` is set to something that is not a number.
     #[must_use]
     pub fn new() -> Self {
-        Self::with(
-            ServerConfig::default(),
-            MemoryStore::default(),
-            test_rules(),
-        )
+        let mut cfg = ServerConfig::default();
+        if let Some(seed) = test_seed() {
+            cfg.seed = seed;
+        }
+        Self::with(cfg, MemoryStore::default(), test_rules())
     }
+}
+
+/// The seed `YALAIN_TEST_SEED` names, if it is set.
+fn test_seed() -> Option<u64> {
+    let raw = std::env::var("YALAIN_TEST_SEED").ok()?;
+    let digits = raw.trim().replace('_', "");
+    let seed = match digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
+        Some(hex) => u64::from_str_radix(hex, 16),
+        None => digits.parse(),
+    };
+    Some(seed.unwrap_or_else(|_| panic!("YALAIN_TEST_SEED is not a number: {raw:?}")))
 }
 
 impl Default for Harness<MemoryStore> {
@@ -2136,15 +2166,50 @@ pub fn test_item_rows() -> yalain_content::item_rows::ItemRows {
         .into_iter()
         .collect(),
         start_items: [(0x4700_06CD, 1)].into_iter().collect(),
+        ..ItemRows::default()
     }
 }
 
-/// The test world's creature rows, as the world's rows give them: the 27 concealing rows (23
+/// The effect the patrolling guards of the turrets' base put on a player they see, and the turrets
+/// that take on only its holders, of the class it makes hate its holder.
+pub const MARK: u32 = 0x6F00_1F31;
+pub const MARKED_ONLY: u32 = 0x4700_2C40;
+pub const MARK_HATED_BY: u32 = 0x75;
+
+/// The guards that mark the players they see, and the lines they say as they do, by race: of a
+/// human, a Lugian, a Tumerok, a Drudge and an Empyrean.
+pub const MARKERS: [u32; 14] = [
+    0x4700_278F,
+    0x4700_2791,
+    0x4700_2792,
+    0x4700_2794,
+    0x4700_2795,
+    0x4700_2796,
+    0x4700_2797,
+    0x4700_2798,
+    0x4700_2799,
+    0x4700_279A,
+    0x4700_279B,
+    0x4700_279C,
+    0x4700_279D,
+    0x4700_279E,
+];
+pub const MARK_LINES: [(u32, u32); 5] = [
+    (1, 0xC9EA_911E),
+    (2, 0x4DE5_0D1C),
+    (4, 0xCBF7_8EB2),
+    (8, 0xCB63_9BF8),
+    (16, 0xF5F6_899E),
+];
+pub const MARK_TABLE: u32 = 0x2500_261D;
+
+/// The test world's creature rows, as the world's rows give them: the 28 concealing rows (24
 /// effects, four of them for two classes each), the five healers' behavior tables, the five friend
-/// tables that never attack a player first, and the start area's six shooters' rhythms.
+/// tables that never attack a player first, the start area's six shooters' rhythms, the 14 guards
+/// that mark the players they see and the one turret that takes on only those marked.
 #[must_use]
 pub fn test_creature_rows() -> yalain_content::creature_rows::CreatureRows {
-    use yalain_content::creature_rows::{CreatureRows, Regard, Rhythm};
+    use yalain_content::creature_rows::{CreatureRows, Mark, Regard, Rhythm};
     const SPARES: [(u32, Option<u32>); 12] = [
         (0x6F00_1C46, Some(0x17)),
         (0x6F00_1D4A, Some(0x1D)),
@@ -2159,7 +2224,7 @@ pub fn test_creature_rows() -> yalain_content::creature_rows::CreatureRows {
         (0x6F00_204B, Some(0x45)),
         (0x6F00_204B, Some(0x44)),
     ];
-    const HATES: [(u32, Option<u32>); 15] = [
+    const HATES: [(u32, Option<u32>); 16] = [
         (0x6F00_1D4C, Some(0x16)),
         (0x7000_0703, Some(0x16)),
         (0x6F00_1EE8, Some(0x0E)),
@@ -2175,6 +2240,7 @@ pub fn test_creature_rows() -> yalain_content::creature_rows::CreatureRows {
         (0x6F00_1C77, Some(0x43)),
         (0x6F00_1C78, Some(0x45)),
         (0x6F00_1C78, Some(0x44)),
+        (MARK, Some(MARK_HATED_BY)),
     ];
     let rhythm = |gap, windup| Rhythm { gap, windup };
     let concealing = SPARES
@@ -2208,6 +2274,27 @@ pub fn test_creature_rows() -> yalain_content::creature_rows::CreatureRows {
         ]
         .into_iter()
         .collect(),
+        marks: MARKERS
+            .into_iter()
+            .map(|t| {
+                let lines = MARK_LINES
+                    .iter()
+                    .map(|(race, string)| (Some(*race), (*string, MARK_TABLE)))
+                    .collect();
+                (
+                    t,
+                    Mark {
+                        effect: MARK,
+                        lines,
+                    },
+                )
+            })
+            .collect(),
+        only_hated: [MARKED_ONLY].into_iter().collect(),
+        fights: std::collections::BTreeMap::new(),
+        kept_out: std::collections::BTreeMap::new(),
+        safe_passage: Vec::new(),
+        effects: Vec::new(),
     }
 }
 
@@ -2410,6 +2497,7 @@ pub fn test_crafts() -> yalain_content::crafts::Crafts {
                 recipe: recipe.to_string(),
                 product,
                 full_at: Some(150),
+                start: None,
             },
         )
     };
@@ -2468,6 +2556,8 @@ pub fn test_crafts() -> yalain_content::crafts::Crafts {
             refine("PlasterRefiningRecipe", 0x4700_0656),
         ]
         .into(),
+        recipes: std::collections::BTreeMap::new(),
+        combinations: Vec::new(),
     }
 }
 
@@ -2619,9 +2709,27 @@ pub fn test_wards() -> std::collections::BTreeMap<u32, yalain_world::effect_defs
     ])
 }
 
+/// The crowd control immunities the test world's rows would name: each the short effect a use
+/// puts on along with it, the long one its end leaves, and the classes the long one keeps off for
+/// certain.
+pub const TEST_IMMUNITIES: [(u32, u32, &[u32]); 12] = [
+    (0x7000_0718, 0x7000_0719, &[52, 5015, 98]),
+    (0x7000_071A, 0x7000_071B, &[51, 5017, 99]),
+    (0x7000_071C, 0x7000_071D, &[77, 101]),
+    (0x7000_071E, 0x7000_071F, &[52, 5015, 51, 5017, 97]),
+    (0x7000_0720, 0x7000_0721, &[55, 100]),
+    (0x7000_1EDF, 0x7000_1EE0, &[1124]),
+    (0x6F00_2103, 0x6F00_2104, &[52, 5015, 98]),
+    (0x6F00_2105, 0x6F00_2106, &[51, 5017, 99]),
+    (0x6F00_2107, 0x6F00_2108, &[1124]),
+    (0x6F00_2109, 0x6F00_210A, &[77, 101]),
+    (0x6F00_210B, 0x6F00_210C, &[52, 5015, 51, 5017, 97]),
+    (0x6F00_210D, 0x6F00_210E, &[55, 100]),
+];
+
 /// The effect rules the test world's rows would name: its wards ([`test_wards`]), Aun Aulatah's
-/// tap of a tenth of vitae, the Crystalabra's two points given back to its user and fellows, and the server's own twelve crowd control immunities with their long
-/// effects' wards.
+/// tap of a tenth of vitae, the Crystalabra's two points given back to its user and fellows, and
+/// the twelve crowd control immunities ([`TEST_IMMUNITIES`]) with their long effects' wards.
 #[must_use]
 pub fn test_effect_rules() -> yalain_world::effect_defs::EffectRules {
     let mut rules = yalain_world::effect_defs::EffectRules {
@@ -2635,8 +2743,25 @@ pub fn test_effect_rules() -> yalain_world::effect_defs::EffectRules {
             },
         )]),
         immunities: std::collections::BTreeMap::new(),
+        resets: std::collections::BTreeMap::new(),
+        untrains: std::collections::BTreeSet::new(),
+        skills: std::collections::BTreeMap::new(),
+        grants: std::collections::BTreeMap::new(),
+        places: std::collections::BTreeMap::new(),
+        places_named: std::collections::BTreeMap::new(),
+        dispels: std::collections::BTreeMap::new(),
     };
-    yalain_world::effect_defs::immunities_or_2017(&mut rules);
+    for (short, long, classes) in TEST_IMMUNITIES {
+        rules.immunities.insert(short, long);
+        rules
+            .wards
+            .entry(long)
+            .or_insert_with(|| yalain_world::effect_defs::Ward {
+                classes: classes.to_vec(),
+                effects: Vec::new(),
+                chance: 1.0,
+            });
+    }
     rules
 }
 
@@ -2813,8 +2938,8 @@ impl<S: Store> Harness<S> {
 }
 
 /// Every test of the world holds this at its end: each client took every object's visual messages
-/// in turn, none waiting for a stamp that never came, and none carrying a visual stamp outside the
-/// visual kind.
+/// in turn, none waiting for a stamp that never came, none carrying a visual stamp outside the
+/// visual kind, and no object made at a stamp before one already sent about it.
 impl<S: Store> Drop for Harness<S> {
     fn drop(&mut self) {
         if std::thread::panicking() {
@@ -2826,9 +2951,10 @@ impl<S: Store> Drop for Harness<S> {
                 order.see(r.blob_id, &r.bytes);
             }
             assert_eq!(
-                (order.held(), order.misrouted()),
-                (Vec::new(), Vec::new()),
-                "client {b}: the visual messages it holds, and those sent outside the visual kind"
+                (order.held(), order.misrouted(), order.behind()),
+                (Vec::new(), Vec::new(), Vec::new()),
+                "client {b}: the visual messages it holds, those sent outside the visual kind, and the \
+                 makings sent behind a stamp already sent"
             );
         }
     }

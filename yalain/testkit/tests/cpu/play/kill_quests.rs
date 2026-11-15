@@ -30,7 +30,7 @@ fn string_arg(s: &str) -> Arg {
 pub(super) fn quest(phases: u32) -> QuestDef {
     QuestDef {
         id: QUEST,
-        name: (0xA860_7CEC, 0x2500_17EE),
+        name: yalain_content::Words::Ref(0xA860_7CEC, 0x2500_17EE),
         description: (0x6C45_9364, 0x2500_17EE),
         icon: 0x4100_034B,
         play_fx: true,
@@ -47,9 +47,11 @@ pub(super) fn quest(phases: u32) -> QuestDef {
         subquests: Vec::new(),
         min_level: 0,
         fails_on_death: false,
+        fails_on_logout: false,
+        fails_on_teleport: false,
         once: false,
         fellows: Fellows::default(),
-        last_waits: false,
+        ranges: Vec::new(),
         hero_only: false,
         pay: yalain_content::quests::CompletionPay::default(),
         required: None,
@@ -70,6 +72,12 @@ fn world(q: QuestDef) -> (Harness, usize, u64) {
 
 /// A new beetle naming these effects, hurt to death by this character.
 fn kill(h: &mut Harness, by: u64, effects: &[&str]) -> u32 {
+    let at_one: Vec<(&str, u32)> = effects.iter().map(|e| (*e, 1)).collect();
+    kill_naming(h, by, &at_one)
+}
+
+/// A new beetle naming these effects, each with its stat, hurt to death by this character.
+fn kill_naming(h: &mut Harness, by: u64, effects: &[(&str, u32)]) -> u32 {
     h.add_creatures(1);
     h.run(2);
     let dead = h.server.things.by_id.keys().copied().max();
@@ -93,7 +101,10 @@ fn kill(h: &mut Harness, by: u64, effects: &[&str]) -> u32 {
     let template = t.template;
     let c = t.creature.as_mut().expect("a creature");
     c.stats.attacks_first = false;
-    c.stats.death_effects = effects.iter().map(ToString::to_string).collect();
+    c.stats.death_effects = effects
+        .iter()
+        .map(|(e, n)| ((*e).to_string(), *n))
+        .collect();
     let clock = h.clock();
     combat::hurt_creature(&mut h.server, &mut h.net, beetle, by, 50, clock);
     h.run(2);
@@ -256,7 +267,7 @@ fn a_kill_moves_on_no_quest_its_killer_does_not_have_under_way() {
 #[test]
 fn a_last_phase_that_waits_for_something_else_is_not_ended_by_a_kill() {
     let (mut h, b, me) = world(QuestDef {
-        last_waits: true,
+        ranges: vec![1, 1, 2],
         hero_only: false,
         pay: yalain_content::quests::CompletionPay::default(),
         required: None,
@@ -267,6 +278,64 @@ fn a_last_phase_that_waits_for_something_else_is_not_ended_by_a_kill() {
     kill(&mut h, me, &[INCREMENT]);
     kill(&mut h, me, &[INCREMENT]);
     assert_eq!(phase(&h, me), 3);
+    assert_eq!(updates(&h, b, from), vec![(0, update::ADVANCE | 3)]);
+}
+
+/// **A kill moves only a phase of the range its death names, and ends the quest from that range's
+/// last phase**: of a quest of two kills of one kind then two of another (ranges 1, 1, 2, 2), a kill
+/// naming the second range moves nothing during the first two phases, one naming the first nothing
+/// during the last two, and the second range's last kill completes it.
+/// Behaviour: server.quests.a-kill-moves-only-its-ranges-phases
+#[test]
+fn a_kill_moves_only_the_phases_of_the_range_its_death_names() {
+    let (mut h, b, me) = world(QuestDef {
+        ranges: vec![1, 1, 2, 2],
+        ..quest(4)
+    });
+    let (first, second) = ([(INCREMENT, 1)], [(INCREMENT, 2)]);
+    holds(&mut h, me, status::UNDERWAY, 1);
+    let from = h.bots[b].inbox.len();
+    kill_naming(&mut h, me, &second);
+    assert_eq!(phase(&h, me), 1, "the second range's kill waits its turn");
+    kill_naming(&mut h, me, &first);
+    kill_naming(&mut h, me, &first);
+    assert_eq!(phase(&h, me), 3);
+    kill_naming(&mut h, me, &first);
+    assert_eq!(phase(&h, me), 3, "the first range is done");
+    kill_naming(&mut h, me, &second);
+    assert_eq!(phase(&h, me), 4);
+    kill_naming(&mut h, me, &second);
+    assert_eq!(state(&h, me).map(|s| s.0), Some(status::COMPLETED));
+    assert_eq!(
+        updates(&h, b, from),
+        vec![
+            (0, update::ADVANCE | 2),
+            (0, update::ADVANCE | 3),
+            (0, update::ADVANCE | 4),
+            (0, update::COMPLETE)
+        ]
+    );
+}
+
+/// **A phase of a range no kill names waits for something else**: a quest that sends its player to
+/// someone, then counts kills, then sends it back (ranges 0, 1, 0) moves on a kill at the kills'
+/// phase alone.
+/// Behaviour: server.quests.a-kill-moves-only-its-ranges-phases
+#[test]
+fn a_kill_moves_no_phase_that_waits_for_a_give_or_a_return() {
+    let (mut h, b, me) = world(QuestDef {
+        ranges: vec![0, 1, 0],
+        ..quest(3)
+    });
+    holds(&mut h, me, status::UNDERWAY, 1);
+    let from = h.bots[b].inbox.len();
+    kill(&mut h, me, &[INCREMENT]);
+    assert_eq!(phase(&h, me), 1, "the first errand is not a kill's");
+    holds(&mut h, me, status::UNDERWAY, 2);
+    kill(&mut h, me, &[INCREMENT]);
+    kill(&mut h, me, &[INCREMENT]);
+    assert_eq!(phase(&h, me), 3, "the return is not a kill's");
+    assert_eq!(state(&h, me).map(|s| s.0), Some(status::UNDERWAY));
     assert_eq!(updates(&h, b, from), vec![(0, update::ADVANCE | 3)]);
 }
 
@@ -466,6 +535,7 @@ fn a_kills_step_runs_first_and_its_quest_is_not_moved_again_by_the_effect() {
     let template = kill(&mut h, me, &[]);
     assert_eq!(phase(&h, me), 1);
     h.server.quests.steps.push(Step {
+        key: String::new(),
         quest: QUEST,
         needs: 1,
         trigger: Trigger::Kill(template),
@@ -476,17 +546,21 @@ fn a_kills_step_runs_first_and_its_quest_is_not_moved_again_by_the_effect() {
         counts: Vec::new(),
         effects: Vec::new(),
         text: None,
+        recipes: Vec::new(),
         placed: "authored for a test".into(),
         requires: Vec::new(),
         takes: Vec::new(),
         races: Vec::new(),
         effects_last: false,
+        effects_quiet: false,
         wants: None,
         fellows: false,
         levels: None,
         xp_share: 0.0,
         to: None,
         transforms: None,
+        chance: None,
+        to_fellows: false,
     });
     let from = h.bots[b].inbox.len();
     kill(&mut h, me, &[INCREMENT]);
@@ -599,6 +673,7 @@ fn a_kill_or_a_step_gives_a_quest_only_with_the_quest_it_requires_at_its_status(
 /// A step that gives the quest.
 fn giving_step() -> Step {
     Step {
+        key: String::new(),
         quest: QUEST,
         needs: 0,
         trigger: Trigger::Use(0x4700_0001),
@@ -609,17 +684,21 @@ fn giving_step() -> Step {
         counts: Vec::new(),
         effects: Vec::new(),
         text: None,
+        recipes: Vec::new(),
         placed: "authored for a test".into(),
         requires: Vec::new(),
         takes: Vec::new(),
         races: Vec::new(),
         effects_last: false,
+        effects_quiet: false,
         wants: None,
         fellows: false,
         levels: None,
         xp_share: 0.0,
         to: None,
         transforms: None,
+        chance: None,
+        to_fellows: false,
     }
 }
 
@@ -704,6 +783,7 @@ fn an_item_acquired_moves_the_quest_its_template_names() {
     assert_eq!(updates(&h, b, from), vec![(0, update::ADVANCE | 3)]);
     holds(&mut h, me, status::UNDERWAY, 1);
     h.server.quests.steps.push(Step {
+        key: String::new(),
         quest: QUEST,
         needs: 1,
         trigger: Trigger::Take(ITEM),
@@ -714,17 +794,21 @@ fn an_item_acquired_moves_the_quest_its_template_names() {
         counts: Vec::new(),
         effects: Vec::new(),
         text: None,
+        recipes: Vec::new(),
         placed: "authored for a test".into(),
         requires: Vec::new(),
         takes: Vec::new(),
         races: Vec::new(),
         effects_last: false,
+        effects_quiet: false,
         wants: None,
         fellows: false,
         levels: None,
         xp_share: 0.0,
         to: None,
         transforms: None,
+        chance: None,
+        to_fellows: false,
     });
     let from = h.bots[b].inbox.len();
     take(&mut h);
@@ -738,6 +822,7 @@ fn an_item_acquired_moves_the_quest_its_template_names() {
         ..quest(5)
     });
     h.server.quests.steps.push(Step {
+        key: String::new(),
         quest: OTHER,
         needs: 0,
         trigger: Trigger::Use(PERSON),
@@ -748,17 +833,21 @@ fn an_item_acquired_moves_the_quest_its_template_names() {
         counts: Vec::new(),
         effects: Vec::new(),
         text: None,
+        recipes: Vec::new(),
         placed: "authored for a test".into(),
         requires: Vec::new(),
         takes: Vec::new(),
         races: Vec::new(),
         effects_last: false,
+        effects_quiet: false,
         wants: None,
         fellows: false,
         levels: None,
         xp_share: 0.0,
         to: None,
         transforms: None,
+        chance: None,
+        to_fellows: false,
     });
     h.server.quests.steps.retain(|st| st.quest != QUEST);
     holds(&mut h, me, status::UNDERWAY, 2);
@@ -775,6 +864,129 @@ fn an_item_acquired_moves_the_quest_its_template_names() {
     assert_eq!(phase(&h, me), 3, "by what the person gave");
 }
 
+/// A step of the test quest for a taking of this item, moving the taker's fellows too.
+fn fellows_take_step(item: u32, needs: u32) -> Step {
+    Step {
+        trigger: Trigger::Take(item),
+        to: None,
+        fellows: true,
+        ..leading_step(0, needs, ARENA)
+    }
+}
+
+/// **An item acquired moves the taker's fellows' quest as a kill does**: a quest that shares
+/// reaches them, those it limits only near by; a fellow is moved as the taker is and told nothing
+/// it was refused; a quest that does not share stays the taker's. A step on the taking that moved
+/// the fellows leaves them where it put them, an increment too.
+/// Behaviour: server.quests.an-item-acquired-reaches-fellows-as-its-quest-says
+#[test]
+fn an_item_acquired_moves_a_fellows_quest_only_as_the_quest_says() {
+    const ITEM: u32 = 0x4700_FFF1;
+    const GIVING: u32 = 0x4700_FFF3;
+    const COUNTED: u32 = 0x4700_FFF4;
+    let (mut h, a, me) = world(QuestDef {
+        fellows: Fellows {
+            shared: true,
+            near_level: false,
+            near_by: true,
+        },
+        ..quest(5)
+    });
+    for (item, effect) in [
+        (ITEM, "Eff_AdvanceQuestHuntPhase3"),
+        (GIVING, "Eff_BestowQuestHunt"),
+        (COUNTED, INCREMENT),
+    ] {
+        let mut props = yalain_content::Props::default();
+        props.set(
+            "Item_AcquireEffect1",
+            yalain_content::Prop::Text(effect.into()),
+        );
+        h.server
+            .catalog
+            .insert(yalain_testkit::test_template(item, 0x3A1, props));
+    }
+    let (b, them) = fellows(&mut h, (a, me), 10.0);
+    let world = *h
+        .server
+        .players
+        .iter()
+        .find(|(_, p)| p.character == me)
+        .expect("in the world")
+        .0;
+    let take = |h: &mut Harness, item: u32| {
+        let clock = h.clock();
+        yalain_world::quests::took(&mut h.server, &mut h.net, world, item, clock);
+        h.run(2);
+    };
+    // Both from the phase before; a fellow told as the taker is.
+    holds(&mut h, me, status::UNDERWAY, 2);
+    holds(&mut h, them, status::UNDERWAY, 2);
+    let from = h.bots[b].inbox.len();
+    take(&mut h, ITEM);
+    assert_eq!((phase(&h, me), phase(&h, them)), (3, 3));
+    assert_eq!(updates(&h, b, from), vec![(0, update::ADVANCE | 3)]);
+    // A fellow at another phase stays there.
+    holds(&mut h, me, status::UNDERWAY, 2);
+    holds(&mut h, them, status::UNDERWAY, 1);
+    take(&mut h, ITEM);
+    assert_eq!((phase(&h, me), phase(&h, them)), (3, 1));
+    // A fellow is never told a refused giving; a free one is given it.
+    let from = h.bots[b].inbox.len();
+    take(&mut h, GIVING);
+    assert!(updates(&h, b, from).is_empty(), "nothing said");
+    let p = h
+        .server
+        .players
+        .values_mut()
+        .find(|p| p.character == them)
+        .expect("in the world");
+    p.play.quests.clear();
+    take(&mut h, GIVING);
+    assert_eq!(state(&h, them), Some((status::UNDERWAY, 1)));
+    assert_eq!(updates(&h, b, from), vec![(0, update::BESTOW)]);
+    // Too far away.
+    holds(&mut h, me, status::UNDERWAY, 2);
+    holds(&mut h, them, status::UNDERWAY, 2);
+    let p = h
+        .server
+        .players
+        .values_mut()
+        .find(|p| p.character == them)
+        .expect("in the world");
+    p.position.origin[0] += 500.0;
+    take(&mut h, ITEM);
+    assert_eq!((phase(&h, me), phase(&h, them)), (3, 2));
+    let p = h
+        .server
+        .players
+        .values_mut()
+        .find(|p| p.character == them)
+        .expect("in the world");
+    p.position.origin[0] -= 500.0;
+
+    // A step that moves the fellows too: each moved once, by the step.
+    h.server.quests.steps = vec![fellows_take_step(ITEM, 2), fellows_take_step(COUNTED, 2)];
+    for item in [ITEM, COUNTED] {
+        holds(&mut h, me, status::UNDERWAY, 2);
+        holds(&mut h, them, status::UNDERWAY, 2);
+        let from = h.bots[b].inbox.len();
+        take(&mut h, item);
+        assert_eq!((phase(&h, me), phase(&h, them)), (3, 3), "{item:#X}");
+        assert_eq!(updates(&h, b, from), vec![(0, update::ADVANCE | 3)]);
+    }
+    h.server.quests.steps.clear();
+
+    // Not shared: only the taker moves.
+    if let Some(q) = h.server.quests.quests.iter_mut().find(|q| q.id == QUEST) {
+        q.fellows = Fellows::default();
+    }
+    holds(&mut h, me, status::UNDERWAY, 2);
+    holds(&mut h, them, status::UNDERWAY, 2);
+    take(&mut h, ITEM);
+    assert_eq!((phase(&h, me), phase(&h, them)), (3, 2));
+}
+
 /// A kill's step that leads somewhere sends the killer there; one that leads nowhere doesn't.
 /// Behaviour: server.quests.kill-step-leads-on
 #[test]
@@ -789,6 +1001,7 @@ fn a_kills_step_that_leads_somewhere_sends_the_killer() {
         heading: 127,
     };
     let step = |needs: u32, to| Step {
+        key: String::new(),
         quest: QUEST,
         needs,
         trigger: Trigger::Kill(template),
@@ -799,17 +1012,21 @@ fn a_kills_step_that_leads_somewhere_sends_the_killer() {
         counts: Vec::new(),
         effects: Vec::new(),
         text: None,
+        recipes: Vec::new(),
         placed: "authored for a test".into(),
         requires: Vec::new(),
         takes: Vec::new(),
         to,
         races: Vec::new(),
         effects_last: false,
+        effects_quiet: false,
         fellows: false,
         wants: None,
         levels: None,
         xp_share: 0.0,
         transforms: None,
+        chance: None,
+        to_fellows: false,
     };
     h.server.quests.steps = vec![step(1, Some(place)), step(2, None)];
     for p in h.server.players.values_mut() {
@@ -846,6 +1063,7 @@ fn land(h: &mut Harness) {
 /// A step of the test quest for a kill of this template, leading to this place.
 pub(super) fn leading_step(template: u32, needs: u32, to: yalain_content::quests::Place) -> Step {
     Step {
+        key: String::new(),
         quest: QUEST,
         needs,
         trigger: Trigger::Kill(template),
@@ -856,17 +1074,21 @@ pub(super) fn leading_step(template: u32, needs: u32, to: yalain_content::quests
         counts: Vec::new(),
         effects: Vec::new(),
         text: None,
+        recipes: Vec::new(),
         placed: "authored for a test".into(),
         requires: Vec::new(),
         takes: Vec::new(),
         to: Some(to),
         races: Vec::new(),
         effects_last: false,
+        effects_quiet: false,
         fellows: false,
         wants: None,
         levels: None,
         xp_share: 0.0,
         transforms: None,
+        chance: None,
+        to_fellows: false,
     }
 }
 
@@ -901,6 +1123,176 @@ fn a_kills_update_comes_as_the_killer_lands() {
     let p = h.server.players.values().next().expect("in the world");
     assert_eq!(p.position.cell, ARENA.cell);
     assert!(p.trip.is_none());
+}
+
+/// A kill's step that takes the fellowship along sends the killer's fellows at the kill, a fellow
+/// half a kilometer off too; the killer's quest moves as it lands, and the fellow's, which it doesn't
+/// hold, not at all.
+/// Behaviour: server.quests.a-step-takes-the-fellowship-along
+#[test]
+fn a_kills_step_that_takes_the_fellowship_along_sends_the_killers_fellows() {
+    let mut q = quest(3);
+    q.effects = Vec::new();
+    let (mut h, a, me) = world(q);
+    let (b, you) = fellows(&mut h, (a, me), 500.0);
+    h.bots[b].send(
+        true,
+        auberean_protocol::queue::WEENIE,
+        &auberean_protocol::ClientMessage::SceneRenderingComplete(auberean_protocol::login::Empty),
+    );
+    let template = kill(&mut h, me, &[]);
+    h.server.quests.steps = vec![Step {
+        to_fellows: true,
+        ..leading_step(template, 1, ARENA)
+    }];
+    holds(&mut h, me, status::UNDERWAY, 1);
+    h.run(2);
+    kill(&mut h, me, &[]);
+    let trip = |h: &Harness, who: u64| {
+        h.server
+            .players
+            .values()
+            .find(|p| p.character == who)
+            .and_then(|p| p.trip.as_ref().map(|t| t.to.cell))
+    };
+    assert_eq!(trip(&h, me), Some(ARENA.cell), "the killer sent");
+    assert_eq!(trip(&h, you), Some(ARENA.cell), "the fellow sent with it");
+    land(&mut h);
+    let at = |h: &Harness, who: u64| {
+        h.server
+            .players
+            .values()
+            .find(|p| p.character == who)
+            .expect("in the world")
+            .position
+            .cell
+    };
+    assert_eq!((at(&h, me), at(&h, you)), (ARENA.cell, ARENA.cell));
+    assert_eq!(phase(&h, me), 2);
+    assert_eq!(state(&h, you), None, "the fellow's quests as they were");
+}
+
+/// A kill's step that takes the fellowship along to a room of a row sends each fellow to a free
+/// room of its own choosing, as the killer is, never to the room a player stands in though the row
+/// names it.
+/// Behaviour: server.quests.a-step-takes-the-fellowship-along
+#[test]
+fn a_fellowship_taken_along_to_a_row_of_rooms_is_sent_to_free_rooms() {
+    use yalain_content::quests::{Place, Room};
+    let mut q = quest(3);
+    q.effects = Vec::new();
+    let (mut h, a, me) = world(q);
+    let (b, you) = fellows(&mut h, (a, me), 2.0);
+    h.bots[b].send(
+        true,
+        auberean_protocol::queue::WEENIE,
+        &auberean_protocol::ClientMessage::SceneRenderingComplete(auberean_protocol::login::Empty),
+    );
+    let (_, other) = h.player_in_world("three", "Bran");
+    let template = kill(&mut h, me, &[]);
+    let room = |i: u32| Room {
+        place: Place {
+            cell: 0x049E_0138 + i,
+            #[allow(clippy::cast_precision_loss)]
+            origin: [-120.4 + 60.0 * i as f32, -84.7, 3.06],
+            heading: 127,
+        },
+        holds: 0x049E_0160 + i,
+    };
+    h.server.quests.rooms = vec![vec![room(0), room(1), room(2)]];
+    h.server.quests.steps = vec![Step {
+        to_fellows: true,
+        update: Update::Advance(1),
+        ..leading_step(template, 1, room(1).place)
+    }];
+    let p = h
+        .server
+        .players
+        .values_mut()
+        .find(|p| p.character == other)
+        .expect("in the world");
+    p.position.cell = room(1).place.cell;
+    p.position.origin = [
+        room(1).place.origin[0],
+        room(1).place.origin[1] - 40.0,
+        3.06,
+    ];
+    holds(&mut h, me, status::UNDERWAY, 1);
+    h.run(2);
+    for _ in 0..20 {
+        kill(&mut h, me, &[]);
+        for who in [me, you] {
+            let p = h
+                .server
+                .players
+                .values_mut()
+                .find(|p| p.character == who)
+                .expect("in the world");
+            let to = p.trip.take().expect("sent").to.cell;
+            // Back as though it had landed and drawn its scene.
+            p.scene_drawn = true;
+            assert!(
+                to == room(0).place.cell || to == room(2).place.cell,
+                "a free room, not the one a player stands in: {to:08X}"
+            );
+        }
+        holds(&mut h, me, status::UNDERWAY, 1);
+    }
+}
+
+/// A fellowship taken along to a row of rooms in one moment is split over the row: a fellow is
+/// never sent to the room the killer is already on its way to.
+/// Behaviour: server.quests.a-step-takes-the-fellowship-along
+#[test]
+fn a_fellowship_taken_along_to_a_row_of_rooms_never_shares_a_room() {
+    use yalain_content::quests::{Place, Room};
+    let mut q = quest(3);
+    q.effects = Vec::new();
+    let (mut h, a, me) = world(q);
+    let (b, you) = fellows(&mut h, (a, me), 2.0);
+    h.bots[b].send(
+        true,
+        auberean_protocol::queue::WEENIE,
+        &auberean_protocol::ClientMessage::SceneRenderingComplete(auberean_protocol::login::Empty),
+    );
+    let template = kill(&mut h, me, &[]);
+    let room = |i: u32| Room {
+        place: Place {
+            cell: 0x049E_0138 + i,
+            #[allow(clippy::cast_precision_loss)]
+            origin: [-120.4 + 60.0 * i as f32, -84.7, 3.06],
+            heading: 127,
+        },
+        holds: 0x049E_0160 + i,
+    };
+    h.server.quests.rooms = vec![vec![room(0), room(1), room(2)]];
+    h.server.quests.steps = vec![Step {
+        to_fellows: true,
+        update: Update::Advance(1),
+        ..leading_step(template, 1, room(1).place)
+    }];
+    holds(&mut h, me, status::UNDERWAY, 1);
+    h.run(2);
+    for _ in 0..20 {
+        kill(&mut h, me, &[]);
+        let mut sent = Vec::new();
+        for who in [me, you] {
+            let p = h
+                .server
+                .players
+                .values_mut()
+                .find(|p| p.character == who)
+                .expect("in the world");
+            sent.push(p.trip.take().expect("sent").to.cell);
+            // Back as though it had landed and drawn its scene.
+            p.scene_drawn = true;
+        }
+        assert_ne!(
+            sent[0], sent[1],
+            "the killer and its fellow each to a room of its own"
+        );
+        holds(&mut h, me, status::UNDERWAY, 1);
+    }
 }
 
 /// Another kill of the kind while the first's trip is under way moves nothing: the quest moves one
@@ -1046,6 +1438,7 @@ fn a_kills_step_sends_the_killer_to_a_free_room_of_its_row() {
     };
     h.server.quests.rooms = vec![vec![room(0), room(1), room(2)]];
     h.server.quests.steps = vec![Step {
+        key: String::new(),
         quest: QUEST,
         needs: 1,
         trigger: Trigger::Kill(template),
@@ -1056,17 +1449,21 @@ fn a_kills_step_sends_the_killer_to_a_free_room_of_its_row() {
         counts: Vec::new(),
         effects: Vec::new(),
         text: None,
+        recipes: Vec::new(),
         placed: "authored for a test".into(),
         requires: Vec::new(),
         takes: Vec::new(),
         to: Some(room(1).place),
         races: Vec::new(),
         effects_last: false,
+        effects_quiet: false,
         fellows: false,
         wants: None,
         levels: None,
         xp_share: 0.0,
         transforms: None,
+        chance: None,
+        to_fellows: false,
     }];
     for p in h.server.players.values_mut() {
         p.play.quests.push(QuestState {
@@ -1157,7 +1554,8 @@ fn a_recall_on_a_kills_trip_leaves_it_and_its_step() {
         origin: [12.5, 34.5, 2.0],
         rotation: [1.0, 0.0, 0.0, 0.0],
     };
-    yalain_world::places::recall_trip(&mut h.server, &mut h.net, world, elsewhere, None);
+    let clock = h.clock();
+    yalain_world::places::recall_trip(&mut h.server, &mut h.net, world, elsewhere, None, clock);
     let p = &h.server.players[&world];
     assert_eq!(p.trip.as_ref().map(|t| t.to.cell), Some(ARENA.cell));
     assert!(
@@ -1236,6 +1634,7 @@ fn a_named_camps_creature_goes_by_its_name_and_only_its_kill_moves_the_camps_ste
         Some(template)
     );
     h.server.quests.steps.push(Step {
+        key: String::new(),
         quest: QUEST,
         needs: 1,
         trigger: Trigger::KillIn(template, 1),
@@ -1246,17 +1645,21 @@ fn a_named_camps_creature_goes_by_its_name_and_only_its_kill_moves_the_camps_ste
         counts: Vec::new(),
         effects: Vec::new(),
         text: None,
+        recipes: Vec::new(),
         placed: "authored for a test".into(),
         requires: Vec::new(),
         takes: Vec::new(),
         races: Vec::new(),
         effects_last: false,
+        effects_quiet: false,
         wants: None,
         fellows: false,
         levels: None,
         xp_share: 0.0,
         to: None,
         transforms: None,
+        chance: None,
+        to_fellows: false,
     });
     let from = h.bots[b].inbox.len();
     slay(&mut h, other, me);
@@ -1283,4 +1686,399 @@ fn a_named_camps_creature_goes_by_its_name_and_only_its_kill_moves_the_camps_ste
         corpses.contains(&yalain_world::death::corpse_name(Some(NAMED))),
         "{corpses:?}"
     );
+}
+
+/// The item a chance step gives: one the test world's catalog holds.
+const GEM: u32 = yalain_testkit::TEST_ITEM;
+
+/// A step on the beetle's kill, its quest at its first phase, that moves no quest and gives the gem,
+/// by this chance.
+fn chance_step(template: u32, chance: f32) -> Step {
+    Step {
+        key: String::new(),
+        quest: QUEST,
+        needs: 1,
+        trigger: Trigger::Kill(template),
+        tell: None,
+        update: Update::Nothing,
+        xp: 0,
+        gives: vec![GEM],
+        counts: Vec::new(),
+        effects: Vec::new(),
+        text: None,
+        recipes: Vec::new(),
+        placed: "authored for a test".into(),
+        requires: Vec::new(),
+        takes: Vec::new(),
+        races: Vec::new(),
+        effects_last: false,
+        effects_quiet: false,
+        wants: None,
+        fellows: false,
+        levels: None,
+        xp_share: 0.0,
+        to: None,
+        transforms: None,
+        chance: Some(chance),
+        to_fellows: false,
+    }
+}
+
+/// How many of the gem a character holds.
+fn gems(h: &Harness, who: u64) -> u32 {
+    h.server
+        .players
+        .values()
+        .find(|p| p.character == who)
+        .expect("in the world")
+        .play
+        .items
+        .iter()
+        .filter(|i| i.template == GEM)
+        .map(|i| i.quantity.max(1))
+        .sum()
+}
+
+/// **A step with a chance runs only when its chance comes up**: of sixty kills at its phase,
+/// each able to run it, some give the gem and some give nothing, and none moves the quest.
+/// Behaviour: server.quests.a-step-runs-by-its-chance
+#[test]
+fn a_kills_step_with_a_chance_runs_on_some_kills_and_not_on_others() {
+    let (mut h, _b, me) = world(quest(5));
+    holds(&mut h, me, status::UNDERWAY, 1);
+    let template = kill(&mut h, me, &[]);
+    assert_eq!(gems(&h, me), 0);
+    h.server.quests.steps.push(chance_step(template, 0.5));
+    for _ in 0..60 {
+        kill(&mut h, me, &[]);
+    }
+    let given = gems(&h, me);
+    assert!(
+        (15..=45).contains(&given),
+        "about half of 60 kills give the gem, not {given}"
+    );
+    assert_eq!(phase(&h, me), 1, "the step moves no quest");
+}
+
+/// **A step whose chance does not come up is passed over as though it could not run**: the
+/// kill's own effect then moves the quest the step would have kept it from moving; when it comes up
+/// (a chance of 1), the step runs and the effect moves that quest no further.
+/// Behaviour: server.quests.a-step-runs-by-its-chance
+#[test]
+fn a_step_whose_chance_does_not_come_up_leaves_the_kill_to_move_its_quest() {
+    let (mut h, _b, me) = world(quest(5));
+    holds(&mut h, me, status::UNDERWAY, 1);
+    let template = kill(&mut h, me, &[]);
+    h.server
+        .quests
+        .steps
+        .push(chance_step(template, f32::MIN_POSITIVE));
+    kill(&mut h, me, &[INCREMENT]);
+    assert_eq!(
+        gems(&h, me),
+        0,
+        "a chance that never comes up gives nothing"
+    );
+    assert_eq!(phase(&h, me), 2, "the kill's effect moves the quest");
+    holds(&mut h, me, status::UNDERWAY, 1);
+    h.server.quests.steps.pop();
+    h.server.quests.steps.push(chance_step(template, 1.0));
+    kill(&mut h, me, &[INCREMENT]);
+    assert_eq!(gems(&h, me), 1, "a chance of 1 always comes up");
+    assert_eq!(
+        phase(&h, me),
+        1,
+        "the step moved the quest, so the effect does not"
+    );
+}
+
+/// The test quest's recall: its first advance's effect, which sends its player to a named place.
+const RECALL: u32 = 0x6F00_7701;
+/// Its name's table, which holds "You recall to ..." (`RECALLED`).
+const RECALL_TABLE: u32 = 0x2500_7701;
+const RECALLED: u32 = 0x912E_FF1D;
+const SHOW_TEXT: u32 = 0x8205_0011;
+/// Places the world holds by their names, and one it lacks.
+const FAR: &str = "test_far_room";
+const NEAR: &str = "test_near_room";
+const MISSING: &str = "test_missing_room";
+const FAR_AT: yalain_content::Place = yalain_content::Place {
+    cell: 0x049D_0105,
+    origin: [10.0, 20.0, 3.0],
+    rotation: [1.0, 0.0, 0.0, 0.0],
+};
+const NEAR_AT: yalain_content::Place = yalain_content::Place {
+    cell: 0x049C_0103,
+    origin: [30.0, 40.0, 3.0],
+    rotation: [1.0, 0.0, 0.0, 0.0],
+};
+
+/// A world whose quest's first advance carries a recall to these names, said on arrival or not,
+/// and holds the far and the near places; its player holds the quest under way at its start.
+fn recall_world(names: &[&str], told: bool) -> (Harness, usize, u64) {
+    use yalain_world::effect_defs::{EffectDef, Kind as EffectKind, Recall, Scale};
+    let mut q = quest(3);
+    q.effects = vec![(update::ADVANCE | 2, RECALL, 1.0)];
+    let (mut h, b, me) = world(q);
+    h.server.effect_table.effects.insert(
+        RECALL,
+        EffectDef {
+            state: RECALL,
+            kind: EffectKind::Recall(Recall::Named {
+                names: names.iter().map(ToString::to_string).collect(),
+                told,
+            }),
+            duration: Scale::default(),
+            priority: Scale::default(),
+            fx: 0,
+            external_flags: 0,
+            internal_flags: 0,
+            enum_value: 0,
+            eq_class: 0,
+            name: Some((0xA860_7CEC, RECALL_TABLE)),
+            ends_at_logout: false,
+            ends_at_teleport: false,
+        },
+    );
+    h.server.places_by_name.insert(FAR.into(), FAR_AT);
+    h.server.places_by_name.insert(NEAR.into(), NEAR_AT);
+    holds(&mut h, me, status::UNDERWAY, 1);
+    h.run(2);
+    (h, b, me)
+}
+
+/// The player's trip under way, if any: where to.
+fn trip_cell(h: &Harness) -> Option<u32> {
+    let p = h.server.players.values().next().expect("in the world");
+    p.trip.as_ref().map(|t| t.to.cell)
+}
+
+fn cell(h: &Harness) -> u32 {
+    h.server
+        .players
+        .values()
+        .next()
+        .expect("in the world")
+        .position
+        .cell
+}
+
+/// Out of portal space, a recall's time after it went in.
+fn recall_lands(h: &mut Harness) {
+    h.advance(yalain_world::skill_use::RECALL_IN_PORTAL);
+    h.run(4);
+}
+
+/// Where the quest's update and the player's newer place come among the messages since `from`.
+fn update_and_place(h: &Harness, b: usize, from: usize, me: u64) -> (Option<usize>, Option<usize>) {
+    use auberean_protocol::ServerMessage;
+    let msgs = h.world_messages(b, from);
+    let update = msgs
+        .iter()
+        .position(|m| matches!(m, ServerMessage::PlayerCall(c) if c.function.0 == UPDATE_QUEST));
+    let place = msgs.iter().position(
+        |m| matches!(m, ServerMessage::Position(p) if p.sender.id == me && p.teleport_stamp > 0),
+    );
+    (update, place)
+}
+
+/// The texts' string ids told since `from`.
+fn texts(h: &Harness, b: usize, from: usize) -> Vec<u32> {
+    h.calls(b, from)
+        .into_iter()
+        .filter(|(f, _)| *f == SHOW_TEXT)
+        .filter_map(|(_, v)| {
+            v.iter().find_map(|x| match x.root() {
+                Some(yalain_world::calls::Node::TextInfo(t)) => Some(t.string_id),
+                _ => None,
+            })
+        })
+        .collect()
+}
+
+/// **An advance whose effects carry a recall takes its player there**: into portal space at the
+/// kill, the quest moved on at once but its update not yet told; out at the recall's place a recall's
+/// time later, told the update there, before its new place, and the recall's line where it says one.
+/// Behaviour: server.quests.an-updates-recall-takes-its-player
+#[test]
+fn an_advance_carrying_a_recall_takes_its_player_there_and_is_told_as_it_comes_out() {
+    let (mut h, b, me) = recall_world(&[FAR], true);
+    let from = h.bots[b].inbox.len();
+    kill(&mut h, me, &[INCREMENT]);
+    assert_eq!(phase(&h, me), 2, "moved at once");
+    assert_eq!(trip_cell(&h), Some(FAR_AT.cell), "on its way at the kill");
+    assert_ne!(cell(&h), FAR_AT.cell);
+    assert!(updates(&h, b, from).is_empty(), "nothing told yet");
+    recall_lands(&mut h);
+    assert_eq!(cell(&h), FAR_AT.cell, "out at the recall's place");
+    assert_eq!(trip_cell(&h), None);
+    assert_eq!(updates(&h, b, from), vec![(0, update::ADVANCE | 2)]);
+    let (told, placed) = update_and_place(&h, b, from, me);
+    assert!(told.is_some() && told < placed, "{told:?} {placed:?}");
+    assert!(texts(&h, b, from).contains(&RECALLED), "its line");
+    // Its class says nothing, and a later advance with no recall leaves the player where it is.
+    let (mut h, b, me) = recall_world(&[FAR], false);
+    let from = h.bots[b].inbox.len();
+    kill(&mut h, me, &[INCREMENT]);
+    recall_lands(&mut h);
+    assert_eq!(cell(&h), FAR_AT.cell);
+    assert!(!texts(&h, b, from).contains(&RECALLED), "no line");
+    kill(&mut h, me, &[INCREMENT]);
+    assert_eq!(phase(&h, me), 3);
+    assert_eq!(trip_cell(&h), None, "the next advance carries none");
+    // A recall among the effects another puts on at once takes the player the same.
+    const CHAIN: u32 = 0x6F00_7702;
+    let (mut h, _, me) = recall_world(&[FAR], false);
+    let mut chain = h.server.effect_table.effects[&RECALL].clone();
+    chain.state = CHAIN;
+    chain.kind = yalain_world::effect_defs::Kind::Instants(vec![RECALL]);
+    h.server.effect_table.effects.insert(CHAIN, chain);
+    for q in &mut h.server.quests.quests {
+        q.effects = vec![(update::ADVANCE | 2, CHAIN, 1.0)];
+    }
+    kill(&mut h, me, &[INCREMENT]);
+    assert_eq!(trip_cell(&h), Some(FAR_AT.cell), "its chain's recall");
+    recall_lands(&mut h);
+    assert_eq!(cell(&h), FAR_AT.cell);
+}
+
+/// **A recall of several places takes its player to one of those the world holds, at random**:
+/// over many advances both of the world's are reached, and never the one it lacks.
+/// Behaviour: server.quests.an-updates-recall-takes-its-player
+#[test]
+fn a_recall_of_several_places_lands_at_one_the_world_holds_chosen_at_random() {
+    let (mut h, _, me) = recall_world(&[FAR, MISSING, NEAR], false);
+    let mut landed = std::collections::BTreeMap::new();
+    for _ in 0..16 {
+        holds(&mut h, me, status::UNDERWAY, 1);
+        kill(&mut h, me, &[INCREMENT]);
+        let to = trip_cell(&h).expect("sent");
+        recall_lands(&mut h);
+        assert_eq!(cell(&h), to);
+        *landed.entry(to).or_insert(0) += 1;
+    }
+    assert_eq!(
+        landed.keys().copied().collect::<Vec<_>>(),
+        vec![NEAR_AT.cell, FAR_AT.cell],
+        "{landed:x?}"
+    );
+}
+
+/// **A recall with no place in the world takes its player nowhere**: the quest moves on and is told
+/// at once, the player stays where it stood, and the server notes the recall.
+/// Behaviour: server.quests.an-updates-recall-with-no-place-stays
+#[test]
+fn a_recall_to_a_place_the_world_lacks_leaves_its_player_where_it_is() {
+    let (mut h, b, me) = recall_world(&[MISSING], false);
+    let here = cell(&h);
+    let from = h.bots[b].inbox.len();
+    kill(&mut h, me, &[INCREMENT]);
+    assert_eq!(phase(&h, me), 2);
+    assert_eq!(trip_cell(&h), None, "not sent");
+    assert_eq!(
+        updates(&h, b, from),
+        vec![(0, update::ADVANCE | 2)],
+        "told at once"
+    );
+    recall_lands(&mut h);
+    assert_eq!(cell(&h), here);
+    assert!(
+        h.server
+            .unhandled
+            .counts()
+            .keys()
+            .any(|k| k.contains(&format!("{RECALL:08X}"))),
+        "noted: {:?}",
+        h.server.unhandled.counts()
+    );
+}
+
+/// **A step with a place of its own takes its player there, once**: its update's recall stays put,
+/// so the kill's trip goes to the step's place, its update is told on landing, and no second trip
+/// follows.
+/// Behaviour: server.quests.a-steps-place-wins-over-its-updates-recall
+#[test]
+fn a_step_leading_somewhere_sends_its_player_once_to_its_own_place_not_the_recalls() {
+    let (mut h, b, me) = recall_world(&[FAR], false);
+    let template = kill(&mut h, me, &[]);
+    h.server.quests.steps = vec![leading_step(template, 1, ARENA)];
+    holds(&mut h, me, status::UNDERWAY, 1);
+    h.run(2);
+    let from = h.bots[b].inbox.len();
+    kill(&mut h, me, &[]);
+    assert_eq!(trip_cell(&h), Some(ARENA.cell), "the step's place");
+    land(&mut h);
+    assert_eq!(phase(&h, me), 2);
+    assert_eq!(cell(&h), ARENA.cell);
+    recall_lands(&mut h);
+    h.run(20);
+    assert_eq!(trip_cell(&h), None, "no second trip");
+    assert_eq!(cell(&h), ARENA.cell);
+    assert_eq!(
+        updates(&h, b, from),
+        vec![(0, update::ADVANCE | 2)],
+        "told once"
+    );
+    let stamps = h
+        .world_messages(b, from)
+        .iter()
+        .filter(|m| {
+            matches!(m, auberean_protocol::ServerMessage::Position(p) if p.sender.id == me && p.teleport_stamp > 0)
+        })
+        .map(|m| match m {
+            auberean_protocol::ServerMessage::Position(p) => p.teleport_stamp,
+            _ => 0,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(stamps.len(), 1, "one trip: {stamps:?}");
+}
+
+/// **A failure whose effects carry a recall takes its player too**, told as it comes out; and a
+/// player already on its way somewhere is left to that trip, the update told at once.
+/// Behaviour: server.quests.an-updates-recall-takes-its-player
+#[test]
+fn a_failure_carrying_a_recall_takes_its_player_and_one_on_its_way_is_left_to_it() {
+    let (mut h, b, me) = recall_world(&[FAR], false);
+    for q in &mut h.server.quests.quests {
+        q.effects = vec![(update::FAIL, RECALL, 1.0)];
+    }
+    let world = *h.server.players.keys().next().expect("in the world");
+    let from = h.bots[b].inbox.len();
+    let clock = h.clock();
+    yalain_world::quests::fail(&mut h.server, &mut h.net, world, QUEST, clock);
+    h.run(2);
+    assert_eq!(state(&h, me).map(|s| s.0), Some(status::FAILED));
+    assert_eq!(trip_cell(&h), Some(FAR_AT.cell));
+    assert!(updates(&h, b, from).is_empty(), "nothing told yet");
+    recall_lands(&mut h);
+    assert_eq!(cell(&h), FAR_AT.cell);
+    assert_eq!(updates(&h, b, from), vec![(0, update::FAIL)]);
+    // On its way to the arena, the failure's recall leaves it to that trip.
+    let (mut h, b, me) = recall_world(&[FAR], false);
+    for q in &mut h.server.quests.quests {
+        q.effects = vec![(update::FAIL, RECALL, 1.0)];
+    }
+    let world = *h.server.players.keys().next().expect("in the world");
+    let to = yalain_store::StoredPosition {
+        cell: ARENA.cell,
+        origin: ARENA.origin,
+        rotation: [1.0, 0.0, 0.0, 0.0],
+    };
+    let clock = h.clock();
+    yalain_world::places::sent_away(&mut h.server, &mut h.net, world, to, clock);
+    let from = h.bots[b].inbox.len();
+    yalain_world::quests::fail(&mut h.server, &mut h.net, world, QUEST, clock);
+    h.run(2);
+    assert_eq!(
+        updates(&h, b, from),
+        vec![(0, update::FAIL)],
+        "told at once"
+    );
+    assert_eq!(trip_cell(&h), Some(ARENA.cell), "still the trip it was on");
+    land(&mut h);
+    recall_lands(&mut h);
+    h.run(20);
+    assert_eq!(cell(&h), ARENA.cell);
+    assert_eq!(state(&h, me).map(|s| s.0), Some(status::FAILED));
+    assert_eq!(updates(&h, b, from).len(), 1, "told once");
 }

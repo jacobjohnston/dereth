@@ -118,8 +118,14 @@ fn use_of(item: u64, player: u64) -> Arg {
 /// A world with one beetle beside a new player, which attacks it until it dies; returns the
 /// harness, the client, the player and the beetle.
 fn fight() -> (Harness, usize, u64, u64) {
+    fight_with(|_| {})
+}
+
+/// [`fight`], the world first set up as a test asks.
+fn fight_with(setup: impl FnOnce(&mut Harness)) -> (Harness, usize, u64, u64) {
     let mut h = Harness::new();
     h.add_creatures(1);
+    setup(&mut h);
     h.server.levels = levels();
     let (b, me) = h.player_in_world("one", "Elara");
     scene_drawn(&mut h, b);
@@ -369,6 +375,77 @@ fn jewelry_a_creature_leaves_is_worth_what_treasure_of_its_level_is() {
     for v in values {
         assert!((1..=4).contains(&v), "a level 2 creature's: {v}");
     }
+}
+
+/// A magic potion a creature leaves as its profile's extra, beside the profile's draw, is treasure as
+/// a drawn one is: it has an effect of its own, is named for it and is worth what treasure of its
+/// dropper's level is; another extra has nothing of its own (2017: 194 of 194 magic potions dropped
+/// carried a value of their own).
+/// Behaviour: server.loot.fixed-treasure-potions-are-treasure
+#[test]
+fn a_magic_potion_a_creature_leaves_as_an_extra_has_its_own_effect_name_and_value() {
+    use yalain_content::treasure_tables::POTION_EFFECTS;
+    use yalain_content::{Prop, Props};
+    use yalain_world::inventory::{item_create, potion_name};
+    const MAGIC: u32 = 0x4700_11B4;
+    const MAGIC_PACKAGE: u32 = 0xF15;
+    const OTHER: u32 = 0x4700_2109;
+    const NAME: (u32, u32) = (0xA860_7CEC, 0x2500_1E8E);
+    let (mut h, b, _, _) = fight_with(|h| {
+        let mut p = Props::default();
+        p.set("Item_IsDestroyOnUse", Prop::Bool(true));
+        let mut t = yalain_testkit::test_template(MAGIC, MAGIC_PACKAGE, p);
+        t.description.name = Some(NAME);
+        t.facts.name = Some(NAME);
+        h.server.catalog.insert(t);
+        h.server.catalog.insert(yalain_testkit::test_template(
+            OTHER,
+            0x200,
+            Props::default(),
+        ));
+        h.server.treasure.potions.insert(MAGIC_PACKAGE);
+        for (n, &state) in POTION_EFFECTS.iter().flatten().enumerate() {
+            let n = u32::try_from(n).unwrap();
+            h.server
+                .treasure
+                .potion_looks
+                .insert(state, (0x2500_08D0 + n, 0.5));
+        }
+        let profile = &mut h.server.loot.profiles[0];
+        profile.extras = vec![(MAGIC, 1.0), (OTHER, 1.0)];
+        profile.counts = vec![0.0, 0.0, 0.0, 1.0];
+    });
+    assert!(h.run_until(200, |h| h.world_messages(b, 0).iter().any(
+        |m| matches!(m, ServerMessage::CreateObject(o) if o.weenie.entity_did == CORPSE)
+    )));
+    let left = |template: u32| {
+        h.server
+            .things
+            .by_id
+            .values()
+            .find(|t| t.template == template)
+            .unwrap_or_else(|| panic!("the corpse holds {template:#010x}"))
+    };
+    let potion = left(MAGIC);
+    let e = potion
+        .own
+        .effect
+        .expect("the potion has an effect of its own");
+    assert!(
+        POTION_EFFECTS.iter().any(|kind| kind[0] == e.state),
+        "the lowest tier's, for a level 2 creature: {:08X}",
+        e.state
+    );
+    assert!(
+        (1..=4).contains(&potion.value),
+        "worth a level 2 creature's treasure: {}",
+        potion.value
+    );
+    assert_eq!(item_create(potion).weenie.name, potion_name(NAME, e.table));
+    let other = left(OTHER);
+    assert_eq!(other.value, 0, "no value of its own");
+    assert!(other.own.is_empty(), "nothing of its own");
+    assert!(left(TEST_ITEM).value > 0, "the profile's draw is treasure");
 }
 
 /// A least level its template holds, only its class's or its own, gives way to a drop's own, and
@@ -852,6 +929,7 @@ fn a_permanent_enchantment_changes_the_items_numbers() {
         external_flags: 0,
         internal_flags: 0,
         ends_at_logout: false,
+        ends_at_teleport: false,
         enum_value: 0,
         eq_class: 0,
         name: None,
@@ -1076,6 +1154,7 @@ fn a_paired_enchantment_comes_with_its_other_half_and_names_nothing() {
                 external_flags: 0,
                 internal_flags: 0,
                 ends_at_logout: false,
+                ends_at_teleport: false,
                 enum_value: 0,
                 eq_class: 0,
                 name: Some((1, state)),
@@ -1150,6 +1229,7 @@ fn a_slayer_harms_the_creatures_it_names_by_its_spellcraft_and_no_others() {
                 external_flags: 0,
                 internal_flags: 0,
                 ends_at_logout: false,
+                ends_at_teleport: false,
                 enum_value: 0,
                 eq_class: 0,
                 name: None,
@@ -1249,6 +1329,7 @@ fn a_weapons_effect_on_a_hit_goes_on_what_it_hits() {
             external_flags: 0,
             internal_flags: 0,
             ends_at_logout: false,
+            ends_at_teleport: false,
             enum_value: 1,
             eq_class: 1,
             name: None,
@@ -1296,6 +1377,7 @@ fn a_weapons_effect_on_a_hit_goes_on_what_it_hits() {
             external_flags: 0,
             internal_flags: 1,
             ends_at_logout: false,
+            ends_at_teleport: false,
             enum_value: 2,
             eq_class: 2,
             name: Some((1, 2)),
@@ -1372,6 +1454,7 @@ fn treasure_jewelry_is_plain_or_has_one_effect_and_a_least_level() {
             external_flags: 0,
             internal_flags: 1,
             ends_at_logout: false,
+            ends_at_teleport: false,
             enum_value: 2,
             eq_class: 2,
             name: Some((1, 2)),
@@ -1415,6 +1498,7 @@ fn a_treasure_item_with_enchantments_is_named_for_one_of_them() {
                 external_flags: 0,
                 internal_flags: 1,
                 ends_at_logout: false,
+                ends_at_teleport: false,
                 enum_value: 2,
                 eq_class: 2,
                 name: Some((1, state ^ 0x4B00_0000)),
@@ -1493,6 +1577,7 @@ fn a_weapons_critical_bonus_makes_its_hits_critical() {
                 external_flags: 0,
                 internal_flags: 0,
                 ends_at_logout: false,
+                ends_at_teleport: false,
                 enum_value: 0,
                 eq_class: 0,
                 name: None,
@@ -2338,11 +2423,11 @@ fn a_treasure_items_own_properties_follow_its_droppers_level() {
     let mut seen = [false; 4];
     let (mut low, mut high) = (100.0f32, 0.0f32);
     for _ in 0..2000 {
-        let l = min_level(&mut rng, rules, 20);
+        let l = min_level(&mut rng, rules, 20, false);
         assert!((20..=23).contains(&l), "{l}");
         seen[usize::try_from(l - 20).unwrap()] = true;
-        assert!(min_level(&mut rng, rules, 49) <= 50);
-        assert_eq!(min_level(&mut rng, rules, 60), 50);
+        assert!(min_level(&mut rng, rules, 49, false) <= 50);
+        assert_eq!(min_level(&mut rng, rules, 60, false), 50);
         assert_eq!(arcane_lore(&mut rng, rules, &table, 51), None);
         let lore =
             arcane_lore(&mut rng, rules, &table, 57).expect("a base of 57 always draws above 50");
@@ -2365,6 +2450,65 @@ fn a_treasure_items_own_properties_follow_its_droppers_level() {
         (40..=120).contains(&some),
         "about two in five above 50: {some}"
     );
+}
+
+/// A world's own weights for droppers whose loot base is their loot quality override are what their
+/// equipment's least level draws by: with 2017's (the base plus 0, 1 or 2, by 148, 183 and 60) a
+/// level 43 creature of quality 440 never drops the base plus 3 and drops the rest about that
+/// often; a creature with no override still draws the world's other weights, plus 3 among them; a
+/// world without them draws every dropper by those.
+/// Behaviour: server.loot.treasure-override-least-level
+#[test]
+fn droppers_with_a_loot_quality_override_draw_their_least_level_by_their_own_weights() {
+    use yalain_content::treasure_tables::ABOVE_BASE;
+    use yalain_content::{Prop, Props};
+    const SWORD: u32 = 0x4700_7003;
+    const DROPS: u32 = 3000;
+    let world = |weights: Option<Vec<f32>>| {
+        let mut h = Harness::new();
+        h.server.catalog = yalain_testkit::test_catalog();
+        let mut props = Props::default();
+        props
+            .set("Weapon_Damage", Prop::Int(10))
+            .set("Weapon_Variance", Prop::Float(0.25));
+        h.server
+            .catalog
+            .insert(yalain_testkit::test_template(SWORD, 0x200, props));
+        h.server.treasure.equipment.insert(0x200);
+        h.server.treasure_tables.rules.above_base_override = weights;
+        h
+    };
+    // How many of a level 43 creature's drops stood at its base plus 0, 1, 2 and 3.
+    let drops = |h: &mut Harness, quality: Option<i64>| {
+        let base = yalain_world::treasure::base_of(43, quality);
+        let mut n = [0u32; 4];
+        for _ in 0..DROPS {
+            let sword =
+                yalain_world::inventory::make_item(&mut h.server, SWORD, 1, 9).expect("made");
+            yalain_world::treasure::endow(&mut h.server, sword, 43, quality);
+            let least = h.server.things.get(sword).expect("made").own.min_level;
+            let above = least.expect("a least level of its own") - base;
+            n[usize::try_from(above).expect("at or above the base")] += 1;
+        }
+        n
+    };
+    let near = |got: [u32; 4], weights: &[f32]| {
+        let sum: f32 = weights.iter().sum();
+        (0..4).all(|i| {
+            let want = f64::from(weights.get(i).copied().unwrap_or(0.0) / sum);
+            (f64::from(got[i]) / f64::from(DROPS) - want).abs() < 0.03
+        })
+    };
+    let ours = vec![148.0, 183.0, 60.0];
+    let mut with = world(Some(ours.clone()));
+    let overridden = drops(&mut with, Some(440));
+    assert_eq!(overridden[3], 0, "no base plus 3: {overridden:?}");
+    assert!(near(overridden, &ours), "{overridden:?}");
+    let plain = drops(&mut with, None);
+    assert!(plain[3] > 0 && near(plain, &ABOVE_BASE), "{plain:?}");
+    let mut without = world(None);
+    let today = drops(&mut without, Some(440));
+    assert!(today[3] > 0 && near(today, &ABOVE_BASE), "{today:?}");
 }
 
 /// A world's treasure numbers are the ones its drops draw by: with tables of its own, a weapon's
@@ -2412,6 +2556,7 @@ fn a_worlds_own_treasure_tables_are_what_its_drops_draw_by() {
                 external_flags: 0,
                 internal_flags: 1,
                 ends_at_logout: false,
+                ends_at_teleport: false,
                 enum_value: 2,
                 eq_class: 2,
                 name: Some((1, 2)),
@@ -2491,4 +2636,180 @@ fn a_worlds_own_treasure_tables_are_what_its_drops_draw_by() {
         let on_hit = Some(yalain_world::profile::When::Hit);
         assert_eq!(shown == on_hit, own, "{shown:?}");
     }
+}
+
+/// What a weapon's template names for what it hits goes on as its blows land: a slayer of a
+/// creature's superclass, at the template's spellcraft, harms it by that times its number (ten
+/// million: past a million health, so it dies of it), and does nothing to a creature of another.
+/// Behaviour: server.combat.weapon-template-slayer
+#[test]
+fn a_weapons_own_slayer_kills_the_creature_it_names_and_spares_any_other() {
+    use yalain_world::effect_defs::{EffectDef, Kind, Scale};
+    use yalain_world::item_use::UsageEffect;
+    const SLAYER: u32 = 0x6F00_0004;
+    const NAMED: u32 = 62;
+    let dies = |superclass: u32| -> bool {
+        let mut h = Harness::new();
+        h.add_creatures(1);
+        h.server.levels = levels();
+        let (b, me) = h.player_in_world("one", "Elara");
+        scene_drawn(&mut h, b);
+        h.arm(b, me, STARTER_SWORD);
+        h.server.effect_table.effects.insert(
+            SLAYER,
+            EffectDef {
+                state: SLAYER,
+                kind: Kind::Slayer(vec![(NAMED, 10_000_000.0)]),
+                duration: Scale::default(),
+                priority: Scale::default(),
+                fx: 0,
+                external_flags: 0,
+                internal_flags: 0,
+                ends_at_logout: false,
+                ends_at_teleport: false,
+                enum_value: 0,
+                eq_class: 0,
+                name: None,
+            },
+        );
+        h.server.hit_effects.insert(
+            STARTER_SWORD,
+            vec![UsageEffect {
+                state: SLAYER,
+                spellcraft: 1.0,
+            }],
+        );
+        let beetle = creature_of(&h, b);
+        let template = h.server.things.get(beetle).expect("the beetle").template;
+        let mut t = h
+            .server
+            .catalog
+            .get(template)
+            .expect("its template")
+            .clone();
+        t.props.set(
+            yalain_content::props::creature_property::SUPER_CLASS,
+            yalain_content::Prop::Word(superclass),
+        );
+        h.server.catalog.insert(t);
+        {
+            let t = h.server.things.get_mut(beetle).expect("the beetle");
+            t.max_health = 1_000_000;
+            t.health = 1_000_000;
+            let c = t.creature.as_mut().expect("a creature");
+            c.stats.natural_damage = 0.0;
+        }
+        h.bots[b].send(
+            true,
+            queue::WEENIE,
+            &server_call(START_ATTACK, &[Arg::LongInt(beetle)]),
+        );
+        let mut hit = false;
+        h.run_until(20_000, |h| {
+            let t = h.server.things.get(beetle);
+            hit |= t.is_none_or(|t| t.health < 1_000_000);
+            t.is_none_or(|t| !t.alive())
+        });
+        assert!(hit, "struck");
+        h.server.things.get(beetle).is_none_or(|t| !t.alive())
+    };
+    assert!(dies(NAMED));
+    assert!(!dies(NAMED + 1));
+}
+
+/// A creature's weapon puts what its template names for what it hits on the player its blows land
+/// on, by the effect's own chance: a record cast by the creature from the weapon at the template's
+/// spellcraft; at no chance, never.
+/// Behaviour: server.combat.weapon-hit-effects-on-what-they-hit
+#[test]
+fn a_creatures_weapon_puts_its_effect_on_the_player_it_hits_by_the_effects_chance() {
+    use yalain_testkit::COURAGE_EFFECT;
+    use yalain_world::effect_defs::Scale;
+    use yalain_world::item_use::UsageEffect;
+    use yalain_world::things::{Kind, Thing};
+    const BLADE: u32 = 0x4700_7EA1;
+    let run = |chance: f32| -> (usize, Vec<yalain_world::state::EffectState>, u64, u64) {
+        let mut h = Harness::new();
+        h.add_creatures(1);
+        h.server.levels = levels();
+        let (b, me) = h.player_in_world("one", "Elara");
+        scene_drawn(&mut h, b);
+        h.arm(b, me, STARTER_SWORD);
+        let beetle = creature_of(&h, b);
+        // The creature's blade, a template of its own naming the effect; the player's sword names
+        // nothing.
+        let mut tpl = h
+            .server
+            .catalog
+            .get(STARTER_SWORD)
+            .expect("a sword")
+            .clone();
+        tpl.id = BLADE;
+        h.server.catalog.insert(tpl.clone());
+        h.server.hit_effects.insert(
+            BLADE,
+            vec![UsageEffect {
+                state: COURAGE_EFFECT,
+                spellcraft: 100.0,
+            }],
+        );
+        h.server
+            .effect_table
+            .chances
+            .insert(COURAGE_EFFECT, Scale(vec![(0.0, chance)]));
+        let blade = h.server.things.new_id();
+        let mut t = Thing::of(blade, &tpl, Kind::Item);
+        t.wielded = Some((beetle, 1));
+        h.server.things.insert(t);
+        {
+            let t = h.server.things.get_mut(beetle).expect("the beetle");
+            t.max_health = 1_000_000;
+            t.health = 1_000_000;
+            let c = t.creature.as_mut().expect("a creature");
+            c.weapons = vec![blade];
+            c.stats.natural_damage = 0.0;
+        }
+        let from = h.bots[b].inbox.len();
+        h.bots[b].send(
+            true,
+            queue::WEENIE,
+            &server_call(START_ATTACK, &[Arg::LongInt(beetle)]),
+        );
+        let landed = |h: &Harness| {
+            h.world_messages(b, from)
+                .iter()
+                .filter(|m| {
+                    matches!(m, ServerMessage::DoStory(e) if e.sender.id == beetle
+                        && e.action.hooks.iter().any(|k| k.target == me && k.numbers[3] < 0))
+                })
+                .count()
+        };
+        let held = |h: &Harness| -> Vec<yalain_world::state::EffectState> {
+            h.server
+                .players
+                .values()
+                .find(|p| p.character == me)
+                .map(|p| {
+                    p.play
+                        .effects
+                        .iter()
+                        .filter(|e| e.state == COURAGE_EFFECT)
+                        .copied()
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        h.run_until(60_000, |h| landed(h) >= 6 || !held(h).is_empty());
+        // The record goes on as the blow reaches the player, after its story.
+        h.run(200);
+        (landed(&h), held(&h), beetle, blade)
+    };
+    let (landed, held, beetle, blade) = run(1.0);
+    assert!(landed >= 1, "{landed} blows landed");
+    let e = held.first().expect("the weapon's effect on the player");
+    assert_eq!((e.caster, e.item, e.skill), (beetle, blade, 0));
+    assert!((e.spellcraft - 100.0).abs() < f32::EPSILON);
+    let (landed, held, _, _) = run(0.0);
+    assert!(landed >= 6, "{landed} blows landed");
+    assert!(held.is_empty());
 }

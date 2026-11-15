@@ -5,11 +5,14 @@
 //!   reads a database and checks it without an install: the schema, keys, references, the
 //!   merge of its packs and every row's provenance
 //!
-//! yalain world release <folder> --tag vX.Y.Z [--since vA.B.C] [--out <folder>]
+//! yalain world release <folder> --tag vX.Y.Z [--since vA.B.C] [--out <folder>] [--package-only]
 //!   checks it and writes its release archive, yalain-world-<tag>.zip, the archive's SHA-256
 //!   beside it (<archive>.sha256) and, from the folder's CHANGES.md, the release notes
 //!   (yalain-world-<tag>.notes.md): the tag's section, or with --since every section after that
-//!   release; the same files always make the same bytes
+//!   release; the same files always make the same bytes. With --package-only it checks only that
+//!   the files read (the world file, the lockfile, the pack headers, every pack file as TOML of
+//!   rows, each row's provenance), not what the rows say, so a database with rows this build does
+//!   not know is packaged as a build that knows them would package it
 //!
 //! yalain world fetch [--version vX.Y.Z [--sha256 HEX]] [--from <address>] [--dir <folder>]
 //!   downloads a release (by default the one this build pins), checks its SHA-256 and unpacks
@@ -18,11 +21,15 @@
 //!   YALAIN_WORLD_URL variable, else the database's release downloads)
 //!
 //! yalain world compile --dats <install> [--world-db <folder> | pinned] [--world-base <folder>]
-//!                      --out <folder>
+//!                      [--overlay <folder>] --out <folder>
 //!   compiles a database against the install into the tables the server reads, written as text
 //!   for reading and comparing: content.tsv, spawns.tsv, loot.tsv, stores.tsv, quests.tsv,
-//!   talk.tsv
+//!   talk.tsv; and builds the world's overlay from its rows (its clearings and shops) against the
+//!   install, into its `overlay` folder (or --overlay), the next revision of what is there
 //! ```
+//!
+//! A world's overlay is made of the install's own records: one copied or exported with its world
+//! is served as it is over the same files, and compiled again over other ones.
 //!
 //! A world that names a base database (`[base]`, as a world builder's worlds do) is compiled over
 //! it: the release its `version` names (else the one this build pins) from the per-user cache, or
@@ -155,17 +162,17 @@ pub fn overlay_of(world_db: &str, given: Option<&Path>) -> Result<Option<WorldOv
     Ok(Some(overlay))
 }
 
-/// What a world's clearings come to with no overlay: what the land grows stays, and the person who
-/// wrote them should know why.
+/// What a world's clearings and shops come to with no overlay: what the land grows stays, a shop
+/// window keeps its store's name, and the person who wrote them should know why.
 #[must_use]
 pub fn clearing_warning(merged: &merge::Merged, has_overlay: bool) -> Option<String> {
-    let clearings = merged
-        .rows
-        .iter()
-        .filter(|l| matches!(l.row, rows::Row::Clearing(_)))
-        .count();
-    (clearings > 0 && !has_overlay).then(|| {
-        format!("{clearings} clearings and no overlay: `athenaeum build` makes the world's overlay")
+    let count = |f: fn(&rows::Row) -> bool| merged.rows.iter().filter(|l| f(&l.row)).count();
+    let clearings = count(|r| matches!(r, rows::Row::Clearing(_)));
+    let shops = count(|r| matches!(r, rows::Row::Store(_)));
+    (clearings + shops > 0 && !has_overlay).then(|| {
+        format!(
+            "{clearings} clearings, {shops} shops and no overlay: `yalain world compile` makes the world's overlay"
+        )
     })
 }
 
@@ -187,6 +194,70 @@ pub fn uses_the_pin(world_db: &str, world_base: Option<&Path>) -> bool {
         return true;
     };
     db.world.base.is_some_and(|b| b.version.is_none())
+}
+
+/// The world database a server serves, as `/status` names it: its key and era from its world file,
+/// the release it is (a release's folder holds its tag), the database and release it lies over, and
+/// the world whose overlay the install is read through.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Served {
+    pub key: String,
+    pub era: String,
+    /// `None` for a folder that is no release, such as a checkout.
+    pub release: Option<String>,
+    pub base: Option<ServedBase>,
+    pub overlay: Option<String>,
+}
+
+/// The base a served world lies over: the database it names and the release its folder is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServedBase {
+    pub key: String,
+    pub release: Option<String>,
+}
+
+/// The world a server started with these arguments serves, read from its world file alone; what
+/// doesn't read is left empty.
+#[must_use]
+pub fn served(world_db: &str, world_base: Option<&Path>, dat_overlay: Option<&Path>) -> Served {
+    let Ok(dir) = database_dir(world_db) else {
+        return Served::default();
+    };
+    let head: toml::Table = std::fs::read_to_string(dir.join("world.toml"))
+        .ok()
+        .and_then(|t| t.parse().ok())
+        .unwrap_or_default();
+    let text = |t: &toml::Table, k: &str| t.get(k).and_then(toml::Value::as_str).map(str::to_owned);
+    let base = head
+        .get("base")
+        .and_then(toml::Value::as_table)
+        .map(|b| ServedBase {
+            key: text(b, "db").unwrap_or_default(),
+            release: world_base
+                .map(Path::to_path_buf)
+                .or_else(|| release_dir(text(b, "version").as_deref().unwrap_or(PINNED_TAG)).ok())
+                .and_then(|d| release_tag(&d)),
+        });
+    let overlay = match dat_overlay {
+        Some(g) => WorldOverlay::open(g).ok(),
+        None if world_db == "pinned" => None,
+        None => WorldOverlay::of_world(&dir).ok().flatten(),
+    };
+    Served {
+        key: text(&head, "key").unwrap_or_default(),
+        era: text(&head, "era").unwrap_or_default(),
+        release: release_tag(&dir),
+        base,
+        overlay: overlay.map(|o| o.world().to_owned()),
+    }
+}
+
+/// The tag of the release a folder holds, from the manifest its archive carried; `None` for a
+/// folder that holds none.
+fn release_tag(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("manifest.json")).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
+    manifest["tag"].as_str().map(str::to_owned)
 }
 
 /// A release's folder in the cache.
@@ -267,16 +338,19 @@ fn check_cmd(args: &[String]) -> Result<(), String> {
 /// event the install does not have, a `[[points_bonus]]` naming an effect the install holds no
 /// saved state of, a `[[popup]]` naming an effect the install holds no saved state of or one
 /// whose effect has no description to show, an `[[effect_rule]]` naming an effect, a ward
-/// keeping off an effect or an effect an immunity leaves, the install holds no saved state of, a `[[treasure_look]]` naming a
+/// keeping off an effect, an effect an immunity leaves or one it dispels, the install holds no saved
+/// state of, or a skill to train the install has not, a `[[treasure_look]]` naming a
 /// table the install has not, a `[[treasure_potion]]`, a `[[treasure_family]]` or an
-/// `[[item_use]]` naming an effect the install has not, and a `[[concealing]]` naming an effect
-/// the install has not.
+/// `[[item_use]]` naming an effect the install has not, a `[[concealing]]` or a `[[creature]]`'s
+/// mark naming an effect the install has not, and a `[[creature_effect]]` or a `[[step]]`'s
+/// `given_effects` naming an effect the install has not.
 ///
 /// # Errors
 /// The install's library does not read.
 pub fn install_problems(p: &data::Portal, db: &rows::Database) -> Result<Vec<Problem>, String> {
     let mut out = Vec::new();
     let mut game_events = None;
+    let mut skills = None;
     for l in db.rows() {
         if let rows::Row::Popup(r) = &l.row {
             let why = if !data::saved_states(p)?.iter().any(|s| s.id == r.effect) {
@@ -297,11 +371,18 @@ pub fn install_problems(p: &data::Portal, db: &rows::Database) -> Result<Vec<Pro
                 ));
             }
         }
-        if let rows::Row::EffectRule(r) = &l.row {
+        // A rule naming its effect by name has no state to check: the compile checks what it
+        // places.
+        let rule = match &l.row {
+            rows::Row::EffectRule(r) => r.effect.state().map(|e| (r, e)),
+            _ => None,
+        };
+        if let Some((r, rule)) = rule {
             let warded = r.ward.iter().flat_map(|w| w.effects.iter().copied());
-            let named: Vec<(&str, u32)> = std::iter::once(("effect", r.effect))
+            let named: Vec<(&str, u32)> = std::iter::once(("effect", rule))
                 .chain(warded.map(|e| ("ward effect", e)))
                 .chain(r.then.map(|e| ("then", e)))
+                .chain(r.dispels.iter().map(|e| ("dispels", *e)))
                 .collect();
             let states: Vec<u32> = named.iter().map(|(_, e)| *e).collect();
             let read = data::effect_table(p, &states, &EffectRules::default())?;
@@ -312,7 +393,25 @@ pub fn install_problems(p: &data::Portal, db: &rows::Database) -> Result<Vec<Pro
                         l.line,
                         format!(
                             "[[effect_rule]] {:#010x}: {what} {effect:#010x}: the install holds no such effect",
-                            r.effect
+                            rule
+                        ),
+                    ));
+                }
+            }
+            if let Some(skill) = r.skill {
+                if skills.is_none() {
+                    skills = Some(data::skill_table(p)?);
+                }
+                if skills
+                    .as_ref()
+                    .is_some_and(|t| !t.skills.contains_key(&skill))
+                {
+                    out.push(Problem::new(
+                        &l.file,
+                        l.line,
+                        format!(
+                            "[[effect_rule]] {:#010x}: skill {skill}: the install has no such skill",
+                            rule
                         ),
                     ));
                 }
@@ -395,6 +494,68 @@ pub fn install_problems(p: &data::Portal, db: &rows::Database) -> Result<Vec<Pro
                 ));
             }
         }
+        if let rows::Row::CreatureEffect(r) = &l.row {
+            let read = data::effect_table(p, &[r.effect], &Default::default())?;
+            if !read.effects.contains_key(&r.effect) {
+                out.push(Problem::new(
+                    &l.file,
+                    l.line,
+                    format!(
+                        "[[creature_effect]] {}: effect {:#010x}: the install holds no such effect",
+                        r.key, r.effect
+                    ),
+                ));
+            }
+        }
+        if let rows::Row::Step(r) = &l.row {
+            if !r.given_effects.is_empty() {
+                let read = data::effect_table(p, &r.given_effects, &Default::default())?;
+                for e in r
+                    .given_effects
+                    .iter()
+                    .filter(|e| !read.effects.contains_key(e))
+                {
+                    out.push(Problem::new(
+                        &l.file,
+                        l.line,
+                        format!(
+                            "[[step]] {}: given_effects {e:#010x}: the install holds no such effect",
+                            r.key
+                        ),
+                    ));
+                }
+            }
+        }
+        if let rows::Row::SafePassage(r) = &l.row {
+            if let Some(effect) = r.effect {
+                let read = data::effect_table(p, &[effect], &Default::default())?;
+                if !read.effects.contains_key(&effect) {
+                    out.push(Problem::new(
+                        &l.file,
+                        l.line,
+                        format!(
+                            "[[safe_passage]] {}: effect {effect:#010x}: the install holds no such effect",
+                            r.key
+                        ),
+                    ));
+                }
+            }
+        }
+        if let rows::Row::Creature(r) = &l.row {
+            if let Some(mark) = &r.marks {
+                let read = data::effect_table(p, &[mark.effect], &Default::default())?;
+                if !read.effects.contains_key(&mark.effect) {
+                    out.push(Problem::new(
+                        &l.file,
+                        l.line,
+                        format!(
+                            "[[creature]] {:#010x}: marks {:#010x}: the install holds no such effect",
+                            r.template, mark.effect
+                        ),
+                    ));
+                }
+            }
+        }
         if let rows::Row::PointsBonus(r) = &l.row {
             if !data::saved_states(p)?.iter().any(|s| s.id == r.effect) {
                 out.push(Problem::new(
@@ -440,8 +601,13 @@ pub fn install_problems(p: &data::Portal, db: &rows::Database) -> Result<Vec<Pro
     Ok(out)
 }
 
+/// How `world release` is used.
+const RELEASE_USAGE: &str =
+    "world release takes <folder> --tag vX.Y.Z [--since vA.B.C] [--out <folder>] [--package-only]";
+
 fn release_cmd(args: &[String]) -> Result<(), String> {
     let (mut dir, mut tag, mut since, mut out) = (None, None, None, PathBuf::from("."));
+    let mut package_only = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut value = || {
@@ -465,27 +631,35 @@ fn release_cmd(args: &[String]) -> Result<(), String> {
                     })?);
             }
             "--out" => out = PathBuf::from(value()?),
+            "--package-only" => package_only = true,
             other if dir.is_none() && !other.starts_with("--") => dir = Some(PathBuf::from(other)),
             other => return Err(format!("unknown argument {other}")),
         }
     }
     let (Some(dir), Some(tag)) = (dir, tag) else {
-        return Err(
-            "world release takes <folder> --tag vX.Y.Z [--since vA.B.C] [--out <folder>]".into(),
-        );
+        return Err(RELEASE_USAGE.into());
     };
     let files = load(&dir)?;
-    let problems = check::check(&files);
-    if !problems.is_empty() {
-        return Err(format!(
+    let not_released = |problems: Vec<Problem>| {
+        format!(
             "{}\nnot released: {} problems",
             report(&problems),
             problems.len()
-        ));
-    }
-    let db = rows::read(&files).map_err(|p| report(&p))?;
-    let carried = release::release_files(&files, &db);
-    let zip = release::archive(&carried, &release::manifest(&tag, &db));
+        )
+    };
+    // Packaging alone reads the files' layout, not their rows: a database whose rows a later
+    // server reads is packaged by this one the same as that server would package it.
+    let layout = if package_only {
+        rows::read_layout(&files).map_err(not_released)?
+    } else {
+        let problems = check::check(&files);
+        if !problems.is_empty() {
+            return Err(not_released(problems));
+        }
+        rows::read(&files).map_err(|p| report(&p))?.layout()
+    };
+    let carried = release::release_files(&files, &layout);
+    let zip = release::archive(&carried, &release::manifest(&tag, &layout));
     let sha = release::sha256_hex(&zip);
     // The notes come from the change log; a release without its section is not made.
     let changes = dir.join("CHANGES.md");
@@ -507,6 +681,9 @@ fn release_cmd(args: &[String]) -> Result<(), String> {
         zip.len()
     );
     println!("SHA-256 {sha}");
+    if package_only {
+        println!("packaged only: its rows were not checked (yalain world check checks them)");
+    }
     match notes {
         Some(text) => {
             let p = out.join(release::notes_name(&tag));
@@ -822,6 +999,20 @@ pub fn compile_dir(
     db_dir: &Path,
     base_dir: Option<&Path>,
 ) -> Result<Tables, String> {
+    let (_, merged) = merge_dir(p, db_dir, base_dir)?;
+    compile_merged(p, &merged, db_dir)
+}
+
+/// A database folder read, checked against the install and merged (over its base, when it names
+/// one): its key and its rows.
+///
+/// # Errors
+/// As [`compile_dir`].
+fn merge_dir(
+    p: &data::Portal,
+    db_dir: &Path,
+    base_dir: Option<&Path>,
+) -> Result<(String, merge::Merged), String> {
     let files = load(db_dir)?;
     let (read, read_problems) = rows::read_partly(&files);
     if let Some(db) = &read {
@@ -862,6 +1053,10 @@ pub fn compile_dir(
             db_dir.display()
         ));
     }
+    let key = read
+        .as_ref()
+        .map(|db| db.world.key.clone())
+        .unwrap_or_default();
     let merged = match checked {
         Some(merged) => merged,
         None => {
@@ -876,6 +1071,15 @@ pub fn compile_dir(
             .map_err(|p| report(&p))?
         }
     };
+    Ok((key, merged))
+}
+
+/// A merged database compiled against an install.
+fn compile_merged(
+    p: &data::Portal,
+    merged: &merge::Merged,
+    db_dir: &Path,
+) -> Result<Tables, String> {
     let mut install = DatInstall::new(
         Box::new(|id| p.dat.read(id).ok()),
         p.ctx.clone(),
@@ -896,7 +1100,7 @@ pub fn compile_dir(
     if let Some(local) = p.english() {
         install = install.with_text(Box::new(move |id| local.read(id).ok()));
     }
-    let mut tables = compile(&merged, &install).map_err(|p| {
+    let mut tables = compile(merged, &install).map_err(|p| {
         format!(
             "{}\n{} problems compiling {}",
             report(&p),
@@ -904,14 +1108,14 @@ pub fn compile_dir(
             db_dir.display()
         )
     })?;
-    if let Some(w) = clearing_warning(&merged, p.has_overlay()) {
+    if let Some(w) = clearing_warning(merged, p.has_overlay()) {
         tables.warnings.push(Problem::new("world.toml", 0, w));
     }
     Ok(tables)
 }
 
 fn compile_cmd(args: &[String]) -> Result<(), String> {
-    let (mut dats, mut db, mut out, mut base) = (None, None, None, None);
+    let (mut dats, mut db, mut out, mut base, mut overlay) = (None, None, None, None, None);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut value = || {
@@ -924,19 +1128,46 @@ fn compile_cmd(args: &[String]) -> Result<(), String> {
             "--world-db" => db = Some(value()?),
             "--world-base" => base = Some(PathBuf::from(value()?)),
             "--out" => out = Some(PathBuf::from(value()?)),
+            "--overlay" => overlay = Some(PathBuf::from(value()?)),
             other => return Err(format!("unknown argument {other}")),
         }
     }
     let (Some(dats), Some(out)) = (dats, out) else {
         return Err(
-            "world compile takes --dats <install> [--world-db <folder> | pinned] [--world-base <folder>] --out <folder>"
+            "world compile takes --dats <install> [--world-db <folder> | pinned] [--world-base <folder>] [--overlay <folder>] --out <folder>"
                 .into(),
         );
     };
     let db = db.unwrap_or_else(|| "pinned".to_owned());
     let dir = database_dir(&db)?;
-    let portal = data::Portal::open(&dats, overlay_of(&db, None)?)?;
+    // The world's overlay first, from its rows over the install as it is: the tables are then
+    // compiled through it, as the server reads them.
+    let built = if db == "pinned" {
+        None
+    } else {
+        let plain = data::Portal::open(&dats, None)?;
+        let (key, merged) = merge_dir(&plain, &dir, base.as_deref())?;
+        let folder = overlay.clone().unwrap_or_else(|| dir.join(WORLD_FOLDER));
+        let built = yalain_world_db::overlay::write(&merged, &key, &dats, &folder)?;
+        Some((folder, built))
+    };
+    let given = built
+        .as_ref()
+        .map(|(f, _)| f.as_path())
+        .filter(|f| f.exists());
+    let portal = data::Portal::open(&dats, overlay_of(&db, given)?)?;
     let t = compile_dir(&portal, &dir, base.as_deref())?;
+    if let Some((folder, b)) = &built {
+        if b.blocks > 0 || b.shops > 0 {
+            println!(
+                "overlay: {} landblocks, {} vertices, {} shops -> {}",
+                b.blocks,
+                b.vertices,
+                b.shops,
+                folder.display()
+            );
+        }
+    }
     std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
     for (name, text) in [
         ("content.tsv", t.content.to_text()),
@@ -1094,6 +1325,63 @@ mod tests {
         main(&strings(&args)).unwrap();
         let cached = load(&d.join("cache").join("v0.3.0")).unwrap();
         assert_eq!(cached["world.toml"], load(&world).unwrap()["world.toml"]);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// `--package-only` writes the very files a full release writes for a database this build
+    /// reads, and packages one with a field and a kind it does not know, which a full release
+    /// refuses; files that do not read are refused either way.
+    /// Behaviour: server.world-db.release-packaged-from-its-layout
+    #[test]
+    fn a_release_packaged_only_carries_rows_this_build_does_not_know_and_is_otherwise_the_full_release(
+    ) {
+        let d = scratch("package-only");
+        let world = d.join("world");
+        fixture_world(&world);
+        let w = world.to_string_lossy().to_string();
+        let release_into = |out: &str, more: &[&str]| {
+            let o = d.join(out).to_string_lossy().to_string();
+            let mut args = vec![
+                "release", &w, "--tag", "v0.3.0", "--since", "v0.1.0", "--out", &o,
+            ];
+            args.extend_from_slice(more);
+            main(&strings(&args))
+        };
+        release_into("full", &[]).unwrap();
+        release_into("packaged", &["--package-only"]).unwrap();
+        for name in [
+            release::zip_name("v0.3.0"),
+            format!("{}.sha256", release::zip_name("v0.3.0")),
+            release::notes_name("v0.3.0"),
+        ] {
+            let full = std::fs::read(d.join("full").join(&name)).unwrap();
+            let packaged = std::fs::read(d.join("packaged").join(&name)).unwrap();
+            assert_eq!(full, packaged, "{name}");
+        }
+        // Rows of a later server: a field and a kind this build does not know.
+        let loot = world.join("town/server/loot.toml");
+        let text = std::fs::read_to_string(&loot).unwrap();
+        let later = text.replacen("profile = 0x19B\n", "profile = 0x19B\nglow = 3\n", 1)
+            + "\n[[lantern]]\nkey = \"hall\"\nprov = { from = \"authored\" }\n";
+        assert_ne!(later, text);
+        std::fs::write(&loot, &later).unwrap();
+        let e = release_into("later-full", &[]).unwrap_err();
+        assert!(e.contains("not released"), "{e}");
+        assert!(!d.join("later-full").exists());
+        release_into("later", &["--package-only"]).unwrap();
+        let zip = std::fs::read(d.join("later").join(release::zip_name("v0.3.0"))).unwrap();
+        let files = release::read_stored(&zip).expect("its files");
+        assert_eq!(files["town/server/loot.toml"], later);
+        assert!(
+            files["manifest.json"].contains("\"lantern\": 1"),
+            "{}",
+            files["manifest.json"]
+        );
+        // A pack file that is not TOML is not packaged.
+        std::fs::write(&loot, "[[loot]\n").unwrap();
+        let e = release_into("broken", &["--package-only"]).unwrap_err();
+        assert!(e.contains("not TOML") && e.contains("not released"), "{e}");
+        assert!(!d.join("broken").exists());
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -1373,6 +1661,60 @@ mod tests {
             "{e}"
         );
         assert!(!cache.join("v0.9.0").exists());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// `/status` names the world database a server serves from its world file: a release's folder
+    /// by the tag its archive carried, a checkout by none, and the base a checkout lies over by the
+    /// release its folder holds.
+    /// Behaviour: server.operator.status-names-the-world-database
+    #[test]
+    fn a_served_world_is_named_by_its_key_era_release_and_base() {
+        let d = scratch("served");
+        let release = d.join("v0.9.0");
+        let checkout = d.join("mine");
+        for dir in [&release, &checkout] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(
+            release.join("world.toml"),
+            "format_version = 1\nkey = \"yalain-world\"\ngame = \"ac2\"\nera = \"eor\"\npacks = []\n",
+        )
+        .unwrap();
+        std::fs::write(release.join("manifest.json"), r#"{"tag": "v0.9.0"}"#).unwrap();
+        std::fs::write(
+            checkout.join("world.toml"),
+            "format_version = 1\nkey = \"mine\"\ngame = \"ac2\"\nera = \"eor\"\npacks = []\n\n[base]\ndb = \"yalain-world\"\nversion = \"v0.9.0\"\n",
+        )
+        .unwrap();
+        let path = |p: &Path| p.display().to_string();
+        assert_eq!(
+            served(&path(&release), None, None),
+            Served {
+                key: "yalain-world".into(),
+                era: "eor".into(),
+                release: Some("v0.9.0".into()),
+                base: None,
+                overlay: None,
+            }
+        );
+        assert_eq!(
+            served(&path(&checkout), Some(&release), None),
+            Served {
+                key: "mine".into(),
+                era: "eor".into(),
+                release: None,
+                base: Some(ServedBase {
+                    key: "yalain-world".into(),
+                    release: Some("v0.9.0".into()),
+                }),
+                overlay: None,
+            }
+        );
+        assert_eq!(
+            served(&path(&d.join("none")), None, None),
+            Served::default()
+        );
         std::fs::remove_dir_all(&d).ok();
     }
 }

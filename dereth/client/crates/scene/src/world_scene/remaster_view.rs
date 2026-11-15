@@ -58,9 +58,12 @@ pub(crate) struct View {
     pub(super) water: super::remaster_effects::RemasterWater,
     /// Whether the rain and the snow fall.
     pub(super) weather: super::remaster_weather::RemasterWeather,
-    /// What the remaster's own boxes last asked, and whether the remaster was running then.
+    /// What the remaster's own boxes last asked.
     pub(super) rows: super::remaster_rows::RemasterRows,
-    pub(super) rows_on: bool,
+    /// How the parts' levels are picked.
+    pub(super) lod: dereth_remaster::render::lod::LodSettings,
+    /// What the lamps light.
+    pub(super) lamps: super::remaster_lamps::RemasterLamps,
     /// How the bounced light is found.
     pub(super) gi: super::remaster_rt::RemasterGi,
     /// Whether the sun's shadows and the occlusion are traced.
@@ -68,6 +71,8 @@ pub(crate) struct View {
     pub(super) traced_ao: super::remaster_traced::RemasterTracedAo,
     /// Which of the landscape's additions are drawn.
     pub(super) landscape: super::remaster_landscape::RemasterLandscape,
+    /// The pictures made ahead of the changes that hold them.
+    pub(super) pictures: RefCell<super::remaster_pictures::Pictures>,
 }
 
 /// Where the remaster works retail's light out.
@@ -118,6 +123,22 @@ impl SceneDraw {
     #[must_use]
     pub fn remaster_on(&self) -> bool {
         self.remaster_view.borrow().inbox.is_some()
+    }
+
+    /// How many rings of blocks round the viewer's the world stands its scenery, buildings and
+    /// objects on: the remaster's scenery distance while the remaster draws and names one, the
+    /// radius the scene was loaded with otherwise.
+    #[must_use]
+    pub fn scenery_radius_drawn(
+        &self,
+        fidelity: &dereth_client_runtime::render_prefs::FidelityPreferences,
+    ) -> u32 {
+        use dereth_client_runtime::render_prefs::FidelityFeature;
+        match fidelity.effective(FidelityFeature::RemasterScenery) {
+            0 => self.scenery_asked,
+            _ if !self.remaster_on() => self.scenery_asked,
+            rings => rings,
+        }
     }
 
     /// Turn the remaster on, reading its assets from `store`, or off. Turning it on again while
@@ -207,6 +228,12 @@ impl SceneDraw {
         remaster
             .renderer()
             .set_landscape(self.remaster_view.get_mut().landscape);
+        remaster
+            .renderer()
+            .set_lod(self.remaster_view.get_mut().lod);
+        remaster
+            .renderer()
+            .set_lamp_settings(self.remaster_view.get_mut().lamps.settings());
         // A scene that came before this one on the device, gone without being told to stop, left
         // its remaster behind: entering the world makes a new scene.
         drop(gpu.take_world_hook());
@@ -306,7 +333,7 @@ impl SceneDraw {
     pub fn remaster_mesh_tree_bases(&self, gpu: &mut Gpu) -> Vec<([f32; 3], f32, f32)> {
         remaster(gpu).map_or_else(Vec::new, |r| {
             let r = r.renderer();
-            let trees = r.mesh_trees().to_vec();
+            let trees = r.mesh_trees();
             r.instance_bases(&trees)
                 .into_iter()
                 .map(|(o, gpu, cards)| (o.to_array(), gpu, cards))
@@ -323,6 +350,20 @@ impl SceneDraw {
                 .impostor_bases()
                 .into_iter()
                 .map(|(b, lift)| (b.to_array(), lift))
+                .collect()
+        })
+    }
+
+    /// The remaster's last frame's impostor cards: each tree's first level's GfxObj, the centre
+    /// of the sphere its pictures are of (render space) and its radius, the turn of the tree's x
+    /// axis about its z axis (radians), and how much of the tree the card draws.
+    #[cfg(feature = "test-support")]
+    pub fn remaster_impostor_cards(&self, gpu: &mut Gpu) -> Vec<(u32, [f32; 3], f32, f32, f32)> {
+        remaster(gpu).map_or_else(Vec::new, |r| {
+            r.renderer()
+                .impostor_cards()
+                .into_iter()
+                .map(|c| (c.gfxobj, c.centre.to_array(), c.radius, c.turn, c.share))
                 .collect()
         })
     }
@@ -486,7 +527,7 @@ pub struct RemasterCapture {
     /// Each pixel's material kind (7 water), and on the ground the water's share of it, 0 to 255.
     pub kind: Vec<u8>,
     pub water: Vec<u8>,
-    /// On the ground, how far under the water's surface its bed is drawn, in steps of 4 cm.
+    /// On the ground, how far under the water's surface its bed is drawn, in steps of 1 cm.
     pub bed: Vec<u8>,
     /// Each pixel's depth.
     pub depth: Vec<f32>,
@@ -555,6 +596,10 @@ pub struct RemasterCounts {
     pub grounds: usize,
     pub objects: usize,
     pub meshes: usize,
+    /// Bodies posed, their vertices, and the nanoseconds posing them took.
+    pub skin_poses: u64,
+    pub skin_vertices: u64,
+    pub skin_nanos: u64,
 }
 
 impl SceneDraw {
@@ -588,6 +633,9 @@ impl SceneDraw {
             grounds: renderer.grounds(),
             objects: renderer.objects(),
             meshes: renderer.meshes(),
+            skin_poses: s.skin_poses,
+            skin_vertices: s.skin_vertices,
+            skin_nanos: s.skin_nanos,
         })
     }
 
@@ -699,5 +747,22 @@ pub(super) fn deliver(draw: &SceneDraw, gpu: &mut Gpu) {
         Some((d.surface.texture.0, d.tiling))
     });
     let mut src = DatAssets::for_scene(store, draw).with_pack(view.pack.clone(), view.packs);
+    // While the landscape streams within a budget, the pictures a change brings are made ahead of
+    // it, off the frame, and the change waits for them.
+    if draw.cfg.stream_budget.is_some() {
+        view.pictures
+            .borrow_mut()
+            .frame(super::remaster_pictures::Making {
+                store: store.clone(),
+                detail: draw.land.bake.environment_texture_detail,
+                scale: draw.land.bake.image_scale,
+                pack: view
+                    .pack
+                    .clone()
+                    .filter(|_| view.packs.any())
+                    .map(|p| (p, view.packs)),
+            });
+        src = src.with_pictures(&view.pictures);
+    }
     r.receive(deltas, frame, detail, &mut src);
 }

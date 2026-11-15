@@ -99,6 +99,49 @@ fn the_memory_store_keeps_the_same_rules() {
     assert_eq!(s.characters(a.id).expect("reads").len(), 1);
 }
 
+/// Every account's characters deleted by a time, and no others: one deleted later, one restored
+/// and one never deleted are left out.
+fn deleted_by_a_time_across_accounts(s: &mut impl Store) {
+    let a = s.create_account("One", None, 1).expect("made");
+    let b = s.create_account("Two", None, 1).expect("made");
+    for (id, account, name, deleted) in [
+        (1, a.id, "Early", Some(100)),
+        (2, b.id, "Also", Some(200)),
+        (3, a.id, "Later", Some(201)),
+        (4, b.id, "Kept", None),
+        (5, b.id, "Back", Some(50)),
+    ] {
+        s.insert_character(&character(id, account, name))
+            .expect("kept");
+        s.set_deleted(id, deleted).expect("set");
+    }
+    s.set_deleted(5, None).expect("restored");
+    let ids: Vec<u64> = s
+        .deleted_by(200)
+        .expect("reads")
+        .iter()
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(ids, vec![1, 2]);
+}
+
+/// Behaviour: server.operator.deleted-characters-go-without-their-account
+#[test]
+fn the_file_finds_every_accounts_characters_deleted_by_a_time() {
+    let file = TempFile(std::env::temp_dir().join(format!(
+        "yalain-store-test-deleted-by-{}.sqlite",
+        std::process::id()
+    )));
+    let _ = std::fs::remove_file(&file.0);
+    deleted_by_a_time_across_accounts(&mut SqliteStore::open(&file.0).expect("opens"));
+}
+
+/// Behaviour: server.operator.deleted-characters-go-without-their-account
+#[test]
+fn the_memory_store_finds_every_accounts_characters_deleted_by_a_time() {
+    deleted_by_a_time_across_accounts(&mut MemoryStore::default());
+}
+
 fn world() -> WorldState {
     WorldState {
         position: Some(StoredPosition {
@@ -796,6 +839,7 @@ fn no_character_is_kept_without_its_account_nor_its_state_without_it() {
 #[test]
 fn the_database_is_kept_with_a_write_ahead_log_and_a_save_outlives_a_crash() {
     let file = temp("wal");
+    let crashed = temp("wal-crashed");
     let mut s = SqliteStore::open(&file.0).expect("opens");
     let a = s.create_account("Tester", None, 100).expect("made");
     s.insert_character(&character(5, a.id, "Babyfare"))
@@ -807,9 +851,21 @@ fn the_database_is_kept_with_a_write_ahead_log_and_a_save_outlives_a_crash() {
         .expect("reads");
     assert_eq!(mode, "wal");
     drop(other);
-    // The server stops without closing the database: nothing is checkpointed.
-    std::mem::forget(s);
-    let mut again = SqliteStore::open(&file.0).expect("opens after the crash");
+    // The server stops without closing the database: a crash leaves what is on disk while the
+    // server holds it open, the file and its log, nothing checkpointed and no shared index.
+    for suffix in ["", "-wal"] {
+        let named = |p: &std::path::Path| {
+            let mut name = p.as_os_str().to_owned();
+            name.push(suffix);
+            std::path::PathBuf::from(name)
+        };
+        let mut from = std::fs::File::open(named(&file.0)).expect("the server's file");
+        let mut to = std::fs::File::create(named(&crashed.0)).expect("a copy");
+        let copied = std::io::copy(&mut from, &mut to).expect("copied");
+        assert!(copied > 0, "the file{suffix} is empty");
+    }
+    drop(s);
+    let mut again = SqliteStore::open(&crashed.0).expect("opens after the crash");
     assert_eq!(again.world_state(5).expect("reads"), Some(world()));
 }
 

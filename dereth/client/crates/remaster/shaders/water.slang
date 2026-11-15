@@ -2,18 +2,19 @@
 // and, with puddles asked for, where the ground gathers them: the share the weather lays in the
 // ground's material on a rainy day, held down far off and at grazing angles.
 //
-// For each such pixel the surface's normal is the water's level bent by its ripples and by the rings
-// round the bodies standing in it; what it reflects is found along the reflected ray, and laid
-// over the pixel's own color by the Fresnel share; and the sun glints off it where the sun reaches.
+// For each such pixel the surface's normal is the water's level bent by its ripples and, near the
+// eye, by the wake of the bodies wading in it; what it reflects is found along the reflected ray,
+// and laid over the pixel's own color by the Fresnel share; and the sun glints off it where the
+// sun reaches.
 //
 // - **Ripples** are one small picture of wind ripples laid several times over the water, at
 //   different sizes and turns, each drifting with the scene's clock alone, so a held clock draws a
 //   still frame; they calm with distance, so far water lies smooth, and a ripple finer than a pixel
 //   is left out, so it never shimmers. Puddles keep a few small waves of their own.
-// - **Rings**: the water swells round the legs of each body standing in it, and each sends out
-//   rings as it goes, every so often walking and now and then standing, each a short train of
-//   crests spreading from where it was sent and fading as it ages, so a walking body leaves a wake
-//   behind it.
+// - **The wake**: near the eye the water is simulated (`cs_wake`): what the bodies stir spreads as
+//   ripples that cross, turn back from the shore and die away, a bow wave runs before a body
+//   moving, the water about its legs is sheltered from the ripples, and it froths where it laps
+//   them as it moves, settling once it stands still.
 // - **The reflection**, where the device traces rays (`fs_traced`), is the scene itself: the ray
 //   is traced through the scene's acceleration structures, and what it meets is lit as the resolve
 //   lights it, whether it is on screen or not. Elsewhere (`fs_main`), on the water nearest the eye
@@ -37,35 +38,41 @@ import retail;
 import rt;
 
 // The pass's constants, in buffer `water` as float4 rows:
-//   0  x the scene's clock (seconds), y the waves' strength, z the rings' strength, w 1 where
-//      puddles are drawn
-//   1  x the bodies standing in the water, y 1 where the water is drawn, z 1 to check the
-//      reflection: each water pixel shows what its reflection found, w how strongly the water
-//      takes the light of what is seen through it over a lowered bed
+//   0  x the scene's clock (seconds), y the waves' strength, z nought, w 1 where puddles are
+//      drawn
+//   1  x nought, y 1 where the water is drawn, z 1 to check the reflection: each water pixel
+//      shows what its reflection found, w how strongly the water takes the light of what is seen
+//      through it over a lowered bed
 //   2  xy where the frame's space's origin lies in the world, meters
 //   3..10 the ripples' layers, two rows each: x meters a repeat, y how much it bends the surface,
 //      zw the cosine and sine of its turn; then xy the share of a repeat its picture is moved
-//   11..18 the bodies: where their feet are (the frame's space), and how fast they move (metres a
-//      second); eight rows always, those past the bodies' count nought
-//   19..21 (words) where the reflections are traced through the scene: the top-level structure,
+//   11..13 (words) where the reflections are traced through the scene: the top-level structure,
 //      the statics' and the objects' geometry tables, the scene's indices; its vertices, its
 //      materials, the sampler its textures are read with, its instances; the ground's vertices
 //      and cells, the statics' and the objects' entries (~0 where nothing is traced)
-//   22 (words) x how many statics come first among the instances; y the sky's constants, z its
+//   14 (words) x how many statics come first among the instances; y the sky's constants, z its
 //      sky-view table and w the sampler it is read with (~0 without the sky's tables)
-//   23 (words) x the world's vertex heights, y where the water lies about each vertex (how far
+//   15 (words) x the world's vertex heights, y where the water lies about each vertex (how far
 //      inside it, and how far over its level; two floats each) (~0 where the drawn ground is not
 //      drawn)
-//   24 the viewer's own body: where its feet are (the frame's space), w 1 where there is one
-//   25, 26 (words) the sky all round the eye: its pictures east, west, north, south, up and down,
+//   16 the viewer's own body: where its feet are (the frame's space), w 1 where there is one
+//   17, 18 (words) the sky all round the eye: its pictures east, west, north, south, up and down,
 //      and the sampler they are read with (~0 where it is not drawn)
-//   27 the scene mirrored in the water nearest the eye: (words) x its colors, y the sampler
+//   19 the scene mirrored in the water nearest the eye: (words) x its colors, y the sampler
 //      they are read with (~0 where it is not drawn), z (a float's bits) the water's level it is
 //      mirrored in
-//   28..31 its view and projection together, as four columns
-//   32 (words) x how many rings the bodies have sent out over the water
-//   33.. the rings, two rows each: where the body stood (the frame's space) and how long ago,
-//      seconds; then x how strongly
+//   20..23 its view and projection together, as four columns
+//   24 (words) the wake: x the cells as they stand (~0 where it is not simulated), yz the
+//      square's first world cell (signed)
+//   25 the wake's square: xy its south-west corner (the frame's space)
+//   26..34 the wake's kernel: how hard a cell's neighbor pulls it, by how far off it lies, a
+//      quarter of it, six a row
+//   35.. the wake's steps, nineteen rows each: (signed words) the square's first world cell, and
+//      the first cell of the square the step before held; xy its south-west corner (the frame's
+//      space), z gravity's pull over a step, cells, w how much of its motion the water loses a
+//      step; (words) x the step's count within the bodies' sway, y how many bodies stir it; then
+//      the bodies at the step's start and at its end, eight rows each: where their feet are (the
+//      frame's space), w how strongly they stir it
 static const uint WATER_STATE = 0;
 static const uint WATER_DRAWN = 1;
 // The drawn ground's constants' row whose x is 1 while the bed is lowered under the water.
@@ -73,24 +80,23 @@ static const uint D_BED = 6;
 static const uint WATER_GLOBAL = 2;
 static const uint WATER_LAYERS = 3;
 static const uint LAYERS = 4;
-static const uint WATER_WADERS = 11;
-static const uint WADERS = 8;
-static const uint WATER_TRACE = 19;
-static const uint WATER_SKY = 22;
-static const uint WATER_LAND = 23;
-static const uint WATER_VIEWER = 24;
-static const uint WATER_PROBE = 25;
-static const uint WATER_PLANAR = 27;
-static const uint WATER_RING_COUNT = 32;
-static const uint WATER_RINGS = 33;
-static const uint RINGS = 32;
+static const uint WATER_TRACE = 11;
+static const uint WATER_SKY = 14;
+static const uint WATER_LAND = 15;
+static const uint WATER_VIEWER = 16;
+static const uint WATER_PROBE = 17;
+static const uint WATER_PLANAR = 19;
+static const uint WATER_WAKE = 24;
+static const uint WAKE_KERNEL = 26;
+static const uint WAKE_STEPS = 35;
+static const uint WAKE_STEP_ROWS = 19;
 static const uint NONE = 0xFFFFFFFF;
 
 // The water's kind, as the material target's second byte holds it.
 static const uint KIND_WATER = 7;
 // The step, meters, of how far under the water's surface the ground draws its bed: the material
 // target's fourth byte on the ground (0 where the bed is not lowered).
-static const float BED_STEP = 0.04;
+static const float BED_STEP = 0.01;
 
 // The share of the Fresnel reflection drawn: water seen at a low angle reflects nearly all of the
 // sky, which would turn the water's own color to the sky's white; this keeps it showing through.
@@ -103,7 +109,16 @@ static const float MOST_SLOPE = 0.6;
 static const float RIPPLES_CALM = 120.0;
 // How far the eye sees into the water, meters: what is seen through it fades into its own color
 // over about this much of it.
-static const float CLARITY = 1.6;
+static const float CLARITY = 1.0;
+// How deep the water is before it reflects all it reflects and takes at least its share of its
+// own color, meters: both come in from its edge.
+static const float SHALLOW = 0.1;
+// The least share of its own color water that deep takes however clear it is, so clear shallows
+// still read as water.
+static const float FILM = 0.45;
+// How much more steeply the line of sight runs once it enters the water: water's refractive
+// index over the air's.
+static const float REFRACTION = 1.33;
 // The landscape's vertices: a cell's side, meters, and how many a side; the drawn ground's
 // constants' rows of its terrain's colors, each type's, and the water's types.
 static const float CELL = 24.0;
@@ -133,6 +148,11 @@ struct Push
     // The drawn ground's constants and the landscape's terrain words (~0 where it is not drawn).
     uint drawn;
     uint words;
+    // For the wake's step alone: the cells it reads and those it writes, and which of the frame's
+    // steps it is.
+    uint wake_from;
+    uint wake_to;
+    uint wake_step;
 };
 
 [[vk::push_constant]]
@@ -306,72 +326,6 @@ float3 hue_at(float2 p)
         }
     }
     return n > 0.0 ? sum / n : row(push.drawn, D_COLORS + WATER_FIRST).rgb;
-}
-
-// How fast a ring spreads over the water, metres a second; how long it lasts, seconds for most
-// of it; and the length of its crests, metres.
-static const float RING_SPEED = 0.8;
-static const float RING_LIFE = 1.1;
-static const float RING_CREST = 0.3;
-
-// How the surface leans at `p` from the bodies standing in the water: the water heaped a little
-// round where each stands, more as it moves; and the rings each sends out as it goes, each a short
-// train of crests spreading from where the body stood when it sent it, wider and fainter as it
-// ages, so a body walking draws a wake of rings behind it and a body standing still now and then
-// a faint one.
-float2 rings(float3 p, float t, float strength)
-{
-    float2 slope = float2(0.0, 0.0);
-    if (strength <= 0.0)
-    {
-        return slope;
-    }
-    uint n = min(uint(row(push.water, WATER_DRAWN).x + 0.5), WADERS);
-    for (uint i = 0; i < n; i++)
-    {
-        float4 w = row(push.water, WATER_WADERS + i);
-        if (abs(p.z - w.z) > 1.5)
-        {
-            continue;
-        }
-        float2 d = p.xy - w.xy;
-        float r = length(d);
-        if (r > 2.0 || r < 1e-3)
-        {
-            continue;
-        }
-        // A swell round the legs: highest at them, gone a metre or so out.
-        float a = 0.012 + 0.03 * saturate(w.w / 2.0);
-        float x = r - 0.25;
-        slope += (d / r) * (-2.0 * x / 0.16) * exp(-x * x / 0.16) * a;
-    }
-    uint count = min(row_u(push.water, WATER_RING_COUNT).x, RINGS);
-    float k = 2.0 * PI / RING_CREST;
-    for (uint j = 0; j < count; j++)
-    {
-        float4 o = row(push.water, WATER_RINGS + j * 2);
-        float4 e = row(push.water, WATER_RINGS + j * 2 + 1);
-        if (abs(p.z - o.z) > 1.5)
-        {
-            continue;
-        }
-        float age = o.w;
-        float2 d = p.xy - o.xy;
-        float r = length(d);
-        float front = 0.25 + RING_SPEED * age;
-        float width = 0.18 + 0.12 * age;
-        float x = r - front;
-        if (abs(x) > 2.5 * width || r < 1e-3)
-        {
-            continue;
-        }
-        // A couple of centimetres high, fainter as it ages and as it spreads over a wider ring.
-        float a = e.x * 0.02 * exp(-age / RING_LIFE) * saturate(age * 12.0 + 0.25) * rsqrt(max(front, 0.3));
-        float envelope = exp(-x * x / (width * width));
-        float rise = a * envelope * (k * cos(k * x) - 2.0 * x / (width * width) * sin(k * x));
-        slope += (d / r) * rise;
-    }
-    return slope * strength;
 }
 
 // The sky that shows above pixel `px`, the first pixel of sky up its column, a few steps at most;
@@ -747,9 +701,31 @@ float over_level(uint shore, int2 g)
     return asfloat(buffers[NonUniformResourceIndex(shore)].Load(uint(c.y * SIDE + c.x) * 8 + 4));
 }
 
-// How far inside the water world `p` lies, meters, negative on land, between the vertices; far
-// outside it where the ground does not say where the water lies.
-float inside_water(float2 p)
+// How far outside the water the drawn ground draws its edge smoothly and broken by noise, meters:
+// farther out, between the vertices.
+static const float SHORE_NEAR = 40.0;
+
+// The weights at `t` of the smooth curve through four values a step apart, between the middle two.
+float4 catmull(float t)
+{
+    float t2 = t * t;
+    float t3 = t2 * t;
+    return 0.5 * float4(-t3 + 2.0 * t2 - t, 3.0 * t3 - 5.0 * t2 + 2.0, -3.0 * t3 + 4.0 * t2 + t, t3 - t2);
+}
+
+// How much of a wander `cell` meters across shows in a pixel that covers `foot` meters.
+float shore_resolved(float cell, float foot)
+{
+    return 1.0 - smoothstep(0.25 * cell, 0.5 * cell, foot);
+}
+
+// How far inside the water world `p` lies, meters, negative on land, where the drawn ground draws
+// the water's edge for a pixel covering `foot` meters: smoothly through the vertices, and broken
+// by a little noise. So what stands in water the ground draws stands in this water, however the
+// edge runs between the vertices: in a cell whose water corners lie on a diagonal, a straight
+// blend of its corners takes two of its quarters for land. Far outside it where the ground does
+// not say where the water lies.
+float shore_inside(float2 p, float foot)
 {
     uint shore = row_u(push.water, WATER_LAND).y;
     if (shore == NONE)
@@ -757,15 +733,33 @@ float inside_water(float2 p)
         return -1000.0;
     }
     float2 q = p / CELL;
-    int2 g = int2(floor(q));
-    float2 f = saturate(q - float2(g));
-    float s[4];
-    for (int k = 0; k < 4; k++)
+    int2 c = int2(floor(q));
+    float2 f = saturate(q - float2(c));
+    ByteAddressBuffer b = buffers[NonUniformResourceIndex(shore)];
+    float s[16];
+    for (int k = 0; k < 16; k++)
     {
-        int2 c = clamp(g + int2(k & 1, k >> 1), int2(0, 0), int2(SIDE - 1, SIDE - 1));
-        s[k] = asfloat(buffers[NonUniformResourceIndex(shore)].Load(uint(c.y * SIDE + c.x) * 8));
+        int2 g = clamp(c + int2(k % 4 - 1, k / 4 - 1), int2(0, 0), int2(SIDE - 1, SIDE - 1));
+        s[k] = asfloat(b.Load(uint(g.y * SIDE + g.x) * 8));
     }
-    return lerp(lerp(s[0], s[1], f.x), lerp(s[2], s[3], f.x), f.y);
+    if (max(max(s[5], s[6]), max(s[9], s[10])) < -SHORE_NEAR)
+    {
+        return lerp(lerp(s[5], s[6], f.x), lerp(s[9], s[10], f.x), f.y);
+    }
+    float4 wx = catmull(f.x);
+    float4 wy = catmull(f.y);
+    float inside = 0.0;
+    for (int i = 0; i < 4; i++)
+    {
+        float column = 0.0;
+        for (int j = 0; j < 4; j++)
+        {
+            column += wy[j] * s[j * 4 + i];
+        }
+        inside += wx[i] * column;
+    }
+    return inside + (value_noise(p, 9.0) - 0.5) * 6.0 * shore_resolved(9.0, foot)
+           + (value_noise(p + float2(31.7, 12.9), 3.5) - 0.5) * 2.0 * shore_resolved(3.5, foot);
 }
 
 // The water's level at world `p`, across retail's triangles: level everywhere the water reaches,
@@ -795,6 +789,315 @@ float water_level(uint heights, float2 p)
     }
     return f.x + f.y <= 1.0 ? h00 + f.x * (h10 - h00) + f.y * (h01 - h00)
                             : h11 + (1.0 - f.x) * (h01 - h11) + (1.0 - f.y) * (h10 - h11);
+}
+
+// --- the wake ------------------------------------------------------------------------------
+//
+// The water near the eye, simulated: a square of it `WAKE_SIDE` cells of `WAKE_CELL` meters a
+// side about the body nearest the eye, each cell holding how far its water stands over the
+// water's level, now and a step ago. Each step a cell's height is pulled by its neighbors' within
+// `WAKE_REACH` cells through the kernel, the water's vertical derivative, so what disturbs the
+// water spreads as a train of ripples, the longer the faster, rather than as one sharp ring, and a
+// body walking leaves a V of them behind it.
+//
+// The square is held wrapped by the world's cells: a cell of the world is always at the same place
+// among the cells, so the square follows the body a cell at a time and keeps what it holds, and a
+// cell new to the square starts calm. Land holds the water at its level, so the ripples turn back
+// from the shore; toward the square's edges they are taken up, so none comes back from there.
+//
+// Bodies standing in the water push it aside with their legs, a little more and less as they
+// sway, so faint rings spread from them as from anything standing in water; they shelter the water
+// about them from the wind's ripples; and moving, they heap it up ahead of them and draw it down
+// behind, the faster the more. Beside its heights each cell keeps that shelter, and the line where
+// the water meets the legs of a moving body, which laps them as the water there rises and falls
+// and settles away once the body stands still.
+//
+// The cells are four floats each: the height now and a step ago, meters; the shelter; the line.
+
+static const int WAKE_SIDE = 256;
+static const float WAKE_CELL = 0.08;
+static const int WAKE_GROUP = 16;
+static const int WAKE_REACH = 5;
+static const int WAKE_TILE = 26;
+static const uint WAKE_BODIES = 8;
+// How many cells in from the square's edge the ripples are taken up over.
+static const float WAKE_SPONGE = 14.0;
+// A body's legs as the water feels them: how far out from where it stands, meters, and how deep
+// they push the water at the most.
+static const float LEGS = 0.35;
+static const float LEGS_PUSH = 0.1;
+// How much of what the legs push aside rises and falls as the body sways, in two motions that
+// drift in and out of step, each a whole number of times over the sway's 600 steps; and how far
+// about a body the water is sheltered, meters.
+static const float SWAY = 0.45;
+static const float SWAYS = 9.0;
+static const float SWAYS_TOO = 13.0;
+static const float SHELTER = 0.9;
+// How the froth at a body's legs comes and goes: the pace, meters a second, it starts to froth at
+// and the pace it froths wholly at; and how long, seconds, it takes to settle once the body stands
+// still.
+static const float FROTH_FROM = 0.15;
+static const float FROTH_FULL = 1.5;
+static const float FROTH_SETTLES = 0.3;
+// A moving body's bow: how far ahead of it and behind it the water is heaped and drawn down,
+// meters; how wide the heap is, meters; how much it heaps a step at a run, meters; the speed that
+// counts as a run, meters a second; and a step, seconds.
+static const float BOW_OFF = 0.38;
+static const float BOW_WIDTH = 0.28;
+static const float BOW_RISE = 0.008;
+static const float RUN = 4.0;
+static const float WAKE_STEP = 1.0 / 60.0;
+
+groupshared float wake_tile[WAKE_TILE * WAKE_TILE];
+groupshared float wake_kernel[(WAKE_REACH + 1) * (WAKE_REACH + 1)];
+
+// Where world cell `w` is held among the cells, bytes.
+uint wake_place(int2 w)
+{
+    int2 t = w & (WAKE_SIDE - 1);
+    return uint(t.y * WAKE_SIDE + t.x) * 16;
+}
+
+// Whether world cell `w` lies in the square whose first cell is `first`.
+bool wake_within(int2 w, int2 first)
+{
+    int2 r = w - first;
+    return all(r >= int2(0, 0)) && all(r < int2(WAKE_SIDE, WAKE_SIDE));
+}
+
+// The water at world cell `w` as the step before left it, now and a step before that: calm outside
+// the square being stepped, and where the square the step before held, `before`, did not reach.
+float2 wake_held(int2 w, int2 first, int2 before)
+{
+    if (!wake_within(w, first) || !wake_within(w, before))
+    {
+        return float2(0.0, 0.0);
+    }
+    return asfloat(buffers[NonUniformResourceIndex(push.wake_from)].Load2(wake_place(w)));
+}
+
+// The line where the water met the legs at world cell `w`, as the step before left it: none
+// outside the square being stepped, and where the square the step before held, `before`, did not
+// reach.
+float wake_line_held(int2 w, int2 first, int2 before)
+{
+    if (!wake_within(w, first) || !wake_within(w, before))
+    {
+        return 0.0;
+    }
+    return asfloat(buffers[NonUniformResourceIndex(push.wake_from)].Load(wake_place(w) + 12));
+}
+
+// How far legs whose feet stand at height `feet` stand in water at level `level`: not at all with
+// the feet out of it, wholly from knee deep.
+float wet(float feet, float level)
+{
+    return saturate((level + 0.05 - feet) / 0.45);
+}
+
+// How much more or less of the water the `k`th body pushes aside as it sways, `count` steps into
+// the sway.
+float sway(uint k, uint count)
+{
+    float t = float(count % 600) / 600.0;
+    float one = sin(2.0 * PI * (t * SWAYS + float(k) * 0.37));
+    float two = sin(2.0 * PI * (t * SWAYS_TOO + float(k) * 0.71));
+    return 1.0 + SWAY * (0.65 * one + 0.35 * two);
+}
+
+// How deep the legs of a body at `at` (its feet's height z, how strongly it stirs the water w)
+// push the water at `q` (the frame's space), meters, in water at level `level`.
+float pushed(float2 q, float4 at, float level)
+{
+    float r = length(q - at.xy) / LEGS;
+    if (r >= 1.0 || at.w <= 0.0)
+    {
+        return 0.0;
+    }
+    float k = 1.0 - r * r;
+    return LEGS_PUSH * k * k * wet(at.z, level) * at.w;
+}
+
+// How much a body moving from `was` to `at` over a step heaps the water at `q` ahead of it, or
+// draws it down behind it (negative), meters: as much drawn down as heaped, so the water neither
+// gains nor loses.
+float bow(float2 q, float4 was, float4 at, float level)
+{
+    float2 moved = at.xy - was.xy;
+    float len = length(moved);
+    if (len < 1e-5)
+    {
+        return 0.0;
+    }
+    float2 ahead = moved / len;
+    float speed = min(len / WAKE_STEP / RUN, 1.3);
+    float2 front = q - (at.xy + ahead * BOW_OFF);
+    float2 back = q - (at.xy - ahead * BOW_OFF);
+    float w2 = BOW_WIDTH * BOW_WIDTH;
+    float heap = exp(-dot(front, front) / w2) - exp(-dot(back, back) / w2);
+    return BOW_RISE * speed * heap * wet(at.z, level) * at.w;
+}
+
+// One step of the wake, `push.wake_step` of the frame's: each cell of the square from what the
+// step before left in `push.wake_from`, stirred by the bodies, into `push.wake_to`. The cells are
+// stepped by where they lie in the square, so a group's cells lie together in the world wherever
+// the square's wrap falls.
+[shader("compute")]
+[numthreads(16, 16, 1)]
+void cs_wake(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index : SV_GroupIndex)
+{
+    uint base = WAKE_STEPS + push.wake_step * WAKE_STEP_ROWS;
+    int4 cells = asint(row_u(push.water, base));
+    float4 place = row(push.water, base + 1);
+    uint4 misc = row_u(push.water, base + 2);
+    int2 first = cells.xy;
+    // The group's cells and those within reach of them, read once; and the kernel.
+    int2 corner = first + int2(group.xy) * WAKE_GROUP - int2(WAKE_REACH, WAKE_REACH);
+    for (uint i = index; i < uint(WAKE_TILE * WAKE_TILE); i += uint(WAKE_GROUP * WAKE_GROUP))
+    {
+        int2 o = int2(int(i % uint(WAKE_TILE)), int(i / uint(WAKE_TILE)));
+        wake_tile[i] = wake_held(corner + o, first, cells.zw).x;
+    }
+    if (index < uint((WAKE_REACH + 1) * (WAKE_REACH + 1)))
+    {
+        wake_kernel[index] = row(push.water, WAKE_KERNEL + index / 4)[index % 4];
+    }
+    GroupMemoryBarrierWithGroupSync();
+    int2 rel = int2(id.xy);
+    int2 w = first + rel;
+    uint at = wake_place(w);
+    float2 q = place.xy + (float2(rel) + 0.5) * WAKE_CELL;
+    float2 world = q + row(push.water, WATER_GLOBAL).xy;
+    // On land the water holds its level: land where the drawn ground draws it.
+    float inside = shore_inside(world, WAKE_CELL);
+    if (inside <= 0.0)
+    {
+        rw_buffers[NonUniformResourceIndex(push.wake_to)].Store4(at, uint4(0, 0, 0, 0));
+        return;
+    }
+    float2 now = wake_held(w, first, cells.zw);
+    // The water's vertical derivative there, from its neighbors' heights.
+    int2 local = rel - int2(group.xy) * WAKE_GROUP + int2(WAKE_REACH, WAKE_REACH);
+    float pull = 0.0;
+    for (int dy = -WAKE_REACH; dy <= WAKE_REACH; dy++)
+    {
+        for (int dx = -WAKE_REACH; dx <= WAKE_REACH; dx++)
+        {
+            float k = wake_kernel[abs(dy) * (WAKE_REACH + 1) + abs(dx)];
+            pull += k * wake_tile[(local.y + dy) * WAKE_TILE + local.x + dx];
+        }
+    }
+    // The step, the water's motion damped a little, more in the shallows at the very edge, where
+    // the ripples break on the shore.
+    float a = place.w + (1.0 - smoothstep(0.0, 0.8, inside)) * 0.06;
+    float h = (now.x * (2.0 - a) - now.y - place.z * pull) / (1.0 + a);
+    // The bodies: the change in how deep their legs push the water, their bows, the water they
+    // shelter and the line where it meets their legs.
+    float level = water_level(row_u(push.water, WATER_LAND).x, world);
+    uint count = min(misc.y, WAKE_BODIES);
+    float shelter = 0.0;
+    float line = 0.0;
+    for (uint k = 0; k < count; k++)
+    {
+        float4 from = row(push.water, base + 3 + k);
+        float4 to = row(push.water, base + 3 + WAKE_BODIES + k);
+        h -= pushed(q, to, level) * sway(k, misc.x + 1) - pushed(q, from, level) * sway(k, misc.x);
+        h += bow(q, from, to, level);
+        float r = length(q - to.xy);
+        float there = wet(to.z, level) * min(to.w, 1.0);
+        shelter = max(shelter, there * exp(-(r / SHELTER) * (r / SHELTER)));
+        // The line laps the legs as the body moves through the water: wider and brighter as the
+        // water there rises, narrower as it falls; none while it stands still.
+        float lap = clamp(0.5 + now.x * 30.0, 0.15, 1.5);
+        float d = (r - LEGS * 1.1) / (0.04 + 0.04 * lap);
+        float pace = length(to.xy - from.xy) / WAKE_STEP;
+        float stirred = smoothstep(FROTH_FROM, FROTH_FULL, pace);
+        line = max(line, there * lap * stirred * exp(-d * d));
+    }
+    // What the line held settles away once the body stops.
+    line = max(line, wake_line_held(w, first, cells.zw) * exp(-WAKE_STEP / FROTH_SETTLES));
+    // Toward the square's edges the ripples are taken up.
+    float2 f = float2(rel);
+    float edge = min(min(f.x, f.y), min(float(WAKE_SIDE - 1) - f.x, float(WAKE_SIDE - 1) - f.y));
+    float calm = lerp(0.85, 1.0, smoothstep(0.0, WAKE_SPONGE, edge));
+    float4 next = float4(clamp(h * calm, -0.3, 0.3), now.x * calm, shelter, line);
+    rw_buffers[NonUniformResourceIndex(push.wake_to)].Store4(at, asuint(next));
+}
+
+// The wake where a pixel sees it: how it leans east and north and how it curves (positive in a
+// trough); how much of it is drawn there; the shelter and the line where it meets a body's legs;
+// and where it lies, fixed in the world, meters, for what is laid over it.
+struct Wake
+{
+    float2 slope;
+    float curve;
+    float shown;
+    float shelter;
+    float line;
+    float2 fixed;
+};
+
+Wake no_wake()
+{
+    Wake k;
+    k.slope = float2(0.0, 0.0);
+    k.curve = 0.0;
+    k.shown = 0.0;
+    k.shelter = 0.0;
+    k.line = 0.0;
+    k.fixed = float2(0.0, 0.0);
+    return k;
+}
+
+// The wake's cells at `p` (the frame's space), between their centers: the two floats `offset`
+// bytes into each.
+float2 wake_cells(uint cells, int2 first, float2 corner, float2 p, uint offset)
+{
+    float2 c = (p - corner) / WAKE_CELL - 0.5;
+    int2 i = int2(floor(c));
+    float2 f = c - float2(i);
+    ByteAddressBuffer b = buffers[NonUniformResourceIndex(cells)];
+    float2 c00 = asfloat(b.Load2(wake_place(first + i) + offset));
+    float2 c10 = asfloat(b.Load2(wake_place(first + i + int2(1, 0)) + offset));
+    float2 c01 = asfloat(b.Load2(wake_place(first + i + int2(0, 1)) + offset));
+    float2 c11 = asfloat(b.Load2(wake_place(first + i + int2(1, 1)) + offset));
+    return lerp(lerp(c00, c10, f.x), lerp(c01, c11, f.x), f.y);
+}
+
+// The wake at `p` (the frame's space), as a pixel covering `foot` meters of the water sees it:
+// none outside its square, fading in over its edge, and none where its cells are finer than the
+// pixel, so it never shimmers under the anti-aliasing's jitter.
+Wake wake_seen(float2 p, float foot)
+{
+    Wake k = no_wake();
+    uint4 head = row_u(push.water, WATER_WAKE);
+    if (head.x == NONE)
+    {
+        return k;
+    }
+    int2 first = asint(head.yz);
+    float2 corner = row(push.water, WATER_WAKE + 1).xy;
+    float side = float(WAKE_SIDE) * WAKE_CELL;
+    float2 r = p - corner;
+    float edge = min(min(r.x, r.y), min(side - r.x, side - r.y));
+    k.shown = smoothstep(0.5, 2.0, edge) * (1.0 - smoothstep(0.16, 0.45, foot));
+    if (k.shown <= 0.0)
+    {
+        return k;
+    }
+    float e = WAKE_CELL;
+    float h = wake_cells(head.x, first, corner, p, 0).x;
+    float east = wake_cells(head.x, first, corner, p + float2(e, 0.0), 0).x;
+    float west = wake_cells(head.x, first, corner, p - float2(e, 0.0), 0).x;
+    float north = wake_cells(head.x, first, corner, p + float2(0.0, e), 0).x;
+    float south = wake_cells(head.x, first, corner, p - float2(0.0, e), 0).x;
+    k.slope = float2(east - west, north - south) / (2.0 * e) * k.shown;
+    k.curve = (east + west + north + south - 4.0 * h) / (e * e) * k.shown;
+    float2 bodies = wake_cells(head.x, first, corner, p, 8) * k.shown;
+    k.shelter = bodies.x;
+    k.line = bodies.y;
+    k.fixed = r + float2(first & 1023) * WAKE_CELL;
+    return k;
 }
 
 // Where the line of sight to the bed at `bed`, drawn about `under` meters under the water, meets
@@ -847,19 +1150,26 @@ float water_share(float2 p)
     return share;
 }
 
-// Whether the picture draws water on the ground under `surface`, a point on the water's level: 1
-// where the ground it shows there is water, 0 where it is land, and -1 where it does not show that
-// ground. The ground is drawn water where retail's blend says so, which the corners' share only
-// approaches along a shore. Where something stands in front of that ground (the body the line of
-// sight met, most often), the first ground the picture shows below it in its column stands for it,
-// so long as it lies near.
-int drawn_water_under(float3 surface)
+// Whether the picture draws water on the ground under `surface`, where the line of sight to
+// `world` crosses the water's level: 1 where the ground it shows there is water, 0 where it is
+// land, and -1 where it does not show that ground; where it is water, `top` is the height its
+// surface is drawn at, which over a bank is the ground itself rather than the water's level. The
+// ground is drawn water where retail's blend says so, which the corners' share only approaches
+// along a shore. The ground under the surface is looked for down the picture's column from the
+// surface: past what stands behind the surface (the body the line of sight met, most often) and
+// any water beyond it, to the first ground that lies near under it. Dry ground the picture shows
+// between the surface and `world` is land too: the line of sight passes over it after it leaves
+// the water. The drawn ground is not retail's: it rises along a bank, and seen low across the
+// water a fraction of a meter of height moves it meters along the line of sight, so its place is
+// found in the picture rather than from retail's height.
+int drawn_water_under(float3 surface, float3 world, out float top)
 {
+    top = surface.z;
     uint heights = row_u(push.water, WATER_LAND).x;
     float2 g = row(push.water, WATER_GLOBAL).xy;
     float3 ground = float3(surface.xy, min(land_height(heights, surface.xy + g), surface.z));
     float w;
-    float2 at_px = screen_of(ground, w);
+    float2 at_px = screen_of(surface, w);
     float2 e = extent();
     if (w <= 0.0 || any(at_px < 0.0) || at_px.x >= e.x || at_px.y >= e.y)
     {
@@ -867,9 +1177,11 @@ int drawn_water_under(float3 surface)
     }
     float3 eye = row(push.frame, FRAME_EYE).xyz;
     float near = max(1.5, 0.05 * distance(eye, ground));
+    float reach = distance(eye.xy, ground.xy);
+    float stands = distance(eye.xy, world.xy);
     int2 q = int2(at_px);
     int step = max(int(e.y) / 270, 1);
-    for (int k = 0; k < 48; k++)
+    for (int k = 0; k < 64; k++)
     {
         if (q.y >= int(e.y))
         {
@@ -882,14 +1194,29 @@ int drawn_water_under(float3 surface)
         }
         if (cls == CLASS_GROUND)
         {
-            // The ground shown must be the ground under the surface, not some ground past it or
-            // short of it.
             float3 shown = world_at(float2(q) + 0.5, at(push.outdoor_depth, q).x);
-            if (distance(shown.xy, ground.xy) > near)
+            if (distance(shown.xy, ground.xy) <= near)
             {
+                if (kind_at(q) != KIND_WATER)
+                {
+                    return 0;
+                }
+                // The bed's depth under the surface, where it is lowered; the deepest step stands
+                // for any depth past it.
+                uint under = uint(at(push.material, q).w * 255.0 + 0.5);
+                top = under < 255 ? shown.z + float(under) * BED_STEP : surface.z;
+                return 1;
+            }
+            float from_eye = distance(eye.xy, shown.xy);
+            if (from_eye < reach)
+            {
+                // Ground short of the surface: the ground under it is hidden.
                 return -1;
             }
-            return kind_at(q) == KIND_WATER ? 1 : 0;
+            if (from_eye < stands && kind_at(q) != KIND_WATER)
+            {
+                return 0;
+            }
         }
         q.y += step;
     }
@@ -899,7 +1226,9 @@ int drawn_water_under(float3 surface)
 // Where the line of sight to `world`, a point of something standing in the water, crosses the
 // water's surface above it: false where it does not stand below the water, or the eye is under
 // the water, or the water is not drawn there: the ground the picture shows under the crossing is
-// land, or, where the picture does not show it, the corners there are not water.
+// land, or, where the picture does not show it, the corners there are not water. Where the water
+// there is drawn as a film over the ground rather than at its level, it is under it only below
+// that film.
 bool under_water(float3 world, out float3 surface)
 {
     surface = world;
@@ -925,8 +1254,21 @@ bool under_water(float3 world, out float3 surface)
         return false;
     }
     surface = eye + (world - eye) * ((eye.z - level) / (eye.z - world.z));
-    int drawn = drawn_water_under(surface);
-    return drawn < 0 ? water_share(surface.xy + g) > 0.5 : drawn > 0;
+    float top;
+    int drawn = drawn_water_under(surface, world, top);
+    if (drawn < 0)
+    {
+        return water_share(surface.xy + g) > 0.5;
+    }
+    if (drawn == 0 || world.z >= top - 0.005)
+    {
+        return false;
+    }
+    if (top < level)
+    {
+        surface = eye + (world - eye) * ((eye.z - top) / (eye.z - world.z));
+    }
+    return true;
 }
 
 // What lies far off the way `dir` goes from `from`, past `t0` meters: the land, then the sky.
@@ -1203,9 +1545,10 @@ bool first_hit(uint accel, uint statics, uint objects, uint indices, uint vertic
 }
 
 // Whether world `x` (the frame's space), a point of retail's ground, lies under the water as the
-// ground is drawn: inside the water, or at or under its level where there is water. The ground
-// the acceleration structures hold there is the water's own level, or a bank the drawn ground
-// lowers under it, which a reflection off the water passes over.
+// ground is drawn: inside the water where the ground draws its edge (finely, as near the eye), or
+// at or under its level where there is water. The ground the acceleration structures hold there
+// is the water's own level, or a bank the drawn ground lowers under it, which a reflection off the
+// water passes over.
 bool on_the_water(float3 x)
 {
     uint heights = row_u(push.water, WATER_LAND).x;
@@ -1214,7 +1557,7 @@ bool on_the_water(float3 x)
         return false;
     }
     float2 p = x.xy + row(push.water, WATER_GLOBAL).xy;
-    return inside_water(p) > 0.0 || (water_share(p) > 0.0 && x.z <= water_level(heights, p) + 0.05);
+    return shore_inside(p, 0.1) > 0.0 || (water_share(p) > 0.0 && x.z <= water_level(heights, p) + 0.05);
 }
 
 // The scene along the ray from `from` the way `dir` goes, traced through its acceleration
@@ -1319,10 +1662,16 @@ Found traced_scene(float3 from, float3 dir, float dist)
     }
     else
     {
-        // A mesh: its corners' normals turned into the world, and its texture.
+        // A mesh: its corners' normals turned into the world, and its texture, read as the
+        // G-buffer reads it: moved by its instance's offset, and a pack's leaves turned toward the
+        // frame's green.
+        uint index = h.index;
+        uint4 entry = index < statics_first
+                          ? row_u(c.z, index * 2)
+                          : row_u(c.w, (index - statics_first) * 2);
         ByteAddressBuffer ib = buffers[NonUniformResourceIndex(indices)];
         float3 nl = float3(0.0, 0.0, 0.0);
-        float2 uv = float2(0.0, 0.0);
+        float2 uv = row(instances, entry.x * INSTANCE_ROWS + 6).xy;
         float3 tint = float3(0.0, 0.0, 0.0);
         for (uint v = 0; v < 3; v++)
         {
@@ -1347,14 +1696,10 @@ Found traced_scene(float3 from, float3 dir, float dist)
                          .rgb;
         }
         // A surface drawn under its vertices' colors.
-        if ((m.y & 512) != 0)
+        if ((m.y & VERTEX_COLORED) != 0)
         {
             albedo *= tint;
         }
-        uint index = h.index;
-        uint4 entry = index < statics_first
-                          ? row_u(c.z, index * 2)
-                          : row_u(c.w, (index - statics_first) * 2);
         uint4 info = row_u(instances, entry.x * INSTANCE_ROWS + 5);
         cls = info.y;
         leaf = uint(row(materials, g.z * 2 + 1).z) == KIND_FOLIAGE;
@@ -1381,9 +1726,13 @@ interface IReflection
     Found seen(float3 from, float3 dir, int2 start, float dist);
 };
 
+// How far past the mirrored picture's edges, a share of its size, the way may be turned by the
+// ripples and still take what the picture shows at its edge.
+static const float MIRRORED_PAST = 0.25;
+
 // What the scene mirrored in the water shows the way `dir` goes from `from`, a point of the
 // water's surface; false where it is not drawn, `from` does not lie at the level it is mirrored
-// in, or the way leaves its picture.
+// in, or the way leaves its picture by more than its ripples turn it aside.
 bool mirrored(float3 from, float3 dir, out float3 color)
 {
     color = float3(0.0, 0.0, 0.0);
@@ -1392,19 +1741,25 @@ bool mirrored(float3 from, float3 dir, out float3 color)
     {
         return false;
     }
-    // The mirrored view sees the reflected ray's mirror image, which runs on down from `from`:
-    // where it stands some way along, so a surface bent by its ripples looks a little aside.
-    float3 q = from + float3(dir.xy, -dir.z) * 10.0;
+    // The mirrored view's transform mirrors what it is given, so a point some way along the
+    // reflected ray lands where its mirror image is seen: a surface bent by its ripples looks a
+    // little aside.
+    float3 q = from + dir * 10.0;
     float4 c = transform(push.water, WATER_PLANAR + 1, float4(q, 1.0));
     if (c.w <= 0.0)
     {
         return false;
     }
     float2 uv = float2(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5);
-    if (any(uv < 0.0) || any(uv > 1.0))
+    // The picture is the frame's own view mirrored, so the water at the frame's edges finds its
+    // reflection at the picture's edges, and where the ripples turn it a little past them, what
+    // the picture shows at its edge stands for it: anything else that way, found elsewhere, is
+    // lit otherwise and would show as a bar down each side.
+    if (any(uv < -MIRRORED_PAST) || any(uv > 1.0 + MIRRORED_PAST))
     {
         return false;
     }
+    uv = saturate(uv);
     color = textures[NonUniformResourceIndex(w.x)]
                 .SampleLevel(samplers[NonUniformResourceIndex(w.y)], uv, 0.0)
                 .rgb;
@@ -1495,7 +1850,7 @@ float4 shade<R : IReflection>(float4 position, R reflection)
     float3 v = (eye - world) / max(dist, 1e-4);
     float t = state.x;
     float2 slope;
-    float2 ringed = float2(0.0, 0.0);
+    Wake wake = no_wake();
     float3 n;
     if (water)
     {
@@ -1507,12 +1862,14 @@ float4 shade<R : IReflection>(float4 position, R reflection)
         float cap = dist * 0.01 + 0.01;
         dx *= min(1.0, cap / max(length(dx), 1e-6));
         dy *= min(1.0, cap / max(length(dy), 1e-6));
+        // Near the eye, the wake: the water about a body's legs sheltered from the ripples.
+        wake = wake_seen(world.xy, foot);
         float2 rippled = ripples(world.xy, dist, dx, dy, foot, state.y);
-        ringed = rings(world, t, state.z);
-        slope = rippled + ringed;
-        // Reflected off a surface bent half as much as the ripples bend the light through it, so
-        // the reflections waver rather than break up; the rings' crests whole, so they stand out.
-        n = normalize(float3(-(rippled * 0.5 + ringed), 1.0));
+        rippled *= 1.0 - 0.65 * wake.shelter;
+        slope = rippled + wake.slope;
+        // Reflected off a surface bent half as much as the ripples and the wake bend the light
+        // through it, so the reflections waver rather than break up.
+        n = normalize(float3(-slope * 0.5, 1.0));
     }
     else
     {
@@ -1541,8 +1898,9 @@ float4 shade<R : IReflection>(float4 position, R reflection)
     if (water && (under > 0.0 || (push.drawn != NONE && row(push.drawn, D_BED).x > 0.5)))
     {
         // Only as the water deepens from its edge, so a film of water over the bank shows the wet
-        // ground rather than a pale rim of sky.
-        reflects = smoothstep(0.0, 0.3, under);
+        // ground rather than a pale rim of sky; whole a hand's breadth deep, so clear shallows
+        // still show their surface.
+        reflects = smoothstep(0.0, SHALLOW, under);
     }
     if (water && under > 0.0 && absorption > 0.0 && push.drawn != NONE)
     {
@@ -1558,18 +1916,25 @@ float4 shade<R : IReflection>(float4 position, R reflection)
         float3 light = clamp((own + 0.003) / (albedo + 0.003), 0.0, 6.0);
         float3 body = air_frame(push.frame) ? hue * light : lerp(own, hue * light, fog_factor(push.frame, dist));
         // Light reaching the bed and back up, faded by the water it passes through: red first.
-        float through = length(bed - world);
-        float3 keep = exp(-float3(1.3, 1.0, 0.82) / CLARITY * absorption * (through + through * v.z));
+        // Down to the bed it runs through the water's depth; back up, along the line of sight as
+        // the surface bends it entering the water, steeper than the line above it, so seen low
+        // across the water it runs through at most half as much again as its depth, not the
+        // length of the unbent line.
+        float deep = max(world.z - bed.z, 0.0);
+        float bent_up = sqrt(1.0 - (1.0 - cosine * cosine) / (REFRACTION * REFRACTION));
+        float through = deep / max(bent_up, 0.05);
+        float3 keep = exp(-float3(1.3, 1.0, 0.82) / CLARITY * absorption * (through + deep));
+        // However clear, it takes a share of its own color, coming in from its edge.
+        keep = min(keep, 1.0 - FILM * saturate(absorption) * smoothstep(0.0, SHALLOW, deep));
         own = own * keep + body * (1.0 - keep);
     }
     float3 c;
     if (water)
     {
         c = lerp(own, seen.color * REFLECTED_TINT, saturate(fresnel * REFLECTED * share * reflects));
-        // A ring's steep faces catch what the water reflects at a low angle, seen from above as
-        // well: the rings show as light lines on the water.
-        float sheen = saturate(length(ringed) * 1.5) * 0.3 * reflects;
-        c = lerp(c, seen.color * REFLECTED_TINT, sheen);
+        // The wake's crests catch a little of the sky's light: enough to see them by.
+        float crest = saturate(-wake.curve * 0.02) * 0.06 * reflects;
+        c += sky_toward(world, float3(0.0, 0.0, 1.0)) * crest;
     }
     else
     {
@@ -1593,6 +1958,20 @@ float4 shade<R : IReflection>(float4 position, R reflection)
             color = to_linear(color);
         }
         c += color * glint;
+    }
+    // Where the water laps a body's legs it froths, in broken patches fixed in the world, more as
+    // the water there moves; white under the light the ground takes.
+    if (water && wake.line > 0.0)
+    {
+        float patches = value_noise(wake.fixed + float2(t * 0.03, 0.0), 0.07) * 0.6
+                        + value_noise(wake.fixed + float2(3.1, 7.7), 0.025) * 0.4;
+        float cover = saturate(wake.line) * (0.3 + clamp(length(wake.slope) * 4.0, 0.0, 0.25))
+                      * smoothstep(0.35, 0.7, patches) * reflects;
+        float reach = push.sun_visibility != NONE ? at(push.sun_visibility, p).x : 1.0;
+        float3 froth = resolved(push.frame, float3(0.82, 0.85, 0.86),
+                                lit(CLASS_GROUND, float3(0.0, 0.0, 1.0), reach, false, v),
+                                air_frame(push.frame) ? 1.0 : fog_factor(push.frame, dist)).rgb;
+        c = lerp(c, froth, saturate(cover * 1.6));
     }
     return float4(c, 1.0);
 }

@@ -29,6 +29,8 @@ The client can load either form, using any of:
 
 The launcher starts the client with whichever packs the player has enabled in the Library. Even then, a pack does nothing until the player turns on the remaster's art pack option and the toggles for the categories it covers (trees, plants, rocks, water plants, building materials, ground).
 
+To try a pack you are making, add its packed file with **Add a pack file…** in the Library. The launcher uses the file where it is, so a pack you rebuild in place is what the client gets at the next Play.
+
 ## The manifest
 
 ```toml
@@ -105,6 +107,12 @@ A model has one or more LODs, listed closest first. Every LOD except the last se
 
 A LOD with `shadows_only = true` is rendered only into the sun's shadow maps, for cases where shadows can use a coarser mesh than the view. It's never visible: the view skips straight from the LOD before it to the one after it. Its `distance` is optional. The first and last LODs are always drawn in the view.
 
+### Trees far away
+
+A model with `category = "tree"` steps down its LODs by distance, fading from one to the next. No LOD takes over nearer than its `distance`; on a large screen it may take over farther out, where a coarser LOD would still be noticeable. Past its last LOD the client draws the tree as pictures of its first LOD, which it makes itself, and it always switches to them before the edge of the landblocks around the player. A tree with only one LOD gets them too.
+
+Beyond the landblocks around the player, the client draws trees as pictures only. It uses the model's `views` LOD if it has one (below), and otherwise makes pictures of its first LOD, so a pack doesn't need to supply its own.
+
 ### Impostors
 
 A LOD that sets `views` is an impostor: pre-rendered images of the model instead of geometry, for use far away. Its glTF holds a single upright quad across the model's axis (the model's first axis running across, its height running up), which rotates around the model's vertical axis to face the camera.
@@ -139,6 +147,10 @@ height = "ground/grass_height.png"         # red channel; where layers meet, the
 roughness = "ground/grass_roughness.png"   # red channel
 occlusion = "ground/grass_occlusion.png"   # red channel
 size = 4.0                 # meters covered by one tile of the textures
+detail = "ground/grain.png"                # a fine grain over the ground close by
+detail_size = 1.0          # meters covered by one tile of the detail texture
+detail_strength = 1.0      # how strongly the detail texture changes the ground; 0 = not at all
+pebbles = true             # whether the remaster's own pebbles lie on these grounds
 author = "Someone"
 tool = "Substance Designer"
 license = "CC0-1.0"
@@ -146,7 +158,11 @@ license = "CC0-1.0"
 
 Only `base_color`, `size` and the credits are required. Ground textures must be square, tile seamlessly, and be viewed straight from above with north up.
 
-A `[[steep]]` material takes the same keys and is applied to steep slopes of the terrain types it lists, like an obsidian cliff or a sandstone face. Without one, the remaster puts its own scree and rock on steep ground. Each terrain type can have one flat material and one steep material.
+The `detail` texture is a fine grain drawn over the material close by and faded out over the first few tens of meters. It repeats every `detail_size` meters (1 if not set) and is multiplied in at twice its value: mid-gray (128) leaves the ground unchanged, lighter brightens it and darker darkens it. A gray texture averaging 128 keeps the ground's color. It is part of the pack's look, so it draws wherever the pack's ground draws, whatever the game's Landscape Detail Textures setting says (that setting covers only the game's own ground), and turns off with the rest of the pack's ground. Grounds that name the same detail texture share it. `detail_strength` scales how far the detail texture moves the ground from its own color: 1 (the default) as the texture is made, 0 not at all, above 1 further.
+
+The remaster scatters small pebbles of its own on bare ground, on slopes and along road edges. `pebbles = false` keeps them off the terrain types the material lists wherever the pack's ground draws: on their flat ground and their slopes, and along the road's edges for a `"road"` material. Grass and flowers are not affected.
+
+A `[[steep]]` material takes the same keys, except `pebbles` (a terrain type's slopes follow its `[[terrain]]` material), and is applied to steep slopes of the terrain types it lists, like an obsidian cliff or a sandstone face. Without one, the remaster puts its own scree and rock on steep ground. Each terrain type can have one flat material and one steep material.
 
 ## Retail textures
 
@@ -189,7 +205,6 @@ The available keys:
 - `fog_density` and `fog_color`
 - `night_floor`: the minimum ambient level
 - `exposure`: in stops, for HDR
-- `foliage_hue` and `foliage_pull`: the hue (in degrees) the pack's foliage is pulled toward, and how strongly (0 to 1)
 
 Any key can be overridden for a specific weather type: `sunny`, `rainy`, `clear` or `cloudy`.
 

@@ -10,9 +10,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use dereth_datfetch::Catalogue;
 use dereth_launch::check::RunningClient;
 use dereth_launch::choices::{self, ClientOption};
 use dereth_launch::datset::{scan_dir, DatOrigin, DatSet, SetKind};
@@ -302,6 +304,8 @@ pub struct JobView {
     pub what: String,
     pub done: u64,
     pub total: u64,
+    /// The page offers to cancel it ([`Backend::cancel_job`]).
+    pub cancellable: bool,
 }
 
 /// A line for the status bar.
@@ -351,6 +355,26 @@ pub struct Snapshot {
     pub art: dereth_launch::art::ArtView,
     /// The art pack being fetched, when one is.
     pub art_progress: Option<ArtProgress>,
+    /// The AC2 look the launcher builds from the player's own Asheron's Call 2 files.
+    pub ac2_look: crate::ac2_look::View,
+    /// The data sets the Library can download, and the last download's status.
+    pub downloads: DownloadsView,
+}
+
+/// The data sets the Library downloads, the list built in, read once.
+fn catalogue() -> &'static Catalogue {
+    static LIST: std::sync::OnceLock<Catalogue> = std::sync::OnceLock::new();
+    LIST.get_or_init(Catalogue::built_in)
+}
+
+/// The Library's downloads: the sets on offer, and how the last one went, until the player clears
+/// it.
+#[derive(Debug, Clone, Serialize)]
+pub struct DownloadsView {
+    pub offers: Vec<dereth_launch::downloads::Offer>,
+    pub status: Option<crate::downloads::Status>,
+    /// Where a player reads how to get the files by hand.
+    pub guide: String,
 }
 
 /// An art pack being fetched, as the page shows it.
@@ -488,16 +512,14 @@ fn new_plugin_error(e: dereth_plugin_template::Error) -> String {
     }
 }
 
-/// The interface the Dereth client starts in, and the question the launcher asks for it.
+/// The interface the Dereth client starts every world in until the player changes it there in
+/// game, and the question the launcher asks for it.
 #[derive(Debug, Clone, Serialize)]
 pub struct InterfaceView {
-    /// The interface the client's preferences name; `None` while they name none, and the page
-    /// asks.
+    /// The default; `None` while the player has chosen none, and the page asks.
     pub chosen: Option<&'static str>,
     /// The interfaces offered, in order: the first is chosen when the question opens.
     pub offers: Vec<Offer>,
-    /// The client's preferences file, where the answer is written.
-    pub file: String,
 }
 
 /// A world page's options.
@@ -508,12 +530,16 @@ pub struct WorldView {
     pub default_client: Option<ClientKind>,
     /// The Modern sets the Dereth client may be given here.
     pub dat_sets: Vec<DatSet>,
-    /// The pairs the Dereth client may be given here: the Original sets on a world drawn from the
-    /// 1999 files, the Classic sets on any other.
+    /// The pairs the Dereth client may be given here: the Classic sets whose iterations suit the
+    /// world, Launch's 1999 pair on a world drawn from it and any other year's elsewhere.
     pub classic_sets: Vec<DatSet>,
     /// Which kind of set the world is drawn from. A Modern set is always needed besides; a
     /// Classic one is optional when this is Modern.
     pub requires: SetKind,
+    /// The world is drawn from Launch's Classic pair, the 1999 files.
+    pub launch_pair: bool,
+    /// An Asheron's Call world's page offers a set of the world's own; an Asheron's Call 2
+    /// world's says playing it with the retail client first makes it a copy of the install.
     pub offers_private_copy: bool,
     pub accounts: Vec<Account>,
     pub prefs: WorldPrefs,
@@ -573,6 +599,11 @@ pub enum LaunchOutcome {
         account: String,
     },
     NeedPassword {
+        message: String,
+    },
+    /// The data files the choice names are no longer in the Library: the world's page opens for
+    /// the player to choose others.
+    ChooseSet {
         message: String,
     },
     Error {
@@ -727,6 +758,15 @@ pub struct Backend {
     plugins: Shelf,
     art: dereth_launch::art::Shelf,
     art_progress: Option<ArtProgress>,
+    /// The art tool's tables' versions, asked once it is known to be there.
+    ac2_look_versions: Option<dereth_launch::ac2_look::Versions>,
+    /// The AC2 look being built, when it is.
+    ac2_look_progress: Option<crate::ac2_look::Progress>,
+    /// The last data set download's status, and the flag that stops one going.
+    download: Option<crate::downloads::Status>,
+    download_cancel: Arc<AtomicBool>,
+    /// The flag that stops a job the page may cancel.
+    job_cancel: Arc<AtomicBool>,
     /// The plugin author's tool this launcher ships with, which it keeps a copy of in the folders
     /// Make Your Own wrote in; `None` when there is none to copy.
     tool: Option<PathBuf>,
@@ -773,6 +813,25 @@ impl Backend {
         // The one install folder an older launcher kept for Auberean's realm joins its library.
         if state.adopt_auberean_install() {
             let _ = state.save(&folders.config);
+        }
+        // The interface an earlier launcher wrote into the client's preferences is the default.
+        if interface::adopt(
+            &mut state,
+            client_preferences.as_deref().and_then(interface::saved),
+        ) {
+            let _ = state.save(&folders.config);
+        }
+        // A copy of the retail client a launcher stopped part way through is never played: it goes.
+        for gone in dereth_launch::copy::sweep_unfinished_copies(
+            &state
+                .library_dir(&folders.data)
+                .join(dereth_launch::copy::RETAIL_COPIES),
+            state.auberean.retail_copies.values(),
+        ) {
+            eprintln!(
+                "dereth-launcher: removed {}, a copy of the retail client never finished",
+                gone.display()
+            );
         }
         // Files change outside the launcher (a patch, a copy, a deleted folder); each set's four
         // headers are re-read once at start, which costs a few small reads. Both realms' sets.
@@ -831,6 +890,11 @@ impl Backend {
             plugins,
             art,
             art_progress: None,
+            ac2_look_versions: None,
+            ac2_look_progress: None,
+            download: None,
+            download_cancel: Arc::new(AtomicBool::new(false)),
+            job_cancel: Arc::new(AtomicBool::new(false)),
             folders,
             state,
             dereth,
@@ -969,39 +1033,38 @@ impl Backend {
             plugins: self.plugins.view(),
             art: self.art.view(),
             art_progress: self.art_progress.clone(),
+            ac2_look: self.ac2_look_view(),
+            downloads: DownloadsView {
+                offers: dereth_launch::downloads::offers(catalogue()),
+                status: self.download.clone(),
+                guide: catalogue().guide.clone(),
+            },
         }
     }
 
     // ----- the interface -------------------------------------------------------------------------
 
-    /// The interface the Dereth client starts in, read from its preferences each time, so a choice
-    /// made in the client's own options shows here too.
+    /// The interface the Dereth client starts every world in until the player changes it there in
+    /// game. `None` when the client keeps no preferences here, so a world could keep none of its
+    /// own, and the launcher does not ask.
     fn interface_view(&self) -> Option<InterfaceView> {
-        let file = self.client_preferences.as_deref()?;
+        self.client_preferences.as_ref()?;
         Some(InterfaceView {
-            chosen: interface::saved(file).map(interface::Interface::label),
+            chosen: interface::default_of(&self.state).map(interface::Interface::label),
             offers: interface::offers(),
-            file: file.display().to_string(),
         })
     }
 
-    /// Start the Dereth client in the interface named `name` from now on: the answer to the
-    /// first-start question, or a change from the Library. Refused while a Dereth client the
-    /// launcher started is running, because it saves its own interface when it closes.
+    /// Start every world the player has not changed in game in the interface named `name`: the
+    /// answer to the first-start question, or a change from the Library's settings. A client
+    /// already running keeps the one it is in.
     pub fn set_interface(&mut self, name: &str) -> Result<(), String> {
         let choice = interface::by_name(name)
             .ok_or_else(|| format!("{name} is not an interface the Dereth client has."))?;
-        let file = self
-            .client_preferences
-            .clone()
-            .ok_or("The Dereth client keeps no settings on this computer.")?;
-        if self.running.iter().any(|r| r.kind == ClientKind::Dereth) {
-            return Err(
-                "Close the Dereth client first: it saves its own interface when it closes.".into(),
-            );
-        }
-        interface::save(&file, choice)
-            .map_err(|e| format!("Could not save the interface to {}: {e}", file.display()))
+        interface::set_default(&mut self.state, choice);
+        self.state
+            .save(&self.folders.config)
+            .map_err(|e| format!("Could not save the launcher's state: {e}"))
     }
 
     pub fn world(&self, slug: &str) -> Option<World> {
@@ -1414,7 +1477,8 @@ impl Backend {
                 dat_sets: Vec::new(),
                 classic_sets: Vec::new(),
                 requires: choices::required_set_for(&world),
-                offers_private_copy: choices::offers_retail_copy(
+                launch_pair: false,
+                offers_private_copy: choices::copies_retail_at_play(
                     &self.state,
                     &self.with_hosted_facts(world.clone()),
                 ),
@@ -1439,6 +1503,7 @@ impl Backend {
             dat_sets: choices::dat_sets_for(&self.state, &world),
             classic_sets: choices::classic_sets_for(&self.state, &world),
             requires: choices::required_set_for(&world),
+            launch_pair: choices::plays_launch_pair(&world),
             offers_private_copy: choices::offers_private_copy(&self.state, &world),
             accounts: self.state.accounts_for(slug).cloned().collect(),
             prefs,
@@ -1523,9 +1588,24 @@ impl Backend {
         let dereth = choice.client == ClientKind::Dereth;
         let dat_set_id = dereth.then(|| choice.dat_set_id.clone()).flatten();
         let classic_set_id = dereth.then(|| choice.classic_set_id.clone()).flatten();
+        // A combination saved with a set the player has since removed (and not added again, which
+        // would have taken its place) is not started on another: the player chooses.
+        let gone = |id: &Option<String>| {
+            id.as_deref()
+                .is_some_and(|id| self.state.dat_set(id).is_none())
+        };
+        if gone(&dat_set_id) || gone(&classic_set_id) {
+            return LaunchOutcome::ChooseSet {
+                message: format!(
+                    "The data files you last played {} with are no longer in your Library. Choose others.",
+                    world.name
+                ),
+            };
+        }
         let path_of = |id: Option<&str>, kind: SetKind| {
             id.and_then(|id| self.state.dat_set(id))
                 .filter(|s| s.kind == kind)
+                .filter(|s| kind != SetKind::Classic || choices::pair_suits(&world, s))
                 .map(|s| s.path.clone())
         };
         // A world that ships its own files is never started on another world's: the chosen set
@@ -1572,14 +1652,14 @@ impl Backend {
         let extra_args = hosted.as_ref().map_or_else(Vec::new, |h| h.args.clone());
         let (dat_dir, classic_dat_dir) = if let Some(hosted) = hosted.filter(|_| dereth) {
             let modern = path_of(dat_set_id.as_deref(), SetKind::Modern);
-            let classic = path_of(classic_set_id.as_deref(), choices::pair_kind_for(&world));
+            let classic = path_of(classic_set_id.as_deref(), SetKind::Classic);
             match hosted.client_dats(modern.as_deref(), classic.as_deref()) {
                 Ok(d) => (Some(d.dat_dir), d.classic_dat_dir),
                 Err(e) => return err(e),
             }
         } else if dereth {
             let modern = path_of(dat_set_id.as_deref(), SetKind::Modern);
-            let classic = path_of(classic_set_id.as_deref(), choices::pair_kind_for(&world));
+            let classic = path_of(classic_set_id.as_deref(), SetKind::Classic);
             match choices::dat_dirs_for(&world, modern.as_deref(), classic.as_deref()) {
                 Ok(d) => (Some(d.dat_dir), d.classic_dat_dir),
                 Err(e) => return err(e.to_string()),
@@ -1608,6 +1688,7 @@ impl Backend {
             plugin_policy_file,
             plugins: self.offered_plugins(),
             art_packs: self.art.stack(),
+            interface: interface::default_of(&self.state),
         };
         let plan = match plan(&req) {
             Ok(p) => p,
@@ -1780,11 +1861,125 @@ impl Backend {
         self.save();
     }
 
+    // ----- the Library's downloads ---------------------------------------------------------------
+
+    /// Download data set `id` from the community's archive into the library, in a thread, through
+    /// `net`; the snapshot says how it goes, and the set joins the Library when it is in and
+    /// checked. One at a time.
+    ///
+    /// # Errors
+    /// Another download is going, the set is not on offer, or it is in the Library already.
+    pub fn get_dats(
+        shared: &Shared,
+        net: Arc<dyn crate::downloads::Net>,
+        id: &str,
+    ) -> Result<(), String> {
+        Self::start_get_dats(shared, net, catalogue(), id).map(drop)
+    }
+
+    /// [`Self::get_dats`] from `catalogue`, answering the thread that does it.
+    pub(crate) fn start_get_dats(
+        shared: &Shared,
+        net: Arc<dyn crate::downloads::Net>,
+        catalogue: &Catalogue,
+        id: &str,
+    ) -> Result<std::thread::JoinHandle<()>, String> {
+        let (source, kind, place, cancel) = {
+            let mut b = lock(shared);
+            if b.download
+                .as_ref()
+                .is_some_and(crate::downloads::Status::going)
+            {
+                return Err("Another download is still going.".into());
+            }
+            let (source, kind) = crate::downloads::source(catalogue, id)
+                .ok_or_else(|| format!("{id} is not a set the archive offers."))?;
+            let place = crate::downloads::Place::in_library(&b.library_dir(), &source.id);
+            let game = dereth_launch::downloads::kind_of(source).0;
+            if b.state.sets(game).iter().any(|s| s.path == place.set) {
+                return Err(format!("{} is in your Library already.", source.label));
+            }
+            b.download = Some(crate::downloads::Status::starting(source));
+            b.download_cancel.store(false, Ordering::Relaxed);
+            (source.clone(), kind, place, b.download_cancel.clone())
+        };
+        let shared = shared.clone();
+        Ok(std::thread::spawn(move || {
+            let progress_to = shared.clone();
+            let report = move |p| {
+                if let Some(s) = lock(&progress_to).download.as_mut() {
+                    s.at(p);
+                }
+            };
+            let end = crate::downloads::run(&source, kind, &place, net.as_ref(), &cancel, &report);
+            let mut b = lock(&shared);
+            let end = match end {
+                crate::downloads::End::Done(note) => match b.add_downloaded(kind, &place.set) {
+                    crate::downloads::End::Done(_) => crate::downloads::End::Done(note),
+                    other => other,
+                },
+                other => other,
+            };
+            if let Some(s) = b.download.as_mut() {
+                match end {
+                    crate::downloads::End::Done(note) => {
+                        s.stage = "done";
+                        s.message = note;
+                    }
+                    crate::downloads::End::Cancelled => s.stage = "cancelled",
+                    crate::downloads::End::Failed(why) => {
+                        eprintln!("dereth-launcher: downloading {} failed: {why}", s.label);
+                        s.stage = "failed";
+                        s.message = Some(why);
+                    }
+                }
+            }
+        }))
+    }
+
+    /// The set a download left whole in `dir`, added to the Library as one the launcher made.
+    fn add_downloaded(&mut self, kind: SetKind, dir: &Path) -> crate::downloads::End {
+        let mut find = if kind == SetKind::Auberean {
+            dereth_launch::auberean::read_folder(dir, &self.state)
+        } else {
+            library::read_folder(dir, &self.state)
+        };
+        find.retail = None;
+        for set in find.dats.iter_mut().chain(find.classic.iter_mut()) {
+            set.created_by_launcher = true;
+        }
+        if find.dats.is_none() && find.classic.is_none() {
+            return crate::downloads::End::Failed(
+                find.error
+                    .unwrap_or_else(|| "the files did not read as a set".into()),
+            );
+        }
+        library::add_find(&mut self.state, find);
+        self.save();
+        crate::downloads::End::Done(None)
+    }
+
+    /// Stop the download that is going; what it downloaded is kept for the next try.
+    pub fn cancel_get_dats(&mut self) {
+        self.download_cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Forget how the last download went, once it is over.
+    pub fn clear_get_dats(&mut self) {
+        if !self
+            .download
+            .as_ref()
+            .is_some_and(crate::downloads::Status::going)
+        {
+            self.download = None;
+        }
+    }
+
     /// Forget a set; delete its files too when the launcher made them, and only inside the library.
     /// A set of Auberean's realm's is the player's own folder, only ever forgotten.
     pub fn delete_set(&mut self, id: &str) -> Result<(), String> {
         if self.state.auberean_set(id).is_some() {
-            self.state.auberean.dat_sets.retain(|d| d.id != id);
+            self.state.remove_set(id);
             self.save();
             return Ok(());
         }
@@ -1796,7 +1991,7 @@ impl Backend {
                     .map_err(|e| format!("Could not delete {}: {e}", set.path.display()))?;
             }
         }
-        self.state.dat_sets.retain(|d| d.id != id);
+        self.state.remove_set(id);
         self.save();
         Ok(())
     }
@@ -1816,6 +2011,7 @@ impl Backend {
                 what: what.clone(),
                 done: 0,
                 total: 0,
+                cancellable: false,
             });
         }
         let shared = shared.clone();
@@ -1839,7 +2035,7 @@ impl Backend {
     /// `world` with what it writes into a retail Asheron's Call 2 install as the configuration
     /// of the Yalain world this launcher hosts for it says, when it is one: the case its operator
     /// meets before any list says so.
-    fn with_hosted_facts(&self, mut world: World) -> World {
+    pub fn with_hosted_facts(&self, mut world: World) -> World {
         if world.game != Game::Auberean {
             return world;
         }
@@ -1859,56 +2055,112 @@ impl Backend {
         world
     }
 
-    /// Copy the retail client's install into a copy of the Asheron's Call 2 world `slug`'s own, in
-    /// the background: the world then plays from it, and may write to its data files.
-    fn create_retail_copy(shared: &Shared, slug: &str) {
-        let (from, to, name) = {
+    /// Copy the retail client's install into a copy of the Asheron's Call 2 world `slug`'s own, as
+    /// playing it with the retail client does first: the world then plays from it, and may write to
+    /// its data files. The page shows it as a job, which it may cancel. The copy's folder, or what
+    /// stopped it in words for a person; the player's own install is never written either way.
+    ///
+    /// # Errors
+    /// No retail client, another job running, no room for the copy, the copy cancelled or failing.
+    pub fn copy_retail_for_play(shared: &Shared, slug: &str) -> Result<PathBuf, String> {
+        let (from, to, name, cancel) = {
             let mut b = lock(shared);
-            let Some(retail) = b.state.auberean.retail.clone() else {
-                b.say(
-                    "There is no retail client to copy yet. Add one in the Library first.",
-                    true,
-                );
-                return;
-            };
-            let copies = b.library_dir().join("auberean-copies");
-            let Some(to) = (1u32..)
+            let retail = b
+                .state
+                .auberean
+                .retail
+                .clone()
+                .ok_or("There is no retail client in the Library. Play with Auberean.")?;
+            if b.job.is_some() {
+                return Err("Another copy is still running. Play again when it is done.".into());
+            }
+            let copies = b.library_dir().join(dereth_launch::copy::RETAIL_COPIES);
+            let to = (1u32..)
                 .map(|n| copies.join(format!("copy-{n}")))
                 .find(|p| !p.exists())
-            else {
-                return;
-            };
+                .ok_or("There is no folder name left for a copy.")?;
             let name = b.world(slug).map_or_else(|| slug.to_owned(), |w| w.name);
-            (retail.path, to, name)
+            b.job_cancel.store(false, Ordering::Relaxed);
+            b.job = Some(JobView {
+                what: format!("Copying the retail client for {name}"),
+                done: 0,
+                total: 0,
+                cancellable: true,
+            });
+            (retail.path, to, name, b.job_cancel.clone())
         };
-        let slug = slug.to_owned();
-        let done_to = shared.clone();
-        Self::start_job(
-            shared,
-            format!("Copying the retail client for {name}"),
-            move |report| {
-                dereth_launch::copy::copy_install(&from, &to, &mut |d, t| report(d, t))
-                    .map_err(|e| format!("The copy failed: {e}"))?;
-                let mut b = lock(&done_to);
-                b.state.auberean.retail_copies.insert(slug, to);
-                b.save();
-                b.say(
-                    format!("{name} has its own copy of the retail client now."),
-                    false,
-                );
-                Ok(())
-            },
-        );
+        // Held until the copy is recorded: a launcher started meanwhile leaves it be.
+        let held = match dereth_launch::copy::lock_copy(&to) {
+            Ok(held) => held,
+            Err(e) => {
+                lock(shared).job = None;
+                return Err(format!("Could not copy the retail client for {name}: {e}"));
+            }
+        };
+        let no_room = |bytes: u64| {
+            format!(
+                "There isn't room for {name}'s copy of the retail client: it needs {:.1} GB. Free \
+                 some space and play again.",
+                bytes as f64 / 1e9
+            )
+        };
+        let copied = (|| {
+            let size = dereth_launch::copy::install_size(&from)
+                .map_err(|e| format!("Could not read the retail client's folder: {e}"))?;
+            if crate::art::free_space(&to).is_some_and(|free| free < size) {
+                return Err(no_room(size));
+            }
+            let progress_to = shared.clone();
+            let mut report = move |done, total| {
+                if let Some(j) = lock(&progress_to).job.as_mut() {
+                    j.done = done;
+                    j.total = total;
+                }
+            };
+            dereth_launch::copy::copy_install(&from, &to, &mut report, &cancel).map_err(|e| {
+                if cancel.load(Ordering::Relaxed) {
+                    "The copy of the retail client was cancelled, so the game didn't start.".into()
+                } else if e.kind() == std::io::ErrorKind::StorageFull {
+                    no_room(size)
+                } else {
+                    format!("Could not copy the retail client for {name}: {e}")
+                }
+            })
+        })();
+        let mut b = lock(shared);
+        b.job = None;
+        if copied.is_ok() {
+            b.state
+                .auberean
+                .retail_copies
+                .insert(slug.to_owned(), to.clone());
+            b.save();
+        }
+        drop(b);
+        dereth_launch::copy::unlock_copy(&to, held);
+        copied.map(|_| to)
     }
 
-    /// Copy the shared set into a set of the world's own, in the background; for an Asheron's
-    /// Call 2 world, the retail client's install.
+    /// Whether playing the Asheron's Call 2 world `world` with the retail client first makes it a
+    /// copy of the retail client's install ([`choices::copies_retail_at_play`]).
+    pub fn copies_retail_at_play(&self, world: &World) -> bool {
+        choices::copies_retail_at_play(&self.state, world)
+    }
+
+    /// Stop the job the page shows, when it may be cancelled.
+    pub fn cancel_job(&mut self) {
+        if self.job.as_ref().is_some_and(|j| j.cancellable) {
+            self.job_cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Copy the shared set into a set of the world's own, in the background. An Asheron's Call 2
+    /// world's copy is made as it is played ([`Self::copy_retail_for_play`]), not here.
     pub fn create_private_copy(shared: &Shared, slug: &str) {
         if lock(shared)
             .world(slug)
             .is_some_and(|w| w.game == Game::Auberean)
         {
-            Self::create_retail_copy(shared, slug);
             return;
         }
         let (from, to, id, name) = {
@@ -2481,12 +2733,14 @@ impl Backend {
         Self::fetch_art(shared, fetch_pack, None, id)
     }
 
-    /// Remove art pack `id` and its file.
+    /// Remove art pack `id` and its file; a pack on this computer only leaves the list.
     ///
     /// # Errors
-    /// Not installed, a Dereth client is running, or its folder could not be deleted.
+    /// Not installed, a Dereth client is running (for a file the launcher keeps), or its folder
+    /// could not be deleted.
     pub fn remove_art_pack(&mut self, id: &str) -> Result<(), String> {
-        if self.dereth_running() {
+        let on_this_computer = self.art.get(id).is_some_and(|p| p.file.is_some());
+        if self.dereth_running() && !on_this_computer {
             return Err("Close Dereth to remove an art pack.".into());
         }
         self.art.remove(id).map_err(|e| e.to_string())
@@ -2506,6 +2760,247 @@ impl Backend {
     /// Not installed.
     pub fn move_art_pack(&mut self, id: &str, up: bool) -> Result<(), String> {
         self.art.move_pack(id, up).map_err(|e| e.to_string())
+    }
+
+    /// Add the art pack in `file`, on this computer, to the stack, last and on. The file stays
+    /// where it is, and the client is given it from there.
+    ///
+    /// # Errors
+    /// It is not an art pack, is one of Dereth's own, or is on the list already, in words for the
+    /// page.
+    pub fn add_art_file(&mut self, file: &Path) -> Result<String, String> {
+        self.art
+            .add_file(file)
+            .map(|done| format!("Added {} {}.", done.name, done.version))
+            .map_err(|e| e.to_string())
+    }
+
+    // ----- the AC2 look ---------------------------------------------------------------------------
+
+    /// The AC2 look's folder in the art folder.
+    fn ac2_look_dir(&self) -> PathBuf {
+        self.folders.art().join(dereth_launch::ac2_look::FOLDER)
+    }
+
+    /// The art tool beside the client in use, when it is there.
+    fn art_tool(&self) -> Option<PathBuf> {
+        let d = self.dereth.as_ref()?;
+        let tool = d.path.join(format!(
+            "{}{}",
+            dereth_launch::ac2_look::PROGRAM,
+            std::env::consts::EXE_SUFFIX
+        ));
+        tool.is_file().then_some(tool)
+    }
+
+    /// The Asheron's Call 2 install the look is built from: the folder the player chose for it,
+    /// else the Library's.
+    fn ac2_look_install(&self, choices: &dereth_launch::ac2_look::Choices) -> Option<PathBuf> {
+        choices
+            .install
+            .clone()
+            .or_else(|| self.state.auberean_default_set().map(|s| s.path.clone()))
+    }
+
+    fn ac2_look_view(&self) -> crate::ac2_look::View {
+        use dereth_launch::ac2_look::{Built, Choices, FILE};
+        let dir = self.ac2_look_dir();
+        let choices = Choices::load(&dir);
+        let install = self.ac2_look_install(&choices);
+        let built = Built::load(&dir).filter(|_| dir.join(FILE).is_file());
+        crate::ac2_look::View {
+            tool: self.art_tool().is_some(),
+            install_ok: install
+                .as_deref()
+                .is_some_and(|d| dereth_launch::auberean::check_install(d).ok),
+            install: install.map(|d| d.display().to_string()),
+            ac1: self.state.shared_set().is_some(),
+            parts: crate::ac2_look::parts_view(&choices.parts),
+            creatures: crate::ac2_look::creatures_view(&choices.creatures),
+            stale: match (&built, &self.ac2_look_versions) {
+                (Some(b), Some(now)) => b.stale(now),
+                _ => false,
+            },
+            built: built.map(|b| b.versions.look),
+            progress: self.ac2_look_progress.clone(),
+        }
+    }
+
+    /// Tick or untick a part of the AC2 look for the next build.
+    ///
+    /// # Errors
+    /// Not a part, or the choices will not write.
+    pub fn set_ac2_look_part(&mut self, part: &str, on: bool) -> Result<(), String> {
+        use dereth_launch::ac2_look::{known_parts, Choices};
+        if known_parts(&[part.to_owned()]).is_empty() {
+            return Err(format!(
+                "{part} is not a part of the Asheron's Call 2 Art Pack"
+            ));
+        }
+        let dir = self.ac2_look_dir();
+        let mut c = Choices::load(&dir);
+        c.parts.retain(|p| p != part);
+        if on {
+            c.parts.push(part.to_owned());
+        }
+        c.parts = known_parts(&c.parts);
+        c.save(&dir).map_err(|e| e.to_string())
+    }
+
+    /// Tick or untick a creature of the AC2 look for the next build.
+    ///
+    /// # Errors
+    /// Not a creature, or the choices will not write.
+    pub fn set_ac2_look_creature(&mut self, creature: &str, on: bool) -> Result<(), String> {
+        use dereth_launch::ac2_look::{known_creatures, Choices};
+        if known_creatures(&[creature.to_owned()]).is_empty() {
+            return Err(format!(
+                "{creature} is not a creature of the Asheron's Call 2 Art Pack"
+            ));
+        }
+        let dir = self.ac2_look_dir();
+        let mut c = Choices::load(&dir);
+        c.creatures.retain(|x| x != creature);
+        if on {
+            c.creatures.push(creature.to_owned());
+        }
+        c.creatures = known_creatures(&c.creatures);
+        c.save(&dir).map_err(|e| e.to_string())
+    }
+
+    /// Build the AC2 look from the Asheron's Call 2 install in `folder` from now on.
+    ///
+    /// # Errors
+    /// Its files do not check, in words for the page, or the choice will not write.
+    pub fn set_ac2_look_folder(&mut self, folder: &Path) -> Result<String, String> {
+        let check = dereth_launch::auberean::check_install(folder);
+        if !check.ok {
+            return Err(check.summary);
+        }
+        let dir = self.ac2_look_dir();
+        let mut c = dereth_launch::ac2_look::Choices::load(&dir);
+        c.install = Some(folder.to_owned());
+        c.save(&dir).map_err(|e| e.to_string())?;
+        Ok(format!(
+            "The Asheron's Call 2 Art Pack is built from {}.",
+            folder.display()
+        ))
+    }
+
+    /// The art tool's tables' versions, asked of it the first time (a thread's work: it runs the
+    /// tool). `None` with no tool, or one that will not say.
+    pub fn ac2_look_versions(
+        shared: &Shared,
+        run: &crate::ac2_look::RunTool<'_>,
+    ) -> Option<dereth_launch::ac2_look::Versions> {
+        let tool = {
+            let b = lock(shared);
+            if let Some(v) = &b.ac2_look_versions {
+                return Some(v.clone());
+            }
+            b.art_tool()?
+        };
+        let v = crate::ac2_look::versions(run, &tool).ok()?;
+        lock(shared).ac2_look_versions = Some(v.clone());
+        Some(v)
+    }
+
+    /// Build the AC2 look with the parts and creatures ticked (a thread's work: it runs the art
+    /// tool, showing how far it has got), and add it to the art packs on this computer, or read it
+    /// again there. One at a time.
+    ///
+    /// # Errors
+    /// No tool, no install, no part ticked, Dereth running with the look in use, or the build.
+    pub fn build_ac2_look(
+        shared: &Shared,
+        run: &crate::ac2_look::RunTool<'_>,
+    ) -> Result<String, String> {
+        use dereth_launch::ac2_look::{self as look, Built, Choices};
+        let versions = Self::ac2_look_versions(shared, run);
+        let (tool, args, dir, out, choices, install) = {
+            let mut b = lock(shared);
+            if b.ac2_look_progress.is_some() {
+                return Err("The Asheron's Call 2 Art Pack is being built.".into());
+            }
+            let tool = b
+                .art_tool()
+                .ok_or("This Dereth has no art tool beside it.")?;
+            let dir = b.ac2_look_dir();
+            let choices = Choices::load(&dir);
+            if choices.ticked().is_empty() {
+                return Err("Tick at least one part of the Asheron's Call 2 Art Pack.".into());
+            }
+            let install = b
+                .ac2_look_install(&choices)
+                .ok_or("Add your Asheron's Call 2 data set first.")?;
+            let check = dereth_launch::auberean::check_install(&install);
+            if !check.ok {
+                return Err(check.summary);
+            }
+            let ac1 = if choices.parts.iter().any(|p| p == look::NEEDS_AC1) {
+                Some(
+                    b.state
+                        .shared_set()
+                        .map(|s| s.path.clone())
+                        .ok_or("The rocks need Asheron's Call's data files. Add them first.")?,
+                )
+            } else {
+                None
+            };
+            let out = dir.join(look::FILE);
+            if b.dereth_running() && b.art.stack().contains(&out) {
+                return Err("Close Dereth to rebuild the Asheron's Call 2 Art Pack.".into());
+            }
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let args = look::build_args(&install, ac1.as_deref(), &out, &choices.ticked());
+            b.ac2_look_progress = Some(crate::ac2_look::Progress::default());
+            (tool, args, dir, out, choices, install)
+        };
+        let progress_to = shared.clone();
+        let made = crate::ac2_look::build(run, &tool, &args, &mut |p| {
+            if let Some(at) = lock(&progress_to).ac2_look_progress.as_mut() {
+                *at = p;
+            }
+        });
+        let mut b = lock(shared);
+        b.ac2_look_progress = None;
+        let (file, version) = made?;
+        if file != out {
+            return Err(format!(
+                "The art tool wrote {}, not {}.",
+                file.display(),
+                out.display()
+            ));
+        }
+        let built = Built {
+            parts: choices.ticked(),
+            versions: versions.unwrap_or_else(|| look::Versions {
+                look: version.clone(),
+                ..look::Versions::default()
+            }),
+            install,
+        };
+        built.save(&dir).map_err(|e| e.to_string())?;
+        b.art.refresh_file(&out).map_err(|e| e.to_string())?;
+        Ok(format!("Built the Asheron's Call 2 Art Pack {version}."))
+    }
+
+    /// Build the AC2 look again when the art tool has come with a newer table than one it was
+    /// built from (a thread's work, at start). What it said, when it built.
+    pub fn rebuild_stale_ac2_look(
+        shared: &Shared,
+        run: &crate::ac2_look::RunTool<'_>,
+    ) -> Option<Result<String, String>> {
+        use dereth_launch::ac2_look::{Built, FILE};
+        let now = Self::ac2_look_versions(shared, run)?;
+        let stale = {
+            let b = lock(shared);
+            let dir = b.ac2_look_dir();
+            dir.join(FILE).is_file()
+                && Built::load(&dir).is_some_and(|built| built.stale(&now))
+                && !b.dereth_running()
+        };
+        stale.then(|| Self::build_ac2_look(shared, run))
     }
 
     /// Which plugins update without the player: `none`, `all` or `first_party`.
@@ -2641,11 +3136,28 @@ mod tests {
     use dereth_launch::world::{Emulator, Endpoint, Told};
     use dereth_launch::Iterations;
 
-    fn tmp(name: &str) -> PathBuf {
+    /// A folder in the temporary directory, made anew and removed with everything in it when
+    /// dropped, even by a test that fails.
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn tmp(name: &str) -> Scratch {
         let d = std::env::temp_dir().join(format!("dereth-tauri-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        d
+        Scratch(d)
     }
 
     /// A launcher that doesn't list the worlds it knows of its own: these tests read the list
@@ -2657,7 +3169,7 @@ mod tests {
 
     /// A state folder, and a "Dereth client" with an end-of-retail set beside it. On a Unix system
     /// the client is a script that records how it was started.
-    fn backend(name: &str) -> (Backend, PathBuf) {
+    fn backend(name: &str) -> (Backend, Scratch) {
         let dir = tmp(name);
         let client = dir.join("client");
         write_dat_set(&client, Iterations::END_OF_RETAIL);
@@ -2736,7 +3248,7 @@ mod tests {
     /// account's name was typed.
     #[test]
     fn a_password_is_typed_or_kept_and_kept_only_when_asked() {
-        let (mut b, dir) = backend("password");
+        let (mut b, _dir) = backend("password");
         assert_eq!(b.password_for("shardfall", "player", None), None);
         assert_eq!(b.password_for("shardfall", "player", Some("")), None);
         assert_eq!(
@@ -2760,7 +3272,6 @@ mod tests {
         );
         b.keep_password("shardfall", "player", "hunter2", false);
         assert_eq!(b.kept_password("shardfall", "player"), None);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// With no secret store, a password an earlier launcher made up for an Asheron's Call 2 account
@@ -2793,7 +3304,6 @@ mod tests {
         b.forget_account("shardfall", "player");
         assert!(!file.exists(), "forgotten with the account");
         assert_eq!(b.password_for("shardfall", "player", None), None);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The last thing a client said: its last error line, else its last line but a hint about
@@ -2877,7 +3387,6 @@ mod tests {
             "{}",
             said.text
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A state file with parts that do not read starts the launcher with the rest of it, the page
@@ -2924,7 +3433,6 @@ mod tests {
             b.message.as_ref().map(|m| m.text.as_str()),
             Some("Your saved settings couldn't be read and were reset.")
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A world added for Auberean under an older name, `custom-<n>`, is given one of its own at
@@ -2980,7 +3488,6 @@ mod tests {
             !file.contains("custom-1") && !file.contains("auberean"),
             "{file}"
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A process that ends at once, standing in for a client the launcher started.
@@ -3030,7 +3537,6 @@ mod tests {
             world.endpoint.map(|e| (e.address, e.port)),
             Some(("127.0.0.1".into(), 9200))
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A launch of an Asheron's Call 2 world is kept as any launch is: the account for the world,
@@ -3038,7 +3544,7 @@ mod tests {
     /// Discord shows as that game's.
     #[test]
     fn an_asheron_s_call_2_launch_keeps_the_account_the_combination_and_the_running_game() {
-        let (mut b, dir) = backend("ac2-launched");
+        let (mut b, _dir) = backend("ac2-launched");
         let slug = b
             .add_custom_world(&NewServer {
                 name: "Dawnsong".into(),
@@ -3085,7 +3591,6 @@ mod tests {
             b.world_view(&slug).unwrap().default_client,
             Some(ClientKind::Retail)
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The list and the worlds' status documents are read over HTTPS only, except from this
@@ -3120,7 +3625,7 @@ mod tests {
 
     #[test]
     fn the_dereth_client_and_the_set_beside_it_are_found_without_first_run() {
-        let (b, dir) = backend("found");
+        let (b, _dir) = backend("found");
         let s = b.snapshot();
         assert_eq!(
             s.dereth.as_ref().map(|d| d.exe.as_str()),
@@ -3136,7 +3641,6 @@ mod tests {
             "no retail client until the player adds one"
         );
         assert_eq!(v.dat_sets.len(), 1);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The plugins' downloads, served from memory: each address's bytes, and every address asked.
@@ -3178,7 +3682,7 @@ mod tests {
     #[test]
     fn the_plugins_section_is_there_and_the_client_is_offered_the_installed_plugins() {
         use dereth_launch::testing::{plugin_list, plugin_zip};
-        let (mut b, dir) = backend("plugins-on");
+        let (mut b, _dir) = backend("plugins-on");
         let id = "network.dereth.counter";
         let zip = plugin_zip(id, "1.0.0", "0.1", "");
         assert!(b.snapshot().plugins.installed.is_empty());
@@ -3196,7 +3700,6 @@ mod tests {
         assert_eq!(b.offered_plugins().len(), 1);
         b.remove_plugin(id).expect("removed");
         assert!(b.offered_plugins().is_empty());
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Every file under `dir`, by its `/`-separated path there, and its bytes.
@@ -3307,7 +3810,6 @@ mod tests {
             check_new_plugin("XP", Some("someone")),
             Err("Give the GitHub repository as username/repo.".to_owned())
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A new plugin's workflows install the tool the player has, whose Dereth release isn't the
@@ -3418,7 +3920,6 @@ mod tests {
             Err("That is a plugin's own folder. Choose its repository.".to_owned())
         );
         assert_eq!(files_under(&here), now, "nothing is written when refused");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The Plugins page's flow over a fake network: Dereth's own source is read, a plugin is
@@ -3427,6 +3928,116 @@ mod tests {
     /// An art pack is fetched into its own file and checked, and the client is given the packs
     /// that are on, in their order. An installed pack updates on its own only while the Library's
     /// setting to update components is on; off, the update waits for the player.
+    /// The AC2 look builds through the art tool beside the client, from the install the player
+    /// chose, with the parts and creatures ticked; joins the art packs on this computer; and is
+    /// built again, in the same place in the stack, only when the tool comes with a newer table.
+    #[test]
+    fn the_ac2_look_builds_joins_the_art_packs_and_is_built_again_when_a_table_is_newer() {
+        use dereth_launch::ac2_look::{Built, FILE, FOLDER};
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let (b, dir) = backend("ac2-look");
+        let shared: Shared = Arc::new(Mutex::new(b));
+        // Before the tool is there, nothing builds.
+        let never: &crate::ac2_look::RunTool<'_> = &|_, _, _| Err("not run".into());
+        assert_eq!(
+            Backend::build_ac2_look(&shared, never),
+            Err("This Dereth has no art tool beside it.".into())
+        );
+        let tool = dir.join("client").join(format!(
+            "{}{}",
+            dereth_launch::ac2_look::PROGRAM,
+            std::env::consts::EXE_SUFFIX
+        ));
+        std::fs::write(&tool, b"a stand-in").unwrap();
+        let ac2 = dir.join("ac2");
+        write_auberean_set(&ac2, dereth_launch::auberean::END_OF_RETAIL);
+        let said = lock(&shared).set_ac2_look_folder(&ac2).unwrap();
+        assert!(said.contains("built from"), "{said}");
+        lock(&shared).set_ac2_look_part("rocks", false).unwrap();
+        assert!(lock(&shared).set_ac2_look_part("dungeons", true).is_err());
+        let creatures = dereth_launch::ac2_look::every_creature();
+        assert!(lock(&shared)
+            .snapshot()
+            .ac2_look
+            .creatures
+            .iter()
+            .all(|c| c.on));
+        for c in creatures
+            .iter()
+            .filter(|c| !["drudge", "wasp"].contains(&c.as_str()))
+        {
+            lock(&shared).set_ac2_look_creature(c, false).unwrap();
+        }
+        assert!(lock(&shared).set_ac2_look_creature("dragon", true).is_err());
+        // The stand-in: its tables at `table`, and a build writes a pack at the look's version.
+        let table = AtomicU32::new(1);
+        let asked = Mutex::new(Vec::<Vec<String>>::new());
+        let run = |_: &Path, args: &[std::ffi::OsString], line: &mut dyn FnMut(&str)| {
+            let words: Vec<String> = args
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            let n = table.load(Ordering::SeqCst);
+            if words.iter().any(|w| w == "--versions") {
+                line(&format!("look 0.1.{n}"));
+                line(&format!("terrain {n}"));
+                line("sky 1");
+                return Ok(());
+            }
+            let out = &words[words.iter().position(|w| w == "--out").unwrap() + 1];
+            std::fs::write(
+                out,
+                dereth_launch::testing::art_pack("local.ac2-look", &format!("0.1.{n}")),
+            )
+            .unwrap();
+            line("step ground GrassLand");
+            line(&format!("built {out} 0.1.{n}"));
+            asked.lock().unwrap().push(words);
+            Ok(())
+        };
+        assert_eq!(
+            Backend::build_ac2_look(&shared, &run),
+            Ok("Built the Asheron's Call 2 Art Pack 0.1.1.".into())
+        );
+        let words = asked.lock().unwrap()[0].clone();
+        assert!(
+            words.contains(&"terrain,red-desert,trees,sky,drudge,wasp".to_owned()),
+            "{words:?}"
+        );
+        assert!(
+            !words.contains(&"--ac1".to_owned()),
+            "no rocks, no Asheron's Call files"
+        );
+        let view = lock(&shared).snapshot();
+        assert_eq!(view.ac2_look.built.as_deref(), Some("0.1.1"));
+        assert!(!view.ac2_look.stale && view.ac2_look.progress.is_none());
+        let shown = &view.art.installed[0];
+        assert_eq!(
+            (shown.id.as_str(), shown.release.version.as_str()),
+            ("local.ac2-look", "0.1.1")
+        );
+        // The same tables: nothing to build again.
+        assert!(Backend::rebuild_stale_ac2_look(&shared, &run).is_none());
+        // A newer table, with a launcher that has asked afresh: built again, still one pack.
+        table.store(2, Ordering::SeqCst);
+        lock(&shared).ac2_look_versions = None;
+        assert_eq!(
+            Backend::rebuild_stale_ac2_look(&shared, &run),
+            Some(Ok("Built the Asheron's Call 2 Art Pack 0.1.2.".into()))
+        );
+        let view = lock(&shared).snapshot();
+        assert_eq!(view.art.installed.len(), 1);
+        assert_eq!(view.art.installed[0].release.version, "0.1.2");
+        let built = Built::load(&lock(&shared).folders.art().join(FOLDER)).unwrap();
+        assert_eq!(built.versions.parts.get("terrain"), Some(&2));
+        assert!(lock(&shared)
+            .folders
+            .art()
+            .join(FOLDER)
+            .join(FILE)
+            .is_file());
+    }
+
     #[test]
     fn art_packs_install_reach_the_client_in_order_and_update_as_the_setting_says() {
         use dereth_launch::art::FIRST_PARTY as ART;
@@ -3550,7 +4161,36 @@ mod tests {
             Backend::refresh_art(&shared, &fetch, &no_github, &packs),
             ""
         );
-        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Add a pack file: a packed pack on this computer joins the stack last, from where it is,
+    /// and the page shows it as from this computer, with its path; a file that is not a pack is
+    /// refused in words for the page, and Remove takes it off the list and leaves the file.
+    #[test]
+    fn an_art_pack_file_reaches_the_client_from_where_it_is_and_remove_keeps_the_file() {
+        let (mut b, dir) = backend("art-file");
+        let mine = dir.join("my art");
+        std::fs::create_dir_all(&mine).unwrap();
+        let file = mine.join("flowers.dat");
+        let bytes = dereth_launch::testing::art_pack("org.example.flowers", "0.3.0");
+        std::fs::write(&file, &bytes).unwrap();
+        let junk = mine.join("notes.dat");
+        std::fs::write(&junk, b"not a pack").unwrap();
+
+        let said = b.add_art_file(&junk).unwrap_err();
+        assert!(said.contains("is not an art pack"), "{said}");
+        assert_eq!(
+            b.add_art_file(&file),
+            Ok("Added org.example.flowers 0.3.0.".to_owned())
+        );
+        let shown = &b.snapshot().art.installed[0];
+        assert_eq!(shown.source_name, "local");
+        assert_eq!(shown.file, Some(file.display().to_string()));
+        assert_eq!(b.art.stack(), std::slice::from_ref(&file));
+
+        b.remove_art_pack("org.example.flowers").unwrap();
+        assert!(b.art.stack().is_empty());
+        assert_eq!(std::fs::read(&file).unwrap(), bytes, "the file stays");
     }
 
     /// A GitHub repository added as an art pack source is read from its releases: its newest
@@ -3558,7 +4198,7 @@ mod tests {
     /// answer goes with it, and an answer of "not modified" keeps the list.
     #[test]
     fn a_github_repository_is_an_art_pack_source_asked_again_with_its_last_answers_tag() {
-        let (b, dir) = backend("art-github");
+        let (b, _dir) = backend("art-github");
         let shared: Shared = Arc::new(Mutex::new(b));
         let repo = "https://github.com/jacobjohnston/dereth-enhanced-environment";
         let releases: &[u8] =
@@ -3635,13 +4275,12 @@ mod tests {
             .sources
             .iter()
             .all(|s| s.error.is_none() || s.url != repo));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn plugins_install_from_sources_and_update_as_the_setting_says() {
         use dereth_launch::testing::{plugin_list, plugin_zip};
-        let (b, dir) = backend("plugins-sources");
+        let (b, _dir) = backend("plugins-sources");
         let shared: Shared = Arc::new(Mutex::new(b));
         let own = "network.dereth.counter";
         let theirs = "org.example.meter";
@@ -3726,7 +4365,6 @@ mod tests {
         let said = Backend::refresh_plugins(&shared, &fetch);
         assert!(said.contains("example.github.io: https://example.github.io/plugins/plugins.json was not found (404)"), "{said}");
         assert_eq!(lock(&shared).offered_plugins().len(), 2);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// At start every source is read and what is new is said in the notice, whatever the update
@@ -3734,7 +4372,7 @@ mod tests {
     #[test]
     fn at_start_the_updates_that_wait_are_told_whatever_the_setting() {
         use dereth_launch::testing::{plugin_list, plugin_zip};
-        let (b, dir) = backend("plugins-at-start");
+        let (b, _dir) = backend("plugins-at-start");
         let shared: Shared = Arc::new(Mutex::new(b));
         let own = "network.dereth.counter";
         let v1 = plugin_zip(own, "1.0.0", "0.1", "");
@@ -3766,14 +4404,13 @@ mod tests {
             Some("Plugins: 1 plugin update is waiting.")
         );
         drop(b);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Started with no connection, the launcher says nothing of its sources in the notice: each
     /// source's row says it could not be read. Refresh still says so.
     #[test]
     fn at_start_a_source_that_cannot_be_read_says_so_on_its_row_and_not_in_the_notice() {
-        let (b, dir) = backend("plugins-offline");
+        let (b, _dir) = backend("plugins-offline");
         let shared: Shared = Arc::new(Mutex::new(b));
         let offline = Served::new(&[]);
         let fetch = |u: &str, l: usize| offline.fetch(u, l);
@@ -3786,7 +4423,6 @@ mod tests {
             .is_some_and(|e| e.contains("was not found")));
         let said = Backend::refresh_plugins(&shared, &fetch);
         assert!(said.starts_with("Dereth: "), "{said}");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A folder on this computer is added and taken off by the page; its plugins are offered to
@@ -3825,7 +4461,6 @@ mod tests {
         assert_eq!(b.offered_plugins(), b.plugins.offered_packages());
         assert_eq!(b.offered_plugins().len(), 1, "the installed one again");
         assert!(b.remove_plugin_folder(&repo).is_err());
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Adding a folder is one step, with no question first, and says what it added in one short
@@ -3865,7 +4500,6 @@ mod tests {
                 code.join("plugins").display()
             ))
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Make Your Own puts the folder it wrote in on the folders on this computer, once, so the
@@ -3907,7 +4541,6 @@ mod tests {
         std::fs::write(held.join("notes.txt"), "mine").unwrap();
         assert!(b.make_plugin(&held, "XP Tracker", None).is_err());
         assert_eq!(b.plugins.local, [repo]);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Make Your Own puts a copy of the author's tool the launcher ships with at the root of the
@@ -4022,7 +4655,6 @@ mod tests {
         lock(&shared).tool = Some(tool);
         Backend::keep_tools_current(&shared);
         assert_eq!(copy_in(&later).as_deref(), Some("the tool, 1.2"));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(unix)]
@@ -4057,17 +4689,15 @@ mod tests {
             "the same combination is listed once"
         );
         b.running.remove(0).child.wait().unwrap();
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn no_password_anywhere_asks_for_one() {
-        let (mut b, dir) = backend("nopw");
+        let (mut b, _dir) = backend("nopw");
         assert!(matches!(
             b.launch(choice(None)),
             LaunchOutcome::NeedPassword { .. }
         ));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Auberean's realm's Library takes its folders as Dereth's does, into a library of its own:
@@ -4128,7 +4758,6 @@ mod tests {
             b.state.dat_sets, dereth_sets,
             "Asheron's Call's library is untouched"
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4156,14 +4785,13 @@ mod tests {
             });
             assert!(matches!(out, LaunchOutcome::Error { .. }), "{out:?}");
         }
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A world added from a join link that names Auberean is listed in Auberean's realm, not
     /// Dereth's.
     #[test]
     fn a_world_added_for_auberean_is_listed_in_auberean_s_realm() {
-        let (mut b, dir) = backend("auberean-world");
+        let (mut b, _dir) = backend("auberean-world");
         let slug = b
             .add_custom_world(&NewServer {
                 name: "A friend's".into(),
@@ -4181,7 +4809,6 @@ mod tests {
             .expect("listed");
         assert_eq!(world.game, dereth_launch::world::Game::Auberean);
         assert!(Realm::Auberean.shows(&world) && !Realm::Dereth.shows(&world));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A first run opens in the realm the launcher's package names; once there is a state file,
@@ -4211,12 +4838,11 @@ mod tests {
             Realm::Dereth,
             "the last one shown"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_server_added_by_hand_is_a_world_and_goes_with_its_accounts() {
-        let (mut b, dir) = backend("custom");
+        let (mut b, _dir) = backend("custom");
         let slug = b
             .add_custom_world(&NewServer {
                 name: "Home".into(),
@@ -4257,7 +4883,6 @@ mod tests {
         b.remove_custom_world(&slug);
         assert!(b.world_view(&slug).is_err());
         assert!(b.state.accounts.is_empty());
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4280,17 +4905,16 @@ mod tests {
             silent.local_addr().unwrap().port()
         ));
 
-        let (mut b, dir) = backend("probe");
+        let (mut b, _dir) = backend("probe");
         b.probed.insert("eulmore".into(), false);
         assert_eq!(b.world("eulmore").unwrap().state, WorldState::Offline);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A world starred in the world list is a favorite, which the list shows first, and the star
     /// is saved; taken away, it is not.
     #[test]
     fn a_world_starred_in_the_list_is_a_favorite_and_is_saved() {
-        let (mut b, dir) = backend("world-favorite");
+        let (mut b, _dir) = backend("world-favorite");
         assert!(!b.world("eulmore").unwrap().favorite);
         b.set_world_favorite("eulmore", true);
         assert!(b.world("eulmore").unwrap().favorite);
@@ -4302,7 +4926,6 @@ mod tests {
         );
         b.set_world_favorite("eulmore", false);
         assert!(!b.world("eulmore").unwrap().favorite);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The desktop shows an Empyrean world's era as being checked until it has asked the world,
@@ -4312,7 +4935,7 @@ mod tests {
     fn an_empyrean_worlds_era_is_checked_until_asked_and_asked_again_only_while_shown() {
         use dereth_launch::status::LiveStatus;
         use dereth_launch::world::EraState;
-        let (mut b, dir) = backend("era-state");
+        let (mut b, _dir) = backend("era-state");
         assert_eq!(b.world("eulmore").unwrap().era_state, EraState::Checking);
         b.probed.insert("eulmore".into(), true);
         assert_eq!(b.world("eulmore").unwrap().era_state, EraState::Unknown);
@@ -4334,7 +4957,6 @@ mod tests {
         assert!(b.pings_due().is_empty(), "nothing is asked off screen");
         b.set_worlds_shown(true);
         assert_eq!(b.pings_due(), ["eulmore"]);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A stand-in for Empyrean's side of the status ping: a token for the hello, the status for
@@ -4387,7 +5009,7 @@ mod tests {
         );
 
         // A server the player added without a name is called what it says it is called.
-        let (mut b, dir) = backend("ping");
+        let (mut b, _dir) = backend("ping");
         let slug = b
             .add_custom_world(&NewServer {
                 host: "127.0.0.1".into(),
@@ -4403,14 +5025,13 @@ mod tests {
         assert_eq!(w.players, Some(4));
         assert_eq!(w.era_source, Some(Told::World));
         assert_eq!(w.features_source, Some(Told::World));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A world's era and systems are its own word, and a world that says none plays the end of
     /// retail; the page is given nothing to choose them with.
     #[test]
     fn a_world_plays_the_era_it_says_and_any_other_the_end_of_retail() {
-        let (mut b, dir) = backend("eras");
+        let (mut b, _dir) = backend("eras");
         let mut w = World::new("leafcull", "Leafcull");
         w.emulator = Emulator::Ace;
         w.endpoint = b.list.worlds()[0].endpoint.clone();
@@ -4466,7 +5087,6 @@ mod tests {
             (w.era.as_deref(), w.era_features.as_deref()),
             (Some("eor"), None)
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4495,13 +5115,87 @@ mod tests {
             matches!(&out, LaunchOutcome::Error { message } if message.contains("Modern")),
             "{out:?}"
         );
-        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Play Again's combination, saved with a set the player removed and then added again from the
+    /// same folder, names the set added again, which has another id now.
+    #[test]
+    fn play_again_follows_its_data_files_when_they_are_removed_and_added_again() {
+        let (mut b, dir) = backend("play-again-readd");
+        let mine = dir.join("mine");
+        write_dat_set(&mine, Iterations::END_OF_RETAIL);
+        // Another set, of other files.
+        let other = dir.join("other");
+        write_dat_set(
+            &other,
+            Iterations {
+                portal: Some(2000),
+                ..Iterations::END_OF_RETAIL
+            },
+        );
+        let find = b.read_folder(&mine, Game::Dereth);
+        b.add_folder(find);
+        let id = b
+            .state
+            .dat_sets
+            .iter()
+            .find(|s| s.path == mine)
+            .unwrap()
+            .id
+            .clone();
+        b.state.record_recent(Recent {
+            world_slug: "eulmore".into(),
+            account: "player".into(),
+            client: ClientKind::Dereth,
+            dat_set_id: Some(id.clone()),
+            classic_set_id: None,
+            last_played: 10,
+        });
+        b.delete_set(&id).unwrap();
+        // Another folder takes the freed place first, so the set added again has another id.
+        let find = b.read_folder(&other, Game::Dereth);
+        b.add_folder(find);
+        let find = b.read_folder(&mine, Game::Dereth);
+        b.add_folder(find);
+        let again = b
+            .state
+            .dat_sets
+            .iter()
+            .find(|s| s.path == mine)
+            .unwrap()
+            .id
+            .clone();
+        assert_ne!(again, id, "the set added again is a new entry");
+        assert_eq!(
+            b.state.recent[0].dat_set_id.as_deref(),
+            Some(again.as_str())
+        );
+    }
+
+    /// A combination whose data files are gone from the Library opens its world's page to choose
+    /// others, rather than failing to start.
+    #[test]
+    fn a_combination_whose_data_files_are_gone_asks_for_others() {
+        let (mut b, _dir) = backend("play-again-gone");
+        let out = b.launch(Choice {
+            dat_set_id: Some("removed-long-ago".into()),
+            ..choice(Some("pw"))
+        });
+        assert!(
+            matches!(&out, LaunchOutcome::ChooseSet { message } if message.contains("no longer in your Library")),
+            "{out:?}"
+        );
+        let out = b.launch(Choice {
+            classic_set_id: Some("gone-pair".into()),
+            ..choice(Some("pw"))
+        });
+        assert!(matches!(out, LaunchOutcome::ChooseSet { .. }), "{out:?}");
     }
 
     /// A choice saved before a world said it plays Launch can't start the retail client on it.
     #[test]
     fn a_launch_world_is_not_started_on_the_retail_client() {
-        let (mut b, dir) = backend("retail-on-launch");
+        let (mut b, _dir) = backend("retail-on-launch");
         b.list.worlds_mut()[0].era = Some("launch".into());
         let out = b.launch(Choice {
             client: ClientKind::Retail,
@@ -4511,7 +5205,6 @@ mod tests {
             matches!(&out, LaunchOutcome::Error { message } if message.contains("can't play")),
             "{out:?}"
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4529,7 +5222,7 @@ mod tests {
             ..choice(Some("pw"))
         });
         assert!(
-            matches!(&out, LaunchOutcome::Error { message } if message.contains("1999 data files")),
+            matches!(&out, LaunchOutcome::Error { message } if message.contains("Launch data files")),
             "{out:?}"
         );
         let original = dir.join("nov1999");
@@ -4537,10 +5230,10 @@ mod tests {
         let find = b.read_folder(&original, Game::Dereth);
         b.add_folder(find);
         let view = b.world_view("eulmore").unwrap();
-        assert_eq!(view.requires, SetKind::Original);
+        assert_eq!(view.requires, SetKind::Classic);
+        assert!(view.launch_pair);
         assert_eq!(view.classic_sets.len(), 1);
         assert_eq!(view.classic_sets[0].path, original);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(unix)]
@@ -4581,7 +5274,6 @@ mod tests {
             b.state.recent[0].classic_set_id.as_deref(),
             Some(id.as_str())
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4613,7 +5305,6 @@ mod tests {
         assert!(s.list_fetched_at.is_some());
         assert!(!b.list.wants_reading(now()), "fresh: no fetch at start");
         assert_eq!(s.eras.len(), 3);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A launcher started on another hub's list (`DERETH_HUB_LIST`) reads that hub's list at
@@ -4680,7 +5371,6 @@ mod tests {
             lock(&after).list.wants_reading(now()),
             "the network's list is read again"
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The list the launcher fetches by default comes from the hub, or from the community's own
@@ -4843,7 +5533,6 @@ mod tests {
             Some(copy),
             "an empty list is never the day's copy"
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The window shows the same worlds as the web client's front page from the same answers: the
@@ -4875,7 +5564,6 @@ mod tests {
         };
         assert_eq!(read(true), fixture::from_the_hub());
         assert_eq!(read(false), fixture::from_the_community());
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4907,38 +5595,39 @@ mod tests {
         );
         let (saved, _) = LauncherState::load(&dir.join("state"));
         assert_eq!(saved.recent.len(), 1, "and the history on disk with it");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// The first start asks which interface the Dereth client plays in, until the answer is in the
-    /// client's preferences; the launcher started again does not ask, and a file that already names
-    /// one (the client's own choice) is never asked about.
+    /// The first start asks which interface the Dereth client plays in, until the launcher keeps
+    /// an answer as the default for every world; the launcher started again does not ask, nor does
+    /// one whose client's preferences name the answer an earlier launcher wrote there. The
+    /// default reaches the client on its command line, with the world's name.
     #[test]
-    fn the_launcher_asks_for_the_interface_until_one_is_saved_in_the_clients_preferences() {
+    fn the_launcher_asks_for_the_interface_until_it_keeps_a_default_for_every_world() {
         let (mut b, dir) = backend("interface");
         let file = dir.join("settings").join("UserPreferences.ini");
         let view = b
             .snapshot()
             .interface
             .expect("the client keeps preferences");
-        assert_eq!(view.chosen, None, "nothing saved: the page asks");
+        assert_eq!(view.chosen, None, "nothing chosen: the page asks");
         assert_eq!(
             view.offers.iter().map(|o| o.name).collect::<Vec<_>>(),
             ["Horizon", "Modern", "Classic"]
         );
-        assert_eq!(view.file, file.display().to_string());
         let json = serde_json::to_string(&b.snapshot()).unwrap();
         assert!(json.contains("\"interface\":{\"chosen\":null"), "{json}");
 
         assert!(b.set_interface("Retail").is_err());
-        assert!(!file.exists(), "a refused answer writes nothing");
         b.set_interface("classic").unwrap();
         assert_eq!(b.snapshot().interface.unwrap().chosen, Some("Classic"));
-        assert_eq!(
-            std::fs::read_to_string(&file).unwrap(),
-            "[UI]\r\nInterface=Classic\r\n",
-            "in the client's file, as the client writes it"
-        );
+        assert!(!file.exists(), "the client's own file is the client's");
+        // Changed while a Dereth client runs: the next start takes it.
+        b.running.push(running_game(
+            &b.world("eulmore").unwrap(),
+            ClientKind::Dereth,
+        ));
+        b.set_interface("Modern").unwrap();
+        b.running.remove(0).child.wait().unwrap();
 
         let again = Backend::new(
             Folders::single(dir.join("state")),
@@ -4948,15 +5637,39 @@ mod tests {
             "memory",
             Some(file.clone()),
         );
-        assert_eq!(again.snapshot().interface.unwrap().chosen, Some("Classic"));
+        assert_eq!(again.snapshot().interface.unwrap().chosen, Some("Modern"));
 
-        // The client's own choice, saved in its options, shows the same way.
+        // An earlier launcher's answer, in the client's file, is the default from now on, and
+        // the client's later saves of the file do not move it.
+        let earlier = dir.join("earlier");
+        std::fs::create_dir_all(&earlier).unwrap();
+        let earlier_file = earlier.join("UserPreferences.ini");
         std::fs::write(
-            &file,
-            "[Display]\r\nFullScreen=True\r\n[UI]\r\nInterface=Modern\r\n",
+            &earlier_file,
+            "[UI]
+Interface=Classic
+",
         )
         .unwrap();
-        assert_eq!(b.snapshot().interface.unwrap().chosen, Some("Modern"));
+        let open = || {
+            Backend::new(
+                Folders::single(earlier.join("state")),
+                Vec::new(),
+                None,
+                Box::new(MemoryVault::default()),
+                "memory",
+                Some(earlier_file.clone()),
+            )
+        };
+        assert_eq!(open().snapshot().interface.unwrap().chosen, Some("Classic"));
+        std::fs::write(
+            &earlier_file,
+            "[UI]
+Interface=Horizon
+",
+        )
+        .unwrap();
+        assert_eq!(open().snapshot().interface.unwrap().chosen, Some("Classic"));
 
         // With no preferences at all, nothing is asked.
         let none = Backend::new(
@@ -4968,7 +5681,6 @@ mod tests {
             None,
         );
         assert!(none.snapshot().interface.is_none());
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A row of the hub's list: the world `name` on this machine's discard port, its status
@@ -5004,7 +5716,7 @@ mod tests {
     /// `Servers.xml` `named` alone.
     /// A launcher reading the usual sources, or the list `named` alone, with `copy` kept as the
     /// day's copy of what they gave.
-    fn launcher_with(name: &str, copy: &ListCache, named: Option<&str>) -> (Shared, PathBuf) {
+    fn launcher_with(name: &str, copy: &ListCache, named: Option<&str>) -> (Shared, Scratch) {
         let dir = tmp(name);
         let folders = Folders::single(dir.join("state"));
         let sources = serverlist::sources(named);
@@ -5076,7 +5788,7 @@ mod tests {
             )],
             ..ListCache::default()
         };
-        let (shared, dir) = launcher_with("hub-status", &copy, None);
+        let (shared, _dir) = launcher_with("hub-status", &copy, None);
         assert_eq!(
             seen(&shared, "coldeve"),
             (WorldState::Unknown, None),
@@ -5163,7 +5875,6 @@ mod tests {
             "an expired heartbeat leaves the world to its probe"
         );
         assert_eq!(seen(&shared, "frostfell"), (WorldState::Online, None));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The refresh button's list, when it is the hub's, brings each world's status at once. The
@@ -5216,7 +5927,7 @@ mod tests {
         );
         let (_, get) = stand_in(Vec::new());
         assert!(Backend::read_hub_status_at(&shared, now() + 600, get).is_none());
-        let _ = std::fs::remove_dir_all(dir);
+        drop(dir);
 
         let hub_copy = ListCache {
             fetched_at: now(),
@@ -5226,7 +5937,7 @@ mod tests {
             )],
             ..ListCache::default()
         };
-        let (shared, dir) = launcher_with(
+        let (shared, _dir) = launcher_with(
             "hub-named",
             &hub_copy,
             Some("https://lists.example/Servers.xml"),
@@ -5238,7 +5949,6 @@ mod tests {
             "a named list is read alone, and says nothing of status"
         );
         assert_eq!(seen(&shared, "coldeve"), (WorldState::Unknown, None));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A game the launcher "started" on `world`: this test program again, listing its tests,
@@ -5289,7 +5999,6 @@ mod tests {
         )
         .unwrap();
         assert!(listed(&folders), "a file that had it turned off");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A client started by a launcher that reads another hub's list is told that hub, for the count
@@ -5324,7 +6033,6 @@ mod tests {
         );
         assert!(told(serverlist::sources(None)).is_empty());
         assert_eq!(serverlist::PLAYER_COUNT_HUB_ENV, "DERETH_PLAYER_COUNT_HUB");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A launcher with an empty state folder lists Icefire in Asheron's Call 2's realm, and so does
@@ -5358,7 +6066,6 @@ mod tests {
         )
         .unwrap();
         assert!(icefire(&folders).is_some(), "an older file");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Icefire is asked whether it is up with the server-tracker login alone, as any world that
@@ -5367,7 +6074,7 @@ mod tests {
     /// This doesn't send anything: Icefire's address is real.
     #[test]
     fn icefire_is_asked_with_the_login_and_shows_what_it_said() {
-        let (b, dir) = backend("icefire-probe");
+        let (b, _dir) = backend("icefire-probe");
         let shared: Shared = Arc::new(Mutex::new(b));
         let slugs = ["icefire".to_owned()];
         lock(&shared).state.hide_built_in_worlds = false;
@@ -5406,7 +6113,6 @@ mod tests {
         };
         assert_eq!(ask(Emulator::Unknown, "9300"), (true, true, false));
         assert_eq!(ask(Emulator::Yalain, "9400"), (true, false, false));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A world played through a relay is listed with nothing set, and asked as any world is, in the
@@ -5414,7 +6120,7 @@ mod tests {
     /// send anything: its address is real.
     #[test]
     fn a_relayed_world_is_listed_and_asked_in_its_own_form() {
-        let (b, dir) = backend("relayed");
+        let (b, _dir) = backend("relayed");
         let shared: Shared = Arc::new(Mutex::new(b));
         let slugs = ["ac1999".to_owned()];
         assert!(lock(&shared).world("ac1999").is_none(), "the tests hide it");
@@ -5444,7 +6150,6 @@ mod tests {
             lock(&shared).world("ac1999").unwrap().state,
             WorldState::Online
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A server of the 1999 wire is asked in that wire's form, and its login failure is a yes; silence
@@ -5488,7 +6193,7 @@ mod tests {
     /// The relay goes when the client it serves ends.
     #[test]
     fn a_relay_stops_when_its_client_ends() {
-        let (mut b, dir) = backend("relay-stops");
+        let (mut b, _dir) = backend("relay-stops");
         let world = b.world("eulmore").unwrap();
         let mut game = running_game(&world, ClientKind::Dereth);
         let mut relay = if cfg!(windows) {
@@ -5518,7 +6223,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
         assert!(!process_alive(id), "and its relay with it");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Whether a process of this id still runs.
@@ -5598,7 +6302,6 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(next(&rx), Seen::Closed);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// "Automatically update components" is on to begin with, and what the player
@@ -5615,7 +6318,6 @@ mod tests {
         b.set_update_components(true);
         let (saved, _) = LauncherState::load(&dir.join("state"));
         assert!(saved.settings.update_components);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A Library section the player folds stays folded across a restart, and the page is told.
@@ -5638,7 +6340,6 @@ mod tests {
             json["state"]["settings"]["library_open"]["dereth.sets.classic"],
             false
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -5654,12 +6355,11 @@ mod tests {
         assert_eq!(saved.settings.realm, Realm::Auberean, "kept with the state");
         let json = serde_json::to_value(b.snapshot()).unwrap();
         assert_eq!(json["state"]["settings"]["realm"], "auberean");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn snapshots_serialise_for_the_page() {
-        let (b, dir) = backend("json");
+        let (b, _dir) = backend("json");
         let json = serde_json::to_string(&b.snapshot()).unwrap();
         assert!(json.contains("\"slug\":\"eulmore\""));
         assert!(json.contains("\"list_state\":\"loading\""));
@@ -5668,7 +6368,6 @@ mod tests {
             view.contains("\"kind\":\"dereth\"") && view.contains("\"default_client\":\"dereth\""),
             "{view}"
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
     #[test]
     fn a_host_address_change_refuses_play_before_starting_a_client_on_the_old_address() {
@@ -5796,6 +6495,114 @@ mod tests {
             "past the check"
         );
         drop(guard);
-        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Playing an Asheron's Call 2 world that writes into the retail client's files first copies
+    /// the retail client's install into the library as the world's own, which it then plays from,
+    /// and leaves the player's install as it was; a launcher started later keeps that copy and
+    /// removes one never finished. A copy that can't be made stops PLAY in words for a person and
+    /// keeps no copy; so does one asked for while another job runs.
+    #[test]
+    fn a_worlds_copy_of_the_retail_client_is_made_in_the_library_and_the_install_left_alone() {
+        let dir = tmp("retail-copy");
+        let install = dir.join("retail");
+        std::fs::create_dir_all(install.join("data")).unwrap();
+        std::fs::write(install.join("AC2client.exe"), b"a client").unwrap();
+        std::fs::write(install.join("data").join("portal.dat"), b"portal").unwrap();
+        let mut b = without_built_in_worlds(Backend::new(
+            Folders::single(dir.join("state")),
+            Vec::new(),
+            None,
+            Box::new(MemoryVault::default()),
+            "memory",
+            None,
+        ));
+        let mut w = World::new("dawnsong", "Dawnsong");
+        w.game = Game::Auberean;
+        w.dats.patches_over_wire = Some(true);
+        *b.list.worlds_mut() = vec![w.clone()];
+        assert!(!b.copies_retail_at_play(&w), "no retail client to copy");
+        b.state.auberean.retail = Some(Installation {
+            id: "r".into(),
+            path: install.clone(),
+            exe: "AC2client.exe".into(),
+            kind: ClientKind::Retail,
+            client_id: "ac2client-0930".into(),
+            version: None,
+            build_date: None,
+            net_version: None,
+            identified_by: dereth_launch::install::IdentifiedBy::ExeSha256,
+            modifications: vec![],
+            multi_instance: true,
+            own_dats: Iterations::default(),
+            verified_at: None,
+            manifest_result: None,
+        });
+        assert!(b.copies_retail_at_play(&w));
+        let shared: Shared = Arc::new(Mutex::new(b));
+
+        lock(&shared).job = Some(JobView {
+            what: "Copying data files".into(),
+            done: 0,
+            total: 0,
+            cancellable: false,
+        });
+        let e = Backend::copy_retail_for_play(&shared, "dawnsong").unwrap_err();
+        assert!(e.starts_with("Another copy is still running"), "{e}");
+        lock(&shared).job = None;
+
+        let copy = Backend::copy_retail_for_play(&shared, "dawnsong").unwrap();
+        {
+            let b = lock(&shared);
+            assert!(copy.starts_with(b.library_dir()), "{}", copy.display());
+            assert!(b.job.is_none(), "the job is over");
+            assert_eq!(b.state.auberean.retail_copies.get("dawnsong"), Some(&copy));
+            assert!(!b.copies_retail_at_play(&w), "it has one now");
+        }
+        assert_eq!(
+            std::fs::read(copy.join("data").join("portal.dat")).unwrap(),
+            b"portal"
+        );
+        std::fs::write(copy.join("data").join("portal.dat"), b"patched").unwrap();
+        assert_eq!(
+            std::fs::read(install.join("data").join("portal.dat")).unwrap(),
+            b"portal",
+            "the player's install as it was"
+        );
+
+        // A launcher started later removes a copy never finished, and keeps the recorded one.
+        let unfinished = copy.with_file_name("copy-9");
+        std::fs::create_dir_all(unfinished.join("data")).unwrap();
+        let again = Backend::new(
+            Folders::single(dir.join("state")),
+            Vec::new(),
+            None,
+            Box::new(MemoryVault::default()),
+            "memory",
+            None,
+        );
+        assert!(!unfinished.exists(), "never finished");
+        assert_eq!(
+            std::fs::read(copy.join("data").join("portal.dat")).unwrap(),
+            b"patched",
+            "the recorded copy as it was"
+        );
+        assert_eq!(
+            again.state.auberean.retail_copies.get("dawnsong"),
+            Some(&copy)
+        );
+        drop(again);
+
+        std::fs::remove_dir_all(&install).unwrap();
+        lock(&shared).state.auberean.retail_copies.clear();
+        let e = Backend::copy_retail_for_play(&shared, "dawnsong").unwrap_err();
+        assert!(
+            e.starts_with("Could not read the retail client's folder"),
+            "{e}"
+        );
+        let b = lock(&shared);
+        assert!(b.job.is_none());
+        assert!(b.state.auberean.retail_copies.is_empty());
+        drop(b);
     }
 }

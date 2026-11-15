@@ -1,17 +1,27 @@
 [package]
 name = "yalain-world-db"
 description = "The Asheron's Call 2 world database: its packs of server rows read and checked, merged in load order, compiled against an install into the server's tables, and packaged as a release."
-version = "0.3.1" # Yalain's own version, shared by every yalain-* crate (not the workspace's)
+version = "0.4.0" # Yalain's own version, shared by every yalain-* crate (not the workspace's)
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 autotests = false
 
+[features]
+# The world's overlay written into a folder, against an install on disk (`overlay::write`): the
+# server's compile and the world builder build it. Off, the crate does no I/O.
+fs = ["auberean-dat/fs"]
+
 [dependencies]
 auberean-assets.workspace = true
 auberean-pack.workspace = true
 auberean-script.workspace = true
+# The overlay: the install's records it is made from, what the land grows (for a clearing), and
+# the shared container it is written in.
+auberean-dat.workspace = true
+auberean-world.workspace = true
+dereth-dat.workspace = true
 dereth-pack.workspace = true
 dereth-primitives.workspace = true
 yalain-content.workspace = true

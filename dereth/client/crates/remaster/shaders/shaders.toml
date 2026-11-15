@@ -55,6 +55,18 @@ source = "gbuffer.slang"
 entry = "fs_edge"
 stage = "fragment"
 
+# The forward and edge passes for a list sorted on the device, one-sided and two-sided items (and
+# for the forward pass blended and added ones) in one pipeline.
+[[entry]]
+source = "gbuffer.slang"
+entry = "fs_forward_any"
+stage = "fragment"
+
+[[entry]]
+source = "gbuffer.slang"
+entry = "fs_edge_any"
+stage = "fragment"
+
 # The G-buffer pass for the ground.
 [[entry]]
 source = "terrain.slang"
@@ -86,6 +98,66 @@ stage = "fragment"
 # The visible draw items made into indirect draw commands.
 [[entry]]
 source = "cull.slang"
+entry = "cs_main"
+stage = "compute"
+
+# The blocks' parts: their levels and fades chosen, their places in the command lists and in the
+# walk counted, and their commands and keys written, on the device.
+[[entry]]
+source = "instances.slang"
+entry = "cs_choose"
+stage = "compute"
+
+[[entry]]
+source = "instances.slang"
+entry = "cs_walk_cpu"
+stage = "compute"
+
+[[entry]]
+source = "instances.slang"
+entry = "cs_scan"
+stage = "compute"
+
+[[entry]]
+source = "instances.slang"
+entry = "cs_walk_scan"
+stage = "compute"
+
+[[entry]]
+source = "instances.slang"
+entry = "cs_walk_groups"
+stage = "compute"
+
+[[entry]]
+source = "instances.slang"
+entry = "cs_write"
+stage = "compute"
+
+# The cut-outs' edges and the blended surfaces sorted far to near, and their commands written, on
+# the device.
+[[entry]]
+source = "sort.slang"
+entry = "cs_local"
+stage = "compute"
+
+[[entry]]
+source = "sort.slang"
+entry = "cs_global"
+stage = "compute"
+
+[[entry]]
+source = "sort.slang"
+entry = "cs_merge"
+stage = "compute"
+
+[[entry]]
+source = "sort.slang"
+entry = "cs_emit"
+stage = "compute"
+
+# The skinned bodies posed on the device, written over their meshes' vertices.
+[[entry]]
+source = "skin.slang"
 entry = "cs_main"
 stage = "compute"
 
@@ -290,6 +362,12 @@ source = "water.slang"
 entry = "fs_traced"
 stage = "fragment"
 
+# One step of the water's wake near the eye.
+[[entry]]
+source = "water.slang"
+entry = "cs_wake"
+stage = "compute"
+
 # Where instances stand and how far they are lifted onto the drawn ground, as the G-buffer places
 # them: for the checks.
 [[entry]]
@@ -317,6 +395,19 @@ stage = "vertex"
 [[entry]]
 source = "impostor.slang"
 entry = "fs_draw"
+stage = "fragment"
+
+# A row of a tree's pictures from the same pictures drawn finer, a texel from each square of
+# pixels.
+[[entry]]
+source = "impostor.slang"
+entry = "fs_gather"
+stage = "fragment"
+
+# A far picture's smaller copies, made from a row of views.
+[[entry]]
+source = "impostor.slang"
+entry = "fs_chain"
 stage = "fragment"
 
 # The art pack's far trees: culled on the device, then its far pictures drawn into the G-buffer.

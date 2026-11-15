@@ -11,8 +11,10 @@ use super::remaster_view::remaster;
 use super::SceneDraw;
 
 impl SceneDraw {
-    /// How the remaster picks its parts' levels, from the next frame on.
+    /// How the remaster picks its parts' levels, from the next frame on, and from when it is
+    /// turned on.
     pub fn set_remaster_lod(&mut self, lod: LodSettings, gpu: &mut Gpu) {
+        self.remaster_view.get_mut().lod = lod;
         if let Some(r) = remaster(gpu) {
             r.renderer().set_lod(lod);
         }
@@ -22,7 +24,7 @@ impl SceneDraw {
     #[must_use]
     pub fn remaster_lod_stats(&self, gpu: &mut Gpu) -> Option<LodStats> {
         let r = remaster(gpu)?;
-        Some(r.renderer().lod().stats())
+        Some(r.renderer().lod_stats())
     }
 
     /// What the far forest did in the remaster; `None` while it is off.

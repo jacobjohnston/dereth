@@ -1,12 +1,16 @@
 //! Talking to people and shopping.
 //!
-//! **Using a person** (in reach: the use answered first) runs the quest step it triggers, if one
+//! **Using a person** (in reach: the use answered first) is judged by the orders of uses naming it,
+//! if any do ([`crate::puzzles`]); else it runs the quest step it triggers, if one
 //! does; else it says what it says when used ([`crate::talk`]): a storekeeper its greeting, if its
 //! row gives one, and it opens its store: the store's first page
 //! of sales (seven to a page), each sale with its product, icon, name, price and currency, stack
 //! size and place in the store, and a stock id the client buys it by. A sale for some players only
 //! (a race, a least level, quests at a status) is left off the page of a player who may not have
 //! it where its store hides such sales, else shown restricted; buying it finds no sale.
+//!
+//! The page names the store template the shop window takes its title from: the store's own, or
+//! for a keeper of a world's own shop, the shop's copy of it, whose sales are the store's.
 //!
 //! **Paging** answers with the next or the previous page. **Leaving** is not answered (the client
 //! closes the store itself).
@@ -42,6 +46,8 @@ pub mod function {
     pub const PREV_SALES: u32 = 0x9B5E_0024;
     pub const LEAVE_STORE: u32 = 0x9B5E_000C;
     pub const PURCHASE: u32 = 0x9B5E_0031;
+    /// `Store_RequestUpdateSales`, of a storekeeper.
+    pub const UPDATE_SALES: u32 = 0x9B5E_0042;
 }
 
 /// Script packages and native types of a store's view.
@@ -82,7 +88,7 @@ pub fn stock_id(sale: &Sale) -> u64 {
 }
 
 /// A player has used a person (in reach, the use answered): the quest step it triggers, else its
-/// store.
+/// store. Returns whether a quest step ran.
 pub fn talk<S: Store>(
     s: &mut Server<S>,
     net: &mut ServerNet,
@@ -90,7 +96,11 @@ pub fn talk<S: Store>(
     id: u64,
     o: &ContentObject,
     clock: Clock,
-) {
+) -> bool {
+    if crate::puzzles::judges(s, o.template) {
+        crate::puzzles::used(s, net, world, id, clock);
+        return false;
+    }
     let name = o.description.name.or(o.facts.name);
     if crate::quests::triggered(
         s,
@@ -100,7 +110,7 @@ pub fn talk<S: Store>(
         Some((id, name)),
         clock,
     ) {
-        return;
+        return true;
     }
     let object = crate::presence::content_by_id(&s.content.objects, id);
     if let Some(quest) = crate::quests::too_low(s, world, Trigger::Use(o.template), clock.unix) {
@@ -119,7 +129,7 @@ pub fn talk<S: Store>(
                 |i| crate::talk::content_speaker(s, i),
             );
             crate::talk::say(s, net, world, &speaker, &line.words, line.how);
-            return;
+            return false;
         }
     }
     if crate::quests::too_soon(s, world, Trigger::Use(o.template), clock.unix) {
@@ -138,7 +148,7 @@ pub fn talk<S: Store>(
                 |i| crate::talk::content_speaker(s, i),
             );
             crate::talk::say(s, net, world, &speaker, &line.words, line.how);
-            return;
+            return false;
         }
     }
     let keeper = s.stores.keeper(o.template).cloned();
@@ -166,7 +176,7 @@ pub fn talk<S: Store>(
         crate::talk::say(s, net, world, &speaker, &line.words, line.how);
     }
     let Some(k) = keeper else {
-        return;
+        return false;
     };
     let view = page(s, world, id, k.store, 0, function::ENTER_STORE);
     progress::private(net, world, &view);
@@ -174,6 +184,7 @@ pub fn talk<S: Store>(
         p.shopping = Some((id, k.store, 0));
     }
     crate::market::follow(s, world, id, clock);
+    false
 }
 
 /// A list of references.
@@ -273,12 +284,21 @@ pub fn page<S: Store>(
         view,
         &[
             Slot::Ref(Some(list)),
-            Slot::Tagged(0x04, store),
+            Slot::Tagged(0x04, titled_by(s, keeper, store)),
             Slot::Tagged(0x04, size),
             Slot::Int(pos),
         ],
     );
     session::call(f, &[Arg::Object(b.graph()), Arg::LongInt(keeper)]).expect("a store view packs")
+}
+
+/// The store template a keeper's page of `store` names: its shop's copy when it keeps one.
+fn titled_by<S: Store>(s: &Server<S>, keeper: u64, store: u32) -> u32 {
+    crate::presence::content_by_id(&s.content.objects, keeper)
+        .and_then(|i| s.stores.keeper(s.content.objects[i].template))
+        .filter(|k| k.store == store)
+        .and_then(|k| k.shown)
+        .unwrap_or(store)
 }
 
 /// Whether a player may have a sale: of its race, of its level, holding its quests at their status.
@@ -324,6 +344,26 @@ pub fn turn_page<S: Store>(
     if let Some(p) = s.players.get_mut(&world) {
         p.shopping = Some((keeper, store, pos));
     }
+}
+
+/// The client asks for its store's sales again, as its scripts do when the player's experience or
+/// quests change while it shops, since a level or a quest may gate a sale: the page it is on, as it
+/// now stands. A broker's consignments, gated by neither, and a storekeeper the player isn't
+/// shopping with are not answered.
+pub fn update_sales<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, v: &[Value]) {
+    let Some(Value::Long(asked)) = v.first() else {
+        s.unhandled
+            .note("a store's sales asked for that do not read");
+        return;
+    };
+    let Some((keeper, store, pos)) = s.players.get(&world).and_then(|p| p.shopping) else {
+        return;
+    };
+    if keeper != *asked || crate::market::is_broker(s, keeper) {
+        return;
+    }
+    let m = page(s, world, keeper, store, pos, function::UPDATE_STORE);
+    progress::private(net, world, &m);
 }
 
 /// The client leaves the store (not answered): a vendor's store is no longer sent again.

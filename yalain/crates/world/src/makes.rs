@@ -25,6 +25,14 @@ pub fn can_make<S: Store>(s: &Server<S>, template: u32) -> bool {
     s.catalog.get(template).is_some()
 }
 
+/// One of several templates, picked by weight: the one a row hands out this time (none when
+/// there are none to pick from).
+pub fn pick_one<S: Store>(s: &mut Server<S>, from: &[(u32, u32)]) -> Option<u32> {
+    #[allow(clippy::cast_precision_loss)]
+    let i = s.rng.weighted(from.iter().map(|(_, w)| *w as f32))?;
+    from.get(i).map(|(t, _)| *t)
+}
+
 /// What the server's own rules make, whatever the world holds: the corpse, the races' starting
 /// packs, the mount items (`mounts`, as
 /// [`crate::mounts::Mounts::catalog_items`] gives them) and a summoned portal. The nodes delving
@@ -53,14 +61,16 @@ pub struct Rows<'a> {
     pub death_spawns: &'a BTreeMap<String, DeathSpawn>,
     pub pets: &'a BTreeMap<u32, yalain_content::PetKind>,
     pub items: &'a yalain_content::item_rows::ItemRows,
-    /// The dye plants, as [`crate::plants::world_plants`] gives them.
+    /// The dye plants, the world's rows.
     pub plants: &'a plants::DyePlants,
+    /// What the world says of effects: the items they give among it.
+    pub effect_rules: &'a crate::effect_defs::EffectRules,
 }
 
 /// What a world's rows make or hand on: placed objects (a chest's lock and contents, a door's), its
 /// kinds of pet, what every new character is given, what stores sell, what quest steps and people give, what is taken up for a step and what's
-/// handed in for a gift, what butchery yields, what a death makes, and the dye plants and what
-/// they give. Camps and loot are the
+/// handed in for a gift, what butchery yields, what a death makes, the dye plants and what they
+/// give, and what effects give. Camps and loot are the
 /// catalog's own, and the recipes' products and materials [`crate::craft::Crafting::templates`].
 #[must_use]
 pub fn by_the_rows(rows: Rows<'_>) -> Vec<u32> {
@@ -86,13 +96,21 @@ pub fn by_the_rows(rows: Rows<'_>) -> Vec<u32> {
         )
         .chain(rows.death_spawns.values().map(|d| d.template))
         .chain(rows.plants.templates())
+        .chain(rows.effect_rules.grants.values().map(|g| g.template))
+        .chain(rows.effect_rules.places.values().map(|p| p.template))
+        .chain(rows.effect_rules.places_named.values().map(|p| p.template))
         .collect()
 }
 
-/// What a described template names in its turn: what a creature's body yields, what a node gives.
+/// What a described template names in its turn: what a creature's body yields, the corpse it
+/// leaves in place of the common one, what a node gives.
 #[must_use]
 pub fn by_a_template(props: &Props) -> Vec<u32> {
     let trophies = yalain_content::CreatureStats::from_props(props)
         .map_or_else(Vec::new, |s| s.trophies.iter().map(|(t, _)| *t).collect());
-    trophies.into_iter().chain(props.word(NODE_GIVES)).collect()
+    trophies
+        .into_iter()
+        .chain(props.word(crate::death::CORPSE_OVERRIDE))
+        .chain(props.word(NODE_GIVES))
+        .collect()
 }

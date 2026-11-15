@@ -12,9 +12,12 @@
 //!            [--game-time SECONDS] [--overlay-dat-dir DIR]
 //! ```
 //!
+//! `--figure ID` walks that visual description (a creature's) in place of the human male, and
+//! `--appearance TABLE=VALUE` sets every key of one of its appearance tables (a material's).
 //! `--walk SECONDS` puts the player's body at `--at` instead, walks it (standing half a second,
 //! then running; `--turn-at S` turns left for a second from S, `--jump-at S` jumps at S) and writes
 //! `--frames N` frames from the chase camera, and a strip of them, into the folder `--out`.
+//! `--orbit DEG` swings that camera about the body from straight behind it (180 looks at its front).
 //!
 //! `--uptime SECONDS` is how long the client has been running: the clouds' shadows scroll with it
 //! (default 0). `--no-shadows`, `--no-clouds` and `--no-reflections` turn the static object
@@ -75,6 +78,7 @@ struct Args {
     walk: Option<f64>,
     frames: u32,
     turn_at: Option<f64>,
+    orbit: f32,
     jump_at: Option<f64>,
     uptime: f64,
     fx: Vec<fx::Placed>,
@@ -85,6 +89,24 @@ struct Args {
     volumes: bool,
     disc: bool,
     pools: bool,
+    /// `--figure ID`: the visual description walked in place of the human male.
+    figure: Option<u32>,
+    /// `--appearance TABLE=VALUE`: every key of that appearance table set to the value.
+    appearance: Vec<(u32, f32)>,
+}
+
+/// A record id written in hex, with or without `0x`.
+fn hex(s: &str) -> Result<u32, String> {
+    u32::from_str_radix(s.trim_start_matches("0x"), 16).map_err(|e| format!("{s}: {e}"))
+}
+
+/// `--appearance`'s `TABLE=VALUE`: an appearance table's id (hex) and the value its keys take.
+fn appearance_value(s: &str) -> Result<(u32, f32), String> {
+    let (table, value) = s.split_once('=').ok_or(format!("{s}: TABLE=VALUE"))?;
+    Ok((
+        hex(table)?,
+        value.parse::<f32>().map_err(|e| format!("{s}: {e}"))?,
+    ))
 }
 
 fn parse() -> Result<Args, String> {
@@ -106,6 +128,7 @@ fn parse() -> Result<Args, String> {
         walk: None,
         frames: 8,
         turn_at: None,
+        orbit: 0.0,
         jump_at: None,
         uptime: 0.0,
         fx: Vec::new(),
@@ -116,6 +139,8 @@ fn parse() -> Result<Args, String> {
         volumes: true,
         disc: false,
         pools: true,
+        figure: None,
+        appearance: Vec::new(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -185,6 +210,7 @@ fn parse() -> Result<Args, String> {
                 let s = v()?;
                 a.turn_at = Some(s.parse::<f64>().map_err(|e| format!("{s}: {e}"))?);
             }
+            "--orbit" => a.orbit = num(v()?)?,
             "--jump-at" => {
                 let s = v()?;
                 a.jump_at = Some(s.parse::<f64>().map_err(|e| format!("{s}: {e}"))?);
@@ -196,6 +222,8 @@ fn parse() -> Result<Args, String> {
                 let s = v()?;
                 a.uptime = s.parse::<f64>().map_err(|e| format!("{s}: {e}"))?;
             }
+            "--figure" => a.figure = Some(hex(&v()?)?),
+            "--appearance" => a.appearance.push(appearance_value(&v()?)?),
             "--no-shadows" => a.shadows = false,
             "--no-clouds" => a.clouds = false,
             "--no-reflections" => a.reflections = false,
@@ -395,5 +423,21 @@ fn main() -> ExitCode {
             eprintln!("auberean-viewer: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Behaviour: none (a developer tool's command line)
+    use super::*;
+
+    #[test]
+    fn a_figure_and_an_appearance_value_read_from_hex_with_or_without_0x() {
+        assert_eq!(hex("0x1F000CE9"), Ok(0x1F00_0CE9));
+        assert_eq!(hex("1f000ce9"), Ok(0x1F00_0CE9));
+        assert!(hex("golem").is_err());
+        assert_eq!(appearance_value("0x20000439=0.5"), Ok((0x2000_0439, 0.5)));
+        assert!(appearance_value("0x20000439").is_err());
+        assert!(appearance_value("0x20000439=basalt").is_err());
     }
 }

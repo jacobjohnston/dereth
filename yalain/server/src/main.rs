@@ -59,6 +59,14 @@
 //!                         262144 (default 65536, the retail servers' rate)
 //!   --motd TEXT           a message shown to each player as its character enters the world
 //!                         (`\n` starts a new line)
+//!   --portal-storm-threshold N  the players a landblock holds for a portal storm to brew there
+//!                         (default 40); 0 for no storms
+//!   --portal-storm-fewest-sent N  the fewest players a storm sends away (default 5; more when
+//!                         the landblock holds more past the threshold)
+//!   --experience-rate X   multiply the experience players earn, 0 to 100 (default 1)
+//!   --loot-rate X         multiply the treasure creatures and chests draw, 0 to 100 (default 1)
+//!   --respawn-rate X      how many times faster camps replace their creatures and items, above
+//!                         0 to 100 (default 1)
 //!   --add-character A:N:R:S  make character N on account A of race R and sex S (4096 or 8192),
 //!                         with a middling physique, then carry on; a missing account is made on
 //!                         an open world only
@@ -110,6 +118,10 @@
 //!                         number
 //!   --seconds S           stop after S seconds (default: run until stopped)
 //!   --verbose             log at the debug level (every connection event, and more)
+//!   --admin-channel       take console commands from a program on this computer: listen on
+//!                         loopback and write where, with a new secret, to admin-channel.json in
+//!                         the server's folder, as Empyrean's admin channel (the `admin_channel`
+//!                         module; default: off)
 //!   --stop-at-console-end stop, keeping everyone in the world, when the console's input ends:
 //!                         for a program that runs the server and holds its console (by
 //!                         default the end of the input ends only the console)
@@ -186,6 +198,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod admin_channel;
 mod characters;
 mod config;
 mod console;
@@ -254,6 +267,10 @@ struct Options {
     unlimited_addresses: Vec<IpAddr>,
     /// The message of the day (`--motd`).
     motd: String,
+    /// The portal storms' numbers (`--portal-storm-threshold`, `--portal-storm-fewest-sent`).
+    storms: yalain_world::storms::Settings,
+    /// The game rates (`--experience-rate`, `--loot-rate`, `--respawn-rate`).
+    rates: yalain_world::rates::Rates,
     /// Where the status endpoint listens (`--status`; none: off).
     status: Option<std::net::SocketAddr>,
     /// Answer the status ping on the login port (not `--no-status-ping`), within these limits
@@ -286,6 +303,10 @@ struct Options {
     verbose: bool,
     /// Stop, keeping everyone, when the console's input ends (`--stop-at-console-end`).
     stop_at_console_end: bool,
+    /// Take console commands from a program on this computer (`--admin-channel`).
+    admin_channel: bool,
+    /// The server's folder: the configuration file's, else the working folder (empty).
+    folder: PathBuf,
     /// The WebSocket endpoint (`--websocket` and the options after it).
     websocket: WebSocketSettings,
     /// The updater's settings (`--update`, `--update-check-hours`, `--update-warning-seconds`,
@@ -331,7 +352,13 @@ fn read_options(mut args: Vec<String>) -> Result<(Options, Vec<String>, Option<P
         all = from_file;
     }
     all.extend(args);
-    Ok((parse_from(all)?, notes, found))
+    let mut o = parse_from(all)?;
+    o.folder = found
+        .as_deref()
+        .and_then(Path::parent)
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or(cwd, Path::to_path_buf);
+    Ok((o, notes, found))
 }
 
 /// Logging from here on, at the debug level when `verbose`.
@@ -343,6 +370,7 @@ fn start_logging(verbose: bool) {
             tracing::Level::INFO
         })
         .with_ansi(false)
+        .with_writer(admin_channel::Console)
         .init();
     // A panic's place and its calls go where the operator reads, whichever thread it is on.
     std::panic::set_hook(Box::new(|info| {
@@ -389,6 +417,8 @@ fn parse_from(args: impl IntoIterator<Item = String>) -> Result<Options, String>
         max_sessions_per_address: None,
         unlimited_addresses: Vec::new(),
         motd: String::new(),
+        storms: yalain_world::storms::Settings::default(),
+        rates: yalain_world::rates::Rates::default(),
         status: None,
         status_ping: true,
         status_ping_limits: yalain_net::status_ping::Limits::default(),
@@ -411,6 +441,8 @@ fn parse_from(args: impl IntoIterator<Item = String>) -> Result<Options, String>
         seconds: None,
         verbose: false,
         stop_at_console_end: false,
+        admin_channel: false,
+        folder: PathBuf::new(),
         websocket: WebSocketSettings::default(),
         update: update::Settings::default(),
         update_trial: None,
@@ -524,6 +556,26 @@ fn parse_from(args: impl IntoIterator<Item = String>) -> Result<Options, String>
                     .map_err(|e| format!("--unlimited-sessions-from: {e}"))?,
             ),
             "--motd" => o.motd = value()?.replace("\\n", "\n"),
+            "--portal-storm-threshold" => {
+                o.storms.threshold = value()?
+                    .parse()
+                    .map_err(|e| format!("--portal-storm-threshold: {e}"))?;
+            }
+            "--portal-storm-fewest-sent" => {
+                o.storms.least = value()?
+                    .parse()
+                    .map_err(|e| format!("--portal-storm-fewest-sent: {e}"))?;
+            }
+            "--experience-rate" | "--loot-rate" | "--respawn-rate" => {
+                let name = a.trim_start_matches("--").trim_end_matches("-rate");
+                let rate =
+                    yalain_world::rates::read(name, &value()?).map_err(|e| format!("{a}: {e}"))?;
+                match name {
+                    "experience" => o.rates.experience = rate,
+                    "loot" => o.rates.loot = rate,
+                    _ => o.rates.respawn = rate,
+                }
+            }
             "--status" => {
                 o.status = Some(value()?.parse().map_err(|e| format!("--status: {e}"))?);
             }
@@ -615,6 +667,7 @@ fn parse_from(args: impl IntoIterator<Item = String>) -> Result<Options, String>
             }
             "--verbose" => o.verbose = true,
             "--stop-at-console-end" => o.stop_at_console_end = true,
+            "--admin-channel" => o.admin_channel = true,
             "--websocket" => o.websocket.enabled = true,
             "--websocket-listen" => o.websocket.listen = value()?,
             "--websocket-tls-certificate" => o.websocket.tls_certificate = value()?,
@@ -801,6 +854,7 @@ struct Play {
     files: yalain_world::download::InstallFiles,
     levels: yalain_world::levels::LevelTable,
     calendar: Option<auberean_world::calendar::GameClock>,
+    day_parts: Vec<(f32, bool)>,
     skills: yalain_world::skills::SkillTable,
     effects: yalain_world::effect_defs::EffectTable,
     item_effects: std::collections::HashMap<u32, Vec<yalain_world::profile::ItemEffect>>,
@@ -810,6 +864,7 @@ struct Play {
     plants: yalain_world::plants::DyePlants,
     item_uses: yalain_world::item_use::ItemUses,
     worn_effects: yalain_world::item_use::ItemUses,
+    hit_effects: yalain_world::item_use::ItemUses,
     quest_ids: std::collections::HashMap<String, u32>,
     craft: yalain_world::craft::Crafting,
     vitae_costs: Vec<u64>,
@@ -822,6 +877,7 @@ struct Play {
     places_by_name: std::collections::BTreeMap<String, yalain_content::Place>,
     brokers: std::collections::BTreeMap<u32, yalain_world::market::Broker>,
     walk_in: std::collections::HashSet<u32>,
+    item_classes: yalain_world::gives::ItemClasses,
     persons: std::collections::HashSet<u32>,
     lifestones: std::collections::HashSet<u32>,
     knives: std::collections::HashSet<u32>,
@@ -837,6 +893,8 @@ struct Play {
     doors: std::collections::HashMap<u32, yalain_world::usable::doors::Kind>,
     doors_through_locks: std::collections::HashSet<u32>,
     chests: std::collections::HashSet<u32>,
+    chests_gone_once_closed: std::collections::HashSet<u32>,
+    portal_doors: std::collections::HashSet<u32>,
     treasure: yalain_world::treasure::Kinds,
     treasure_tables: yalain_world::treasure::TreasureTables,
     tesserae: std::collections::HashSet<u32>,
@@ -924,6 +982,8 @@ fn run<S: Store>(
         max_sessions_per_address: o.max_sessions_per_address,
         unlimited_addresses: o.unlimited_addresses.clone(),
         motd: o.motd.clone(),
+        storms: o.storms,
+        rates: o.rates,
         ..ServerConfig::default()
     };
     let advertise = if o.referral {
@@ -1015,6 +1075,7 @@ fn run<S: Store>(
     server.data = Some(Box::new(files));
     server.levels = play.levels;
     server.calendar = play.calendar;
+    server.day_parts = play.day_parts;
     server.skill_table = play.skills;
     server.effect_table = play.effects;
     server.item_effects = play.item_effects;
@@ -1025,8 +1086,23 @@ fn run<S: Store>(
     server.plants.kinds = play.plants;
     server.item_uses = play.item_uses;
     server.worn_effects = play.worn_effects;
+    server.hit_effects = play.hit_effects;
     server.quest_ids = play.quest_ids;
     server.crafting = play.craft;
+    if yalain_world::world_patch::patches_retail(&server) {
+        // The tag ends the line, for a program reading the log (section 6.3 of the setup guide).
+        let overlay = server
+            .world_patch
+            .as_ref()
+            .is_some_and(|p| p.changes_records());
+        tracing::info!(
+            "this world patches retail clients' data files as they log in (its overlay: {}; \
+             recipes of its own: {}): a retail player plays it from a copy of the client's files \
+             kept for it [patches-retail]",
+            if overlay { "yes" } else { "no" },
+            server.crafting.records.len()
+        );
+    }
     server.vitae_costs = play.vitae_costs;
     server.stores = play.stores;
     server.quests = play.quests;
@@ -1038,6 +1114,7 @@ fn run<S: Store>(
     server.places_by_name = play.places_by_name;
     server.brokers = play.brokers;
     server.walk_in_packages = play.walk_in;
+    server.item_classes = play.item_classes;
     server.person_packages = play.persons;
     server.lifestone_packages = play.lifestones;
     server.knife_packages = play.knives;
@@ -1053,6 +1130,8 @@ fn run<S: Store>(
     server.doors.packages = play.doors;
     server.doors.creatures_through_locks = play.doors_through_locks;
     server.chests.packages = play.chests;
+    server.chests.gone_once_closed = play.chests_gone_once_closed;
+    server.portal_door_packages = play.portal_doors;
     server.treasure = play.treasure;
     server.treasure_tables = play.treasure_tables;
     server.tesserae = play.tesserae;
@@ -1098,10 +1177,24 @@ fn run<S: Store>(
     );
     let mut ping = status_ping(o);
     let mut reporter = o.hub.clone().map(hub::Reporter::start);
+    let mut told = Told {
+        world: world::served(
+            &o.world_db,
+            o.world_base.as_deref(),
+            o.dat_overlay.as_deref(),
+        ),
+        not_handled: (0, std::sync::Arc::default()),
+    };
     let status = o
         .status
         .map(|at| {
-            let first = snapshot(&server, &net, started, websocket_url.as_ref());
+            let first = snapshot(
+                &server,
+                &net,
+                started.elapsed(),
+                websocket_url.as_ref(),
+                &mut told,
+            );
             let pages = if wire.websocket.is_some() {
                 o.websocket.allowed_origins.clone()
             } else {
@@ -1137,6 +1230,32 @@ fn run<S: Store>(
         o.friends.then(|| friends::listen_at(o.bind, o.login_port)),
     )?;
     let typed = console::lines();
+    // The admin channel's lines, read as the console's are; never in the updater's health check,
+    // which must leave the running server's file alone.
+    let (channel_lines, from_channel) = std::sync::mpsc::channel();
+    let channel = if o.admin_channel && o.update_trial.is_none() {
+        let hello = serde_json::json!({
+            "hello": "yalain",
+            "version": env!("CARGO_PKG_VERSION"),
+            "world": o.world_name,
+        });
+        match admin_channel::start(&o.folder, channel_lines, hello) {
+            Ok(c) => {
+                tracing::info!(
+                    "admin channel: on loopback at {}, written to {}",
+                    c.local_addr(),
+                    c.file().display()
+                );
+                Some(c)
+            }
+            Err(e) => {
+                tracing::warn!("admin channel not started: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let mut reloading: Option<console::Job<(PathBuf, WorldTables)>> = None;
     // The console's commands that act on the world, run at the loop's next clock.
     let mut pending: Vec<console::Command> = Vec::new();
@@ -1176,7 +1295,10 @@ fn run<S: Store>(
             loop {
                 let line = match typed.try_recv() {
                     Ok(line) => line,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => match from_channel.try_recv() {
+                        Ok(line) => line,
+                        Err(_) => break,
+                    },
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         if console_open {
                             console_open = false;
@@ -1190,7 +1312,10 @@ fn run<S: Store>(
                             );
                             }
                         }
-                        break;
+                        match from_channel.try_recv() {
+                            Ok(line) => line,
+                            Err(_) => break,
+                        }
                     }
                 };
                 let Some(c) = console::parse(&line) else {
@@ -1308,6 +1433,11 @@ fn run<S: Store>(
                             unix: unix_now(),
                         };
                         let r = server.reload(&mut net, clock, tables);
+                        told.world = world::served(
+                            &o.world_db,
+                            o.world_base.as_deref(),
+                            o.dat_overlay.as_deref(),
+                        );
                         console::answer(
                             "reload",
                             &Ok(format!("world database {}: {}", dir.display(), r.summary())),
@@ -1375,7 +1505,13 @@ fn run<S: Store>(
                 );
             }
             if let Some(s) = &status {
-                s.set(snapshot(&server, &net, started, websocket_url.as_ref()));
+                s.set(snapshot(
+                    &server,
+                    &net,
+                    started.elapsed(),
+                    websocket_url.as_ref(),
+                    &mut told,
+                ));
             }
             ping.facts.state = if server.shutdown == yalain_world::shutdown::Shutdown::No {
                 yalain_net::status_ping::WorldState::Open
@@ -1470,6 +1606,10 @@ fn run<S: Store>(
     // The status address is free for whichever server runs next.
     if let Some(s) = status {
         s.stop();
+    }
+    // A server started in this one's place writes its own.
+    if let Some(c) = channel {
+        c.shutdown();
     }
     for (what, n) in server.unhandled.counts() {
         tracing::info!("not handled yet: {what} x{n}");
@@ -1587,17 +1727,33 @@ fn status_ping(o: &Options) -> yalain_net::status_ping::StatusPing {
     )
 }
 
+/// What the status endpoint is told beside the world's own state: the world database served, and
+/// the requests not handled as last copied, copied again only when another has been met.
+struct Told {
+    world: world::Served,
+    not_handled: (u64, std::sync::Arc<std::collections::BTreeMap<String, u64>>),
+}
+
 /// What the status endpoint says of the world now.
 fn snapshot<S: Store>(
     server: &Server<S>,
     net: &ServerNet,
-    started: Instant,
+    uptime: std::time::Duration,
     websocket_url: Option<&String>,
+    told: &mut Told,
 ) -> status::Snapshot {
+    if told.not_handled.0 != server.unhandled.requests() {
+        told.not_handled = (
+            server.unhandled.requests(),
+            std::sync::Arc::new(server.unhandled.counts().clone()),
+        );
+    }
     status::Snapshot {
+        world: told.world.clone(),
+        not_handled: told.not_handled.clone(),
         websocket_url: websocket_url.cloned(),
         world_name: server.cfg.world_name.clone(),
-        uptime_seconds: started.elapsed().as_secs(),
+        uptime_seconds: uptime.as_secs(),
         shutting_down: server.shutdown != yalain_world::shutdown::Shutdown::No,
         players: server.players.len(),
         logins: server.sessions.len(),
@@ -1605,6 +1761,8 @@ fn snapshot<S: Store>(
         connections: net.connection_count(),
         saves_failing: server.saves.failing(),
         world_step: server.step_timer.figures().clone(),
+        rates: server.cfg.rates.changed(),
+        patches_retail: yalain_world::world_patch::patches_retail(server),
     }
 }
 
@@ -1709,6 +1867,20 @@ fn compile_world(
     })
 }
 
+/// Templates described apart joined to the catalog, with their icons and icon tables (what it
+/// holds already kept).
+fn absorb(catalog: &mut Catalog, more: Catalog) {
+    for (id, t) in more.templates {
+        catalog.templates.entry(id).or_insert(t);
+    }
+    for (id, icon) in more.icons {
+        catalog.icons.entry(id).or_insert(icon);
+    }
+    for (id, tables) in more.icon_tables {
+        catalog.icon_tables.entry(id).or_insert(tables);
+    }
+}
+
 /// The world's objects and what it plays, from its database compiled and the install.
 fn load_play(portal: &data::Portal, compiled: Tables) -> Result<(ContentPack, Play), String> {
     let Tables {
@@ -1716,7 +1888,7 @@ fn load_play(portal: &data::Portal, compiled: Tables) -> Result<(ContentPack, Pl
         spawns,
         loot,
         stores,
-        mut quests,
+        quests,
         talk,
         crafting,
         story,
@@ -1731,7 +1903,7 @@ fn load_play(portal: &data::Portal, compiled: Tables) -> Result<(ContentPack, Pl
         effect_names,
         kingdoms: kingdom_rows,
         popups,
-        mut effect_rules,
+        effect_rules,
         treasure,
         gathering,
         items,
@@ -1741,23 +1913,35 @@ fn load_play(portal: &data::Portal, compiled: Tables) -> Result<(ContentPack, Pl
         worn,
         ..
     } = compiled;
-    // Fields of kinds a world has that it may leave out everywhere: the server's own then.
-    let cancel_waits_2017 = yalain_world::quests::cancel_waits_or_2017(&mut quests);
-    let transformations_2017 = yalain_world::gives::transformations_or_2017(&mut quests);
-    let vitae_taps_2017 = yalain_world::effect_defs::vitae_taps_or_2017(&mut effect_rules);
-    // Whether the world wards anything is told before the server's own immunities add theirs.
+    // The rows of each kind are the world's alone: of a kind it has none of, it has nothing. Such
+    // kinds are named at start, and the fields of kinds it has that none of its rows names.
+    let item_rows = items;
+    let creature_rows = creatures;
+    let mut missing: Vec<&str> = [
+        yalain_world::item_use::kinds_missing(&item_rows),
+        yalain_world::creature_rows::kinds_missing(&creature_rows),
+        yalain_world::plants::kinds_missing(&plants),
+    ]
+    .concat();
+    if worn.is_empty() {
+        missing.push("worn");
+    }
+    let fields_missing: Vec<&str> = [
+        (
+            "[[step]] transforms",
+            !quests.steps.iter().any(|s| s.transforms.is_some()),
+        ),
+        (
+            "[[effect_rule]] vitae_share",
+            effect_rules.vitae_taps.is_empty(),
+        ),
+        ("[[effect_rule]] then", effect_rules.immunities.is_empty()),
+    ]
+    .into_iter()
+    .filter_map(|(field, none)| none.then_some(field))
+    .chain(yalain_world::creature_rows::fields_missing(&creature_rows))
+    .collect();
     let no_wards = effect_rules.wards.is_empty();
-    let immunities_2017 = yalain_world::effect_defs::immunities_or_2017(&mut effect_rules);
-    // What items' uses do, books show and new characters are given: the world's rows, the
-    // server's own of a kind it has none of.
-    let (item_rows, items_fell_back) = yalain_world::item_use::world_item_rows(items);
-    // What creatures do: the world's rows, the server's own of a kind it has none of.
-    let (creature_rows, creatures_fell_back) =
-        yalain_world::creature_rows::world_creature_rows(creatures);
-    // The dye plants: the world's rows, the server's own of a kind it has none of.
-    let (plants, plants_fell_back) = yalain_world::plants::world_plants(&plants);
-    // The worn looks of templates whose data names none: the world's rows, else the server's own.
-    let (worn, worn_fell_back) = yalain_content::worn_table::world_worn(&worn);
     // The numbers treasure draws by: the world's rows, 2017's for each kind it gives none of.
     let (treasure_tables, mut fell_back) =
         yalain_content::treasure_tables::TreasureTables::with_rows(&treasure);
@@ -1777,56 +1961,10 @@ fn load_play(portal: &data::Portal, compiled: Tables) -> Result<(ContentPack, Pl
                 kinds.join(", ")
             );
         }
-        if cancel_waits_2017 {
+        if !fields_missing.is_empty() {
             tracing::warn!(
-                "this world's [[quest]] rows name no cancel_wait: the eleven quests the server knows wait five hours after a cancel"
-            );
-        }
-        if transformations_2017 {
-            tracing::warn!(
-                "this world's [[step]] rows name no transforms: a give's step putting on the hero's transformation transforms its player as the server's own does"
-            );
-        }
-        if vitae_taps_2017 {
-            tracing::warn!(
-                "this world's [[effect_rule]] rows name no vitae_share: Aun Aulatah's tap takes the server's own tenth of vitae"
-            );
-        }
-        if immunities_2017 {
-            tracing::warn!(
-                "this world's [[effect_rule]] rows name no then: its crowd control immunities are the server's own twelve"
-            );
-        }
-        if !items_fell_back.is_empty() {
-            let kinds: Vec<String> = items_fell_back.iter().map(|k| format!("[[{k}]]")).collect();
-            tracing::warn!(
-                "this world has no {} rows: its items go by the server's own there",
-                kinds.join(", ")
-            );
-        }
-        if !creatures_fell_back.is_empty() {
-            let kinds: Vec<String> = creatures_fell_back
-                .iter()
-                .map(|k| format!("[[{k}]]"))
-                .collect();
-            tracing::warn!(
-                "this world has no {} rows: its creatures go by the server's own there",
-                kinds.join(", ")
-            );
-        }
-        if !plants_fell_back.is_empty() {
-            let kinds: Vec<String> = plants_fell_back
-                .iter()
-                .map(|k| format!("[[{k}]]"))
-                .collect();
-            tracing::warn!(
-                "this world has no {} rows: its dye plants go by the server's own there",
-                kinds.join(", ")
-            );
-        }
-        if worn_fell_back {
-            tracing::warn!(
-                "this world has no [[worn]] rows: the worn looks of templates whose data names none go by the server's own"
+                "this world's rows name no {}: it has none of what they give",
+                fields_missing.join(", ")
             );
         }
         let skills = data::skill_table(portal)?;
@@ -1851,14 +1989,11 @@ fn load_play(portal: &data::Portal, compiled: Tables) -> Result<(ContentPack, Pl
             .chain(quests.effect_states())
             .collect();
         let effects = data::effect_table(portal, &states, &effect_rules)?;
+        // The recipes effects grant, and those quests' steps teach by name.
         let granted: Vec<u32> = effects
-            .effects
-            .values()
-            .filter_map(|d| match d.kind {
-                yalain_world::effect_defs::Kind::GrantRecipe(r)
-                | yalain_world::effect_defs::Kind::RemoveRecipe(r) => Some(r),
-                _ => None,
-            })
+            .recipes()
+            .into_iter()
+            .chain(quests.recipes_taught())
             .collect();
         let mut craft = data::crafting(portal, &crafting, &granted)?;
         if crafting.tool_yields.is_empty() {
@@ -1867,30 +2002,20 @@ fn load_play(portal: &data::Portal, compiled: Tables) -> Result<(ContentPack, Pl
             );
         }
         craft.tool_yields = crafting.tool_yields.clone().into_iter().collect();
-        // Mining and maps: the world's rows, the server's own of a kind it has none of.
-        let fell_back = yalain_world::mining::take_world_gathering(&mut craft, &gathering);
-        if !fell_back.is_empty() {
-            let kinds: Vec<String> = fell_back.iter().map(|k| format!("[[{k}]]")).collect();
-            tracing::warn!(
-                "this world has no {} rows: its mining and maps go by the server's own there",
-                kinds.join(", ")
-            );
+        // Mining and maps, map recipes, totems and refining: the world's rows.
+        missing.extend(yalain_world::mining::take_world_gathering(
+            &mut craft, &gathering,
+        ));
+        missing.extend(craft.take_world_crafts(&crafts));
+        // The recipes the world defines, made from the install's.
+        for (id, why) in data::world_recipes(portal, &mut craft)? {
+            tracing::warn!("the world's [[recipe]] {id:08X} is not made: {why}");
         }
-        // Map recipes, totems and refining: the world's rows, the server's own of a kind it has
-        // none of.
-        let fell_back = craft.take_world_crafts(&crafts);
-        if !fell_back.is_empty() {
-            let kinds: Vec<String> = fell_back.iter().map(|k| format!("[[{k}]]")).collect();
+        if !missing.is_empty() {
+            let kinds: Vec<String> = missing.iter().map(|k| format!("[[{k}]]")).collect();
             tracing::warn!(
-                "this world has no {} rows: its crafting goes by the server's own there",
+                "this world has no {} rows: it has none of what they give",
                 kinds.join(", ")
-            );
-        }
-        let unread = craft.refining_unread();
-        if !unread.is_empty() {
-            tracing::info!(
-                "[[refining]] rows no recipe a player can learn here is of: {}",
-                unread.join(", ")
             );
         }
         craft.butchery = crafting
@@ -1913,18 +2038,7 @@ fn load_play(portal: &data::Portal, compiled: Tables) -> Result<(ContentPack, Pl
                 (b.profile, yields)
             })
             .collect();
-        let actions: Vec<yalain_world::craft::Action> = craft
-            .recipes
-            .values()
-            .flat_map(|r| r.checks.iter())
-            .flat_map(|c| c.outcomes.iter())
-            .flat_map(|o| o.actions.iter().cloned())
-            .collect();
-        states.extend(actions.iter().filter_map(|a| match a {
-            yalain_world::craft::Action::Effect { state, .. }
-            | yalain_world::craft::Action::ItemEffect { state, .. } => Some(*state),
-            _ => None,
-        }));
+        states.extend(craft.outcome_effects());
         let effects = data::effect_table(portal, &states, &effect_rules)?;
         tracing::info!(
             effects = effects.effects.len(),
@@ -1960,12 +2074,53 @@ fn load_play(portal: &data::Portal, compiled: Tables) -> Result<(ContentPack, Pl
                         pets: &pet_kinds,
                         items: &item_rows,
                         plants: &plants,
+                        effect_rules: &effect_rules,
                     },
                 ))
                 .chain(craft.templates())
                 .collect();
         let (mut catalog, mut skipped) =
             data::catalog(portal, &spawns, &loot, &more, &treasure_tables, &worn)?;
+        // The recipes items' uses teach (the install's and the world's rows'), and those recipes'
+        // outcomes teach in turn: each read with what it makes and asks for, whose own uses may
+        // teach more.
+        loop {
+            let (uses, _, _, _) = data::item_uses(portal, &catalog, &effect_names)?;
+            let teaching: Vec<u32> = uses
+                .values()
+                .flatten()
+                .map(|e| e.state)
+                .chain(item_rows.states())
+                .chain(craft.outcome_effects())
+                .collect();
+            if data::read_recipes_taught(portal, &mut craft, &teaching, &effect_rules)? == 0 {
+                break;
+            }
+            let wanted: Vec<u32> = craft
+                .templates()
+                .into_iter()
+                .filter(|t| !catalog.templates.contains_key(t))
+                .collect();
+            let (made, also) = data::catalog(
+                portal,
+                &SpawnTable::default(),
+                &LootTable::default(),
+                &wanted,
+                &treasure_tables,
+                &worn,
+            )?;
+            skipped.extend(also);
+            absorb(&mut catalog, made);
+        }
+        // What those recipes' outcomes put on, read with the rest.
+        states.extend(craft.outcome_effects());
+        let unread = craft.refining_unread();
+        if !unread.is_empty() {
+            tracing::info!(
+                "[[refining]] rows no recipe a player can learn here is of: {}",
+                unread.join(", ")
+            );
+        }
         // The weapons the creatures wield, described with the rest.
         let weapons = data::creature_weapons(portal, &catalog, &listed_weapons)?;
         let wanted: Vec<u32> = weapons.values().copied().collect();
@@ -1978,15 +2133,7 @@ fn load_play(portal: &data::Portal, compiled: Tables) -> Result<(ContentPack, Pl
             &worn,
         )?;
         skipped.extend(also);
-        for (id, t) in held.templates {
-            catalog.templates.entry(id).or_insert(t);
-        }
-        for (id, icon) in held.icons {
-            catalog.icons.entry(id).or_insert(icon);
-        }
-        for (id, tables) in held.icon_tables {
-            catalog.icon_tables.entry(id).or_insert(tables);
-        }
+        absorb(&mut catalog, held);
         tracing::info!(weapons = weapons.len(), "the creatures' weapons read");
         catalog.bodies = data::bodies(portal, &catalog);
         catalog.implements = data::implements(portal, &catalog)?;
@@ -2015,21 +2162,29 @@ fn load_play(portal: &data::Portal, compiled: Tables) -> Result<(ContentPack, Pl
         let levels = data::level_table(portal)?;
         tracing::info!(levels = levels.levels.len(), "the level table read");
         let calendar = data::calendar(portal);
-        tracing::info!(read = calendar.is_some(), "the calendar");
+        let day_parts = data::day_parts(portal);
+        tracing::info!(
+            read = calendar.is_some(),
+            parts = day_parts.len(),
+            "the calendar"
+        );
         let vitae_costs = data::vitae_costs(portal)?;
         let item_effects = data::item_effects(portal, &catalog)?;
         // The effects the items' uses put on, read with the rest.
-        let (item_uses, worn_effects, death_effects) =
+        let (item_uses, worn_effects, death_effects, hit_effects) =
             data::item_uses(portal, &catalog, &effect_names)?;
         states.extend(item_uses.values().flatten().map(|e| e.state));
         // And those the world's rows give items' uses.
         states.extend(item_rows.states());
         states.extend(worn_effects.values().flatten().map(|e| e.state));
         states.extend(death_effects.values().flatten().map(|e| e.state));
+        states.extend(hit_effects.values().flatten().map(|e| e.state));
         // The treasure potions' effects, put on when they are drunk.
         states.extend(treasure_tables.potion_states());
-        // What the practice dummies hold.
-        states.push(yalain_world::spawn::PRACTICE_DUMMY_EFFECT);
+        // What the world's rows give creatures from their first moment, and quest steps the items
+        // given them.
+        states.extend(creature_rows.effects.iter().map(|e| e.effect));
+        states.extend(content.given_effects.values().flatten());
         // What the world's scheduled events put on its players.
         states.extend(
             content
@@ -2048,7 +2203,14 @@ fn load_play(portal: &data::Portal, compiled: Tables) -> Result<(ContentPack, Pl
         // What treasure weapons, armor and shields carry and put on what they hit.
         states.extend(treasure_tables.states());
         mounts.note_items(&item_uses);
-        let effects = data::effect_table(portal, &states, &effect_rules)?;
+        let mut effects = data::effect_table(portal, &states, &effect_rules)?;
+        // The chains of other effects that items' uses, quests, recipes' outcomes and weapons' hits
+        // put on do what they hold; the finishing chains of skills' combinations stay as they were.
+        effects.keep_chains_of(
+            yalain_world::effect_defs::chain_roots(&item_uses, &item_rows, &quests, &craft)
+                .into_iter()
+                .chain(hit_effects.values().flatten().map(|e| e.state)),
+        );
         tracing::info!(
             templates = item_uses.len(),
             effects = effects.effects.len(),
@@ -2058,7 +2220,12 @@ fn load_play(portal: &data::Portal, compiled: Tables) -> Result<(ContentPack, Pl
             templates = worn_effects.len(),
             "the effects items put on their wearers read"
         );
+        tracing::info!(
+            templates = hit_effects.len(),
+            "the effects weapons put on what they hit read"
+        );
         let walk_in = data::walk_in_packages(portal, &content)?;
+        let item_classes = data::item_classes(portal)?;
         let persons =
             data::packages_deriving_from(portal, &content, &yalain_world::places::PERSONS)?;
         let lifestones =
@@ -2084,11 +2251,26 @@ fn load_play(portal: &data::Portal, compiled: Tables) -> Result<(ContentPack, Pl
         let cannot_use =
             data::packages_deriving_from(portal, &content, &yalain_world::places::CANNOT_BE_USED)?;
         let (doors, doors_through_locks) = data::door_packages(portal, &content)?;
-        let chests = data::chest_packages(portal, &content)?;
+        // A chest need not be placed: what an effect or a use makes may be one.
+        let mut chests = data::chest_packages(portal, &content)?;
+        chests.extend(data::catalog_packages_from(
+            portal,
+            &catalog,
+            &[yalain_world::usable::chests::PACKAGE],
+        )?);
+        let once = [yalain_world::usable::chests::GOES_ONCE_CLOSED];
+        let mut chests_gone_once_closed = data::packages_deriving_from(portal, &content, &once)?;
+        chests_gone_once_closed.extend(data::catalog_packages_from(portal, &catalog, &once)?);
+        let portal_doors = data::packages_deriving_from(
+            portal,
+            &content,
+            &[yalain_world::usable::vaults::PORTAL_DOOR],
+        )?;
         tracing::info!(
             doors = doors.len(),
             chests = chests.len(),
-            "the doors' and chests' kinds read"
+            portal_doors = portal_doors.len(),
+            "the doors', chests' and portal doors' kinds read"
         );
         let treasure = data::treasure(portal, &catalog, &treasure_tables)?;
         let tesserae =
@@ -2137,6 +2319,7 @@ fn load_play(portal: &data::Portal, compiled: Tables) -> Result<(ContentPack, Pl
             walls,
             levels,
             calendar,
+            day_parts,
             skills,
             effects,
             item_effects,
@@ -2146,6 +2329,7 @@ fn load_play(portal: &data::Portal, compiled: Tables) -> Result<(ContentPack, Pl
             plants,
             item_uses,
             worn_effects,
+            hit_effects,
             quest_ids: data::quest_ids(portal)?,
             craft,
             vitae_costs,
@@ -2158,6 +2342,7 @@ fn load_play(portal: &data::Portal, compiled: Tables) -> Result<(ContentPack, Pl
             places_by_name,
             brokers,
             walk_in,
+            item_classes,
             persons,
             lifestones,
             knives,
@@ -2173,6 +2358,8 @@ fn load_play(portal: &data::Portal, compiled: Tables) -> Result<(ContentPack, Pl
             doors,
             doors_through_locks,
             chests,
+            chests_gone_once_closed,
+            portal_doors,
             treasure,
             treasure_tables,
             tesserae,
@@ -2241,6 +2428,8 @@ fn reload_world(
             doors: p.doors,
             doors_through_locks: p.doors_through_locks,
             chests: p.chests,
+            chests_gone_once_closed: p.chests_gone_once_closed,
+            portal_doors: p.portal_doors,
         }),
         ground: Some(Box::new(p.ground)),
         patch: yalain_world::world_patch::WorldPatch::of(&p.files),
@@ -2286,7 +2475,7 @@ fn main() -> std::process::ExitCode {
         }
         Err(e) => {
             eprintln!("yalain: {e}");
-            eprintln!("usage: yalain --dats <install folder> [--bind IP] [--login-port P] [--world-port P] [--advertise IP] [--data FILE | --memory] [--world-name NAME] [--listed-accounts] [--banned-names FILE] [--add-account NAME:TICKET] [--secret-cost N] [--save-interval S] [--shutdown-interval S] [--watchdog S] [--max-sessions N] [--max-sessions-per-address N] [--unlimited-sessions-from IP] [--download-rate N] [--motd TEXT] [--status IP:PORT] [--no-status-ping] [--status-ping-hellos N] [--status-ping-asks N] [--status-ping-replies N] [--config FILE] [--add-character ACCOUNT:NAME:RACE:SEX] [--place ACCOUNT:NAME:CELL:X:Y:Z:HEADING] [--money ACCOUNT:NAME:AMOUNT] [--make-character FILE] [--world-db DIR|pinned] [--world-base DIR] [--dat-overlay DIR] [--no-dat-overlay-patching] [--dat-overlay-records-per-minute N] [--enable-dat-patching] [--no-referral] [--no-echo] [--game-time S] [--hold-clock] [--hub URL --hub-slug SLUG --hub-key-file FILE [--federation] [--global-room ROOM]] [--no-friends] [--seconds S] [--verbose] [--stop-at-console-end] [--update off|patch|minor] [--update-check-hours H] [--update-warning-seconds S] [--update-source URL]");
+            eprintln!("usage: yalain --dats <install folder> [--bind IP] [--login-port P] [--world-port P] [--advertise IP] [--data FILE | --memory] [--world-name NAME] [--listed-accounts] [--banned-names FILE] [--add-account NAME:TICKET] [--secret-cost N] [--save-interval S] [--shutdown-interval S] [--watchdog S] [--max-sessions N] [--max-sessions-per-address N] [--unlimited-sessions-from IP] [--download-rate N] [--motd TEXT] [--portal-storm-threshold N] [--portal-storm-fewest-sent N] [--experience-rate X] [--loot-rate X] [--respawn-rate X] [--status IP:PORT] [--no-status-ping] [--status-ping-hellos N] [--status-ping-asks N] [--status-ping-replies N] [--config FILE] [--add-character ACCOUNT:NAME:RACE:SEX] [--place ACCOUNT:NAME:CELL:X:Y:Z:HEADING] [--money ACCOUNT:NAME:AMOUNT] [--make-character FILE] [--world-db DIR|pinned] [--world-base DIR] [--dat-overlay DIR] [--no-dat-overlay-patching] [--dat-overlay-records-per-minute N] [--enable-dat-patching] [--no-referral] [--no-echo] [--game-time S] [--hold-clock] [--hub URL --hub-slug SLUG --hub-key-file FILE [--federation] [--global-room ROOM]] [--no-friends] [--seconds S] [--verbose] [--stop-at-console-end] [--admin-channel] [--update off|patch|minor] [--update-check-hours H] [--update-warning-seconds S] [--update-source URL]");
             eprintln!("       yalain world check|release|fetch|compile ...");
             eprintln!(
                 "       yalain update --check|--apply [--config FILE] [--policy off|patch|minor]"
@@ -2554,5 +2743,430 @@ mod version_text_tests {
         assert!(lines[1].starts_with("commit: "), "{text}");
         assert!(lines[2].starts_with("target: "), "{text}");
         assert_eq!(lines[3], format!("source: {SOURCE_URL}"));
+    }
+}
+
+#[cfg(test)]
+mod status_snapshot_tests {
+    use yalain_testkit::Harness;
+
+    /// What the status document says of the world's patching of retail clients' data files.
+    fn says_patching(h: &Harness) -> serde_json::Value {
+        let mut told = super::Told {
+            world: crate::world::Served::default(),
+            not_handled: Default::default(),
+        };
+        let s = super::snapshot(
+            &h.server,
+            &h.net,
+            std::time::Duration::ZERO,
+            None,
+            &mut told,
+        );
+        let v: serde_json::Value = serde_json::from_str(&s.json()).expect("JSON");
+        v["dats"]["patching"].clone()
+    }
+
+    /// The status document says a world patches retail clients' data files when it defines recipes
+    /// of its own, whatever the operator chose; a world with nothing to patch says it doesn't, the
+    /// operator's patching on or off. A launcher reads it to play such a world from a copy of the
+    /// retail client's files, and makes none for a world with nothing to patch.
+    /// Behaviour: server.operator.status-says-a-world-patches-retail-clients
+    #[test]
+    fn the_status_says_a_world_with_recipes_of_its_own_patches_retail_clients() {
+        let mut h = Harness::new();
+        for enable_dat_patching in [false, true] {
+            h.server.cfg.dat_overlay.enable_dat_patching = enable_dat_patching;
+            h.server.crafting.records.clear();
+            assert_eq!(
+                says_patching(&h),
+                false,
+                "nothing to patch, patching {enable_dat_patching}"
+            );
+            h.server.crafting.records.insert(0x6F7E_0001, vec![0; 8]);
+            assert_eq!(
+                says_patching(&h),
+                true,
+                "recipes of its own, patching {enable_dat_patching}"
+            );
+        }
+    }
+}
+
+#[cfg(all(test, feature = "live"))]
+mod real_start_tests {
+    //! A world database read as a start reads it (the install's effects, recipes and templates
+    //! with it) and handed to a running world, then played through by a client's requests. The
+    //! database is `YALAIN_TEST_WORLD_DB` (a checkout), else the release this build pins in the
+    //! per-user cache.
+    use auberean_protocol::{queue, ClientMessage};
+    use yalain_net::ConnId;
+    use yalain_testkit::play::{server_call, use_of};
+    use yalain_testkit::Harness;
+    use yalain_world::quests::status;
+
+    const PUMPING_IRON: u32 = 0x4000_0330;
+    /// The quest's giver, and the one who sends the player on.
+    const GIVER: u32 = 0x4700_3010;
+    const SENDER: u32 = 0x4700_301B;
+    /// The smith the iron, the gems and the letter go to.
+    const SMITH: u32 = 0x4700_2FBC;
+    const LETTER: u32 = 0x4700_14EA;
+    const IRON: u32 = 0x4700_0AFF;
+    const ANTHRACITE: u32 = 0x4700_1758;
+    const RECEIPT: u32 = 0x4700_14FE;
+    /// The offerings' chain: a shrine teaches the garland for a blossom and takes the garland
+    /// for a scented blossom, which goes to a wasp, its eggs to a dillo, its truffle to a grutt.
+    const SHRINE: u32 = 0x4700_31D9;
+    const WASP: u32 = 0x4700_31E5;
+    const DILLO: u32 = 0x4700_31CC;
+    const GRUTT: u32 = 0x4700_31D4;
+    const BLOSSOM: u32 = 0x4700_1779;
+    const GARLAND_RECIPE: u32 = 0x6F00_0531;
+    const GARLAND: u32 = 0x4700_1765;
+    const SCENTED: u32 = 0x4700_176F;
+    const EGGS: u32 = 0x4700_1777;
+    const TRUFFLE: u32 = 0x4700_1775;
+
+    /// A world started on the database, its camps left out (no creature plays a part), and a
+    /// player in it with its scene drawn: the harness, the client, the character, its connection.
+    fn started() -> (Harness, usize, u64, ConnId) {
+        let install = auberean_dat::testing::require_target_install();
+        let world_db = std::env::var("YALAIN_TEST_WORLD_DB")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "pinned".to_owned());
+        let (_, mut t) = super::reload_world(&install, &world_db, None, None, None)
+            .unwrap_or_else(|e| panic!("the world database {world_db}: {e}"));
+        t.spawns = yalain_content::SpawnTable::default();
+        let mut h = Harness::new();
+        let clock = h.clock();
+        h.server.reload(&mut h.net, clock, t);
+        let (b, me) = h.player_in_world("one", "Rowan");
+        h.bots[b].send(
+            true,
+            queue::WEENIE,
+            &ClientMessage::SceneRenderingComplete(auberean_protocol::login::Empty),
+        );
+        h.run(5);
+        let world = *h.server.players.keys().next().expect("in the world");
+        (h, b, me, world)
+    }
+
+    /// As a start reads them, the chains of other effects quests put on are kept (an order's chain of
+    /// the Burun war), and the finishing chains skills' combinations add read as effects that do
+    /// nothing (Unravel Magic's).
+    /// Behaviour: server.effects.a-chain-puts-on-each-of-its-effects
+    #[test]
+    fn a_start_keeps_the_chains_quests_put_on_and_not_the_combinations_finishers() {
+        use yalain_world::effect_defs::Kind;
+        let (h, _, _, _) = started();
+        let t = &h.server.effect_table;
+        assert!(
+            matches!(t.get(0x6F00_0DEE).map(|d| &d.kind), Some(Kind::Instants(_))),
+            "a quest's chain"
+        );
+        assert!(
+            matches!(t.get(0x6F00_10D8).map(|d| &d.kind), Some(Kind::Other)),
+            "a combination's finisher"
+        );
+    }
+
+    /// A start reads the recipes items' uses teach into the crafting table, with what they make: the
+    /// recipe book whose use the world's rows name the effects of teaches the sixteen weapon recipes
+    /// its chain of grants holds; the outcome of each puts on the chain that teaches the imbues, so
+    /// those are read too; and a use the world's rows give an item teaches its recipe. A start of
+    /// the same world without those rows reads none of them.
+    /// Behaviour: server.craft.a-start-reads-the-recipes-items-teach
+    #[test]
+    fn a_start_reads_the_recipes_items_uses_teach_and_those_their_outcomes_teach() {
+        const BOOK: u32 = 0x4700_15AE;
+        const BLANK: u32 = 0x4700_15BC;
+        const ARC_BLADE: u32 = 0x6F00_1CAE;
+        const ARC_BLADE_MADE: u32 = 0x4700_15EF;
+        const IMBUE: u32 = 0x6F00_1CE1;
+        const BAR_GRANT: u32 = 0x6F00_1CEA;
+        const BAR: u32 = 0x6F00_1CEB;
+        let install = auberean_dat::testing::require_target_install();
+        let world_db = std::env::var("YALAIN_TEST_WORLD_DB")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "pinned".to_owned());
+        let portal = super::data::Portal::open(&install, None).expect("the install opens");
+        let (_, plain) = super::compile_world(&portal, &world_db, None)
+            .unwrap_or_else(|e| panic!("the world database {world_db}: {e}"));
+        let mut taught = plain.clone();
+        taught.items.start_items.extend([(BOOK, 1), (BLANK, 1)]);
+        taught.effect_names.extend([
+            ("Eff_BestowQuestAtlanWeapons".to_owned(), 0x6F00_3C0A),
+            ("Eff_GrantRecipe_AtlanWeapons".to_owned(), 0x6F00_1CAC),
+        ]);
+        taught.items.uses.insert(
+            BLANK,
+            yalain_content::item_rows::ItemUse {
+                template: BLANK,
+                effects: vec![(BAR_GRANT, 1.0)],
+                behavior: None,
+                wears: None,
+            },
+        );
+        let read = |t| {
+            let (_, p) = super::load_play(&portal, t).expect("the world starts");
+            p
+        };
+        let before = read(plain);
+        let after = read(taught);
+        for r in [ARC_BLADE, IMBUE, BAR] {
+            assert!(!before.craft.recipes.contains_key(&r), "{r:08X} before");
+            assert!(after.craft.recipes.contains_key(&r), "{r:08X} after");
+        }
+        let weapons = (0..16)
+            .map(|i| ARC_BLADE + 2 * i)
+            .filter(|r| after.craft.recipes.contains_key(r))
+            .count();
+        assert_eq!(weapons, 16, "the book's sixteen recipes");
+        assert!(
+            after.catalog.templates.contains_key(&ARC_BLADE_MADE),
+            "what the recipe makes is described"
+        );
+        assert!(
+            after.effects.get(0x6F00_1CDF).is_some(),
+            "the outcome's chain is read"
+        );
+    }
+
+    /// A start makes the recipes the world's rows define from the install's, reads them into the
+    /// crafting table with what they make and ask for described and their records kept for
+    /// clients, and reads the install recipes quest steps teach by name; a row whose id the
+    /// install holds is not made. The same world without those rows reads none of them.
+    /// Behaviour: server.craft.a-start-makes-the-worlds-recipes
+    #[test]
+    fn a_start_makes_the_worlds_recipes_and_reads_those_steps_teach() {
+        use yalain_content::crafts::{Recipe, RecipeIngredient};
+        const MADE: u32 = 0x6F7E_0001;
+        const FUSE: u32 = 0x6F00_02BE;
+        const ARC_BLADE: u32 = 0x6F00_1CAE;
+        const PARTS: [u32; 3] = [0x4700_1600, 0x4700_1609, 0x4700_1608];
+        const SYSTEM: u32 = 0x4700_1601;
+        let install = auberean_dat::testing::require_target_install();
+        let world_db = std::env::var("YALAIN_TEST_WORLD_DB")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "pinned".to_owned());
+        let portal = super::data::Portal::open(&install, None).expect("the install opens");
+        let (_, plain) = super::compile_world(&portal, &world_db, None)
+            .unwrap_or_else(|e| panic!("the world database {world_db}: {e}"));
+        let mut rows = plain.clone();
+        let row = |recipe| Recipe {
+            recipe,
+            like: FUSE,
+            name: (0x00DD_730E, 0x2500_2007),
+            description: None,
+            ingredients: PARTS
+                .iter()
+                .map(|t| RecipeIngredient {
+                    items: vec![*t],
+                    count: 1,
+                    name: None,
+                })
+                .collect(),
+            product: SYSTEM,
+            count: 1,
+            skill: None,
+            category: Some(605),
+        };
+        rows.crafts.recipes.insert(MADE, row(MADE));
+        rows.crafts.recipes.insert(FUSE + 1, row(FUSE + 1));
+        let mut step = rows.quests.steps[0].clone();
+        step.recipes = vec![MADE, ARC_BLADE];
+        rows.quests.steps.push(step);
+        let read = |t| {
+            let (_, p) = super::load_play(&portal, t).expect("the world starts");
+            p
+        };
+        let before = read(plain);
+        let after = read(rows);
+        for r in [MADE, ARC_BLADE] {
+            assert!(!before.craft.recipes.contains_key(&r), "{r:08X} before");
+            assert!(after.craft.recipes.contains_key(&r), "{r:08X} after");
+        }
+        assert!(before.craft.records.is_empty());
+        assert_eq!(
+            after.craft.records.keys().copied().collect::<Vec<_>>(),
+            [MADE]
+        );
+        for t in PARTS.iter().chain([&SYSTEM]) {
+            assert!(after.catalog.templates.contains_key(t), "{t:08X} described");
+        }
+    }
+
+    /// Step up to the placed object of a template: its id.
+    fn beside(h: &mut Harness, world: ConnId, template: u32) -> u64 {
+        let objects = &h.server.content.objects;
+        let i = objects
+            .iter()
+            .position(|o| o.template == template)
+            .unwrap_or_else(|| panic!("{template:08X} placed"));
+        let (cell, at) = (objects[i].cell, objects[i].origin);
+        let id = yalain_world::presence::content_id(objects, i);
+        let p = h.server.players.get_mut(&world).expect("in the world");
+        p.position.cell = cell;
+        p.position.origin = [at[0] + 1.0, at[1], at[2]];
+        id
+    }
+
+    fn held(h: &Harness, world: ConnId, template: u32) -> Option<(u64, u32)> {
+        h.server.players[&world]
+            .play
+            .items
+            .iter()
+            .find(|i| i.template == template)
+            .map(|i| (i.id, i.quantity))
+    }
+
+    fn state(h: &Harness, world: ConnId) -> Option<(u32, u32)> {
+        h.server.players[&world]
+            .play
+            .quests
+            .iter()
+            .find(|q| q.quest == PUMPING_IRON)
+            .map(|q| (q.status, q.phase))
+    }
+
+    fn use_person(h: &mut Harness, b: usize, me: u64, world: ConnId, who: u32) {
+        let id = beside(h, world, who);
+        h.bots[b].send(
+            true,
+            queue::WEENIE,
+            &server_call(0x8216_0016, &[use_of(id, me)]),
+        );
+        h.run(20);
+    }
+
+    /// Give one of an item held to a person, as a client drags it onto them.
+    fn give(h: &mut Harness, b: usize, me: u64, world: ConnId, item: u32, who: u32) {
+        use yalain_world::inventory::{move_graph, Move};
+        let target = beside(h, world, who);
+        let (id, _) = held(h, world, item).unwrap_or_else(|| panic!("{item:08X} held"));
+        let m = Move {
+            move_type: yalain_world::gives::GIVE,
+            merge: true,
+            unlock: true,
+            check_take: true,
+            all_taken: true,
+            grab: true,
+            contain: true,
+            auto_merge: true,
+            target,
+            actual_target: target,
+            merge_container: target,
+            from: me,
+            actual_from: me,
+            item: id,
+            split_item: id,
+            quantity: 1,
+            quantity_left: 1,
+            ..Move::default()
+        };
+        h.bots[b].send(
+            true,
+            queue::WEENIE,
+            &server_call(yalain_world::drops::function::MOVE_ITEM, &[move_graph(&m)]),
+        );
+        h.run(150);
+    }
+
+    /// Make a recipe with one stack in every slot, and wait for the result.
+    fn make(h: &mut Harness, b: usize, recipe: u32, slots: u32, stack: u64) {
+        use auberean_script::args::Arg;
+        use auberean_script::library::Elem;
+        use auberean_script::native_object::Item;
+        let mut g = yalain_world::graph::Builder::new();
+        let entries: Vec<(Item, Item)> = (1..=slots)
+            .map(|s| (Item::Word(s), Item::Long(stack)))
+            .collect();
+        g.native(
+            8,
+            yalain_world::graph::hash(Elem::Word, Elem::Long, 0, &entries),
+        );
+        h.bots[b].send(
+            true,
+            queue::WEENIE,
+            &server_call(
+                yalain_world::craft::function::EXECUTE,
+                &[
+                    Arg::LongInt(0),
+                    Arg::Object(g.graph()),
+                    Arg::Int(0),
+                    Arg::Int(recipe),
+                ],
+            ),
+        );
+        let until = h.now.0 + 15.0;
+        while h.now.0 < until {
+            h.step();
+        }
+    }
+
+    /// **Pumping Iron finishes**: its anthracite comes only through the offerings' chain, whose
+    /// garland recipe is taught by the effect a give alone names; on a real start the shrine
+    /// teaches it, the garland is made, and the chain, the smith and the giver end the quest.
+    /// Behaviour: server.quests.a-give-teaches-its-recipe-on-a-real-start
+    #[test]
+    fn pumping_iron_finishes_through_the_garland_a_give_teaches_on_a_real_start() {
+        let (mut h, b, me, world) = started();
+        // At the quest's level, with the garland's cost.
+        for p in h.server.players.values_mut() {
+            yalain_world::quals::set_int(&mut p.qualities, yalain_world::examine::LEVEL, 45);
+            yalain_world::quals::set_int(&mut p.qualities, yalain_world::store::MONEY, 1000);
+        }
+        for (item, n) in [(IRON, 1), (BLOSSOM, 8)] {
+            yalain_world::inventory::give(&mut h.server, &mut h.net, world, item, n)
+                .unwrap_or_else(|| panic!("{item:08X} in the catalog"));
+        }
+        h.run(3);
+
+        use_person(&mut h, b, me, world, GIVER);
+        assert_eq!(state(&h, world), Some((status::UNDERWAY, 1)), "given");
+        use_person(&mut h, b, me, world, SENDER);
+        assert_eq!(state(&h, world).map(|s| s.1), Some(2));
+        give(&mut h, b, me, world, LETTER, SMITH);
+        give(&mut h, b, me, world, IRON, SMITH);
+        assert_eq!(state(&h, world).map(|s| s.1), Some(4), "the iron taken");
+
+        let knows = |h: &Harness| {
+            h.server.players[&world]
+                .play
+                .recipes
+                .iter()
+                .any(|r| r.recipe == GARLAND_RECIPE)
+        };
+        assert!(!knows(&h));
+        give(&mut h, b, me, world, BLOSSOM, SHRINE);
+        assert!(knows(&h), "the shrine teaches the garland");
+        let (blossoms, left) = held(&h, world, BLOSSOM).expect("blossoms");
+        assert_eq!(left, 7);
+        make(&mut h, b, GARLAND_RECIPE, 7, blossoms);
+        assert!(held(&h, world, GARLAND).is_some(), "the garland made");
+
+        for (item, who, got) in [
+            (GARLAND, SHRINE, SCENTED),
+            (SCENTED, WASP, EGGS),
+            (EGGS, DILLO, TRUFFLE),
+            (TRUFFLE, GRUTT, ANTHRACITE),
+        ] {
+            give(&mut h, b, me, world, item, who);
+            assert!(held(&h, world, got).is_some(), "{who:08X} gives {got:08X}");
+        }
+        give(&mut h, b, me, world, ANTHRACITE, SMITH);
+        assert_eq!(
+            state(&h, world).map(|s| s.1),
+            Some(5),
+            "the anthracite taken"
+        );
+        give(&mut h, b, me, world, RECEIPT, SENDER);
+        assert_eq!(state(&h, world).map(|s| s.1), Some(6));
+        use_person(&mut h, b, me, world, GIVER);
+        assert_eq!(state(&h, world).map(|s| s.0), Some(status::COMPLETED));
     }
 }

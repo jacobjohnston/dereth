@@ -12,6 +12,7 @@ use dereth_primitives::DataId;
 use crate::platform::host::Host;
 use crate::present::ClientPresentation;
 
+mod explore;
 mod frame;
 mod horizon;
 mod horizon_keys;
@@ -193,6 +194,8 @@ pub struct ClientShell<H: Host> {
     pub(crate) horizon: horizon::HorizonFace,
     /// The plugins' share, under every interface.
     pub(crate) plugins: plugins::PluginSurface,
+    /// Explore mode's keys and corner line (`--explore`), in place of every interface.
+    pub(crate) explore: explore::ExploreFace,
 }
 
 /// Widget state, dialogs and preview caches owned by the modern interface.
@@ -383,6 +386,7 @@ impl<H: Host> ClientShell<H> {
             classic: crate::classic_face::ClassicFace::default(),
             horizon: horizon::HorizonFace::default(),
             plugins: plugins::PluginSurface::default(),
+            explore: explore::ExploreFace::default(),
         }
     }
 }
@@ -1699,6 +1703,7 @@ impl<H: Host> ClientShell<H> {
             Interface::Classic => self.enter_classic(cx),
             Interface::Horizon => self.enter_horizon(cx),
         }
+        cx.note_interface_shown(want);
         // The interface shown now never saw the press that turned the camera with the pointer:
         // the camera stops turning with it, and a pointer held for the drag is shown again where
         // the drag began.
@@ -1946,7 +1951,9 @@ impl<H: Host> ClientShell<H> {
         event: &dereth_input::host::HostEvent,
         time_ms: u32,
     ) {
-        if self.horizon.active {
+        if cx.exploring() {
+            self.route_explore_event(cx, event, time_ms);
+        } else if self.horizon.active {
             route_horizon_event(cx, self, event, time_ms);
         } else if self.classic.active {
             self.route_classic_event(cx, event, time_ms);
@@ -2128,7 +2135,9 @@ impl<H: Host> Shell for ClientShell<H> {
             }
             self.follow_pointer_drag(cx, time_ms);
         }
-        if self.horizon.active {
+        if cx.exploring() {
+            // No interface answers the pad in explore mode.
+        } else if self.horizon.active {
             let keys = self
                 .horizon
                 .active_mut()
@@ -2599,6 +2608,11 @@ impl<H: Host> Shell for ClientShell<H> {
 
     fn compose_ui(&mut self, cx: &mut Cx<'_, H>) {
         use dereth_client_contract::options::interface::Interface;
+        // Explore mode shows no interface: its corner line alone.
+        if cx.exploring() {
+            self.compose_explore(cx);
+            return;
+        }
         match self.shown_interface() {
             Interface::Modern => self.compose_plugins_modern(cx),
             Interface::Classic => self.compose_plugins_classic(cx),
@@ -2617,7 +2631,9 @@ impl<H: Host> Shell for ClientShell<H> {
         present: &mut Self::Present,
     ) -> Result<(), dereth_client_runtime::present::PresentError> {
         use dereth_client_contract::options::interface::Interface;
-        if !self.host_hides_ui {
+        if self.explore.on {
+            present.draw_overlay(&self.explore.items)?;
+        } else if !self.host_hides_ui {
             // The plugins' layer stands among the modern interface's windows, and over the classic
             // interface's windows and under its modal box; the host's dialog for a file stands over
             // everything of the classic interface's but its pointer.
@@ -3257,6 +3273,10 @@ mod pointer_hold_tests;
 #[cfg(test)]
 #[path = "../tests/report_command_tests.rs"]
 mod report_command_tests;
+
+#[cfg(test)]
+#[path = "../tests/explore_tests.rs"]
+mod explore_tests;
 
 #[cfg(test)]
 #[path = "../tests/plugin_tests.rs"]

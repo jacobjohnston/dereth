@@ -107,6 +107,7 @@ fn refusal_words(code: u32) -> &'static str {
         refusal::RACE => "it is not for the race",
         refusal::PARENT => "a parent skill is untrained",
         refusal::PREREQUISITE => "a prerequisite is untrained or too low",
+        refusal::BARRED => "a skill held bars it",
         refusal::CREDITS => "the credits are short",
         refusal::UNTRAINED => "it is untrained",
         refusal::CAP => "it is at its cap",
@@ -480,7 +481,7 @@ pub fn delete<S: Store>(
 }
 
 /// Is a character in the world (lingering included), or on its way in?
-fn in_world_or_entering<S: Store>(s: &Server<S>, id: u64) -> bool {
+pub(crate) fn in_world_or_entering<S: Store>(s: &Server<S>, id: u64) -> bool {
     s.players.values().any(|p| p.character == id)
         || s.sessions.values().any(|x| match x.stage {
             Stage::Entering { character, .. } | Stage::InWorld { character, .. } => character == id,
@@ -569,7 +570,7 @@ pub fn place<S: Store>(s: &mut Server<S>, who: &str, to: &Destination) -> Result
                 .and_then(|w| s.players.get(&w))
                 .ok_or_else(|| format!("{other} is not in the world"))?;
             (
-                crate::places::beside(o.position.cell, o.position.origin, &o.position),
+                crate::places::beside_on_ground(s, o.position.cell, o.position.origin, &o.position),
                 o.name.clone(),
             )
         }
@@ -892,7 +893,7 @@ pub fn teleport<S: Store>(
                 return Err(format!("{name} cannot be sent to itself"));
             }
             (
-                crate::places::beside(o.position.cell, o.position.origin, &from),
+                crate::places::beside_on_ground(s, o.position.cell, o.position.origin, &from),
                 o.name.clone(),
             )
         }

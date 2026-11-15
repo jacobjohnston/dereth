@@ -1,7 +1,8 @@
 //! The placed objects whose use moves a quest: a quest whose phase is done by subquests (the
 //! kingdom stones' doctrines), a failed quest's wait before it is given again (the Mist Shrine), a
-//! quest's least level and the person's refusal (the Great Deru Shrine), a quest that fails when
-//! its player dies (the Mist Opal), and a faction shrine used on a mount.
+//! quest's least level and the person's refusal (the Great Deru Shrine), a quest given only at a
+//! craft skill's level (the Radiant Temple's smith), a quest that fails when its player dies (the
+//! Mist Opal), and a faction shrine used on a mount.
 
 use auberean_protocol::{queue, ServerMessage};
 use auberean_script::args::Arg;
@@ -65,7 +66,7 @@ fn object(id: u64, template: u32, origin: [f32; 3]) -> ContentObject {
 fn quest(id: u32, table: u32, phases: usize) -> QuestDef {
     QuestDef {
         id,
-        name: (0xA860_7CEC, table),
+        name: Words::Ref(0xA860_7CEC, table),
         description: (0x6C45_9364, table),
         icon: 0x4100_034B,
         play_fx: true,
@@ -82,9 +83,11 @@ fn quest(id: u32, table: u32, phases: usize) -> QuestDef {
         subquests: Vec::new(),
         min_level: 0,
         fails_on_death: false,
+        fails_on_logout: false,
+        fails_on_teleport: false,
         once: false,
         fellows: yalain_content::quests::Fellows::default(),
-        last_waits: false,
+        ranges: Vec::new(),
         hero_only: false,
         pay: yalain_content::quests::CompletionPay::default(),
         required: None,
@@ -94,6 +97,7 @@ fn quest(id: u32, table: u32, phases: usize) -> QuestDef {
 
 fn step(quest: u32, needs: u32, trigger: Trigger, update: Update) -> Step {
     Step {
+        key: String::new(),
         quest,
         needs,
         trigger,
@@ -104,17 +108,21 @@ fn step(quest: u32, needs: u32, trigger: Trigger, update: Update) -> Step {
         counts: Vec::new(),
         effects: Vec::new(),
         text: None,
+        recipes: Vec::new(),
         placed: "authored for a test".into(),
         requires: Vec::new(),
         takes: Vec::new(),
         races: Vec::new(),
         effects_last: false,
+        effects_quiet: false,
         wants: None,
         fellows: false,
         levels: None,
         xp_share: 0.0,
         to: None,
         transforms: None,
+        chance: None,
+        to_fellows: false,
     }
 }
 
@@ -456,6 +464,230 @@ fn a_quest_is_not_given_under_its_least_level_and_the_person_says_why() {
         !texts(&h, b, from).contains(&(HEAR_TELL, TOO_GREEN)),
         "and not refused"
     );
+}
+
+/// A quest step that waits on a craft skill is not given to a player under its level in any of
+/// the skills it names: the person says its refusal of that quest instead (the Radiant Temple's
+/// smith turning away "as if judging your crafting ability"); any one of the skills at the level
+/// gives it.
+/// Behaviour: server.quests.craft-skill-gate
+#[test]
+fn a_quest_waiting_on_a_craft_skill_is_given_only_at_its_level_and_the_person_says_why() {
+    use yalain_content::crafts::{CraftGate, CraftGates};
+    use yalain_world::state::CraftSkillState;
+    const FORGE: u32 = 0x4000_01CE;
+    const SMITH: u32 = 0x4700_3267;
+    const JUDGED: u32 = 0x63E4_15AA;
+    const HUMAN_ARMOR: u32 = 0x6F00_0695;
+    const LUGIAN_ARMOR: u32 = 0x6F00_0698;
+    let gift = step(FORGE, 0, Trigger::Use(SMITH), Update::Bestow);
+    let mut h = Harness::new();
+    h.server.content = ContentPack {
+        objects: vec![object(0x8130_0000_0000_0701, SMITH, [61.0, 241.0, -44.6])],
+        craft_gates: CraftGates {
+            steps: vec![(
+                gift.clone(),
+                CraftGate {
+                    skills: vec![HUMAN_ARMOR, LUGIAN_ARMOR],
+                    at_least: 200,
+                },
+            )],
+            gives: Vec::new(),
+        },
+        ..ContentPack::default()
+    };
+    h.server.quests = QuestTable {
+        quests: vec![quest(FORGE, 0x2500_1706, 1)],
+        steps: vec![gift],
+        gives: Vec::new(),
+        rooms: Vec::new(),
+    };
+    h.server.talk = TalkTable {
+        lines: vec![line(
+            SMITH,
+            JUDGED,
+            Role::RefuseUse,
+            How::Emote,
+            Some(FORGE),
+        )],
+    };
+    let (b, me) = h.player_in_world("one", "Elara");
+    let skilled = |h: &mut Harness, skill: u32, level: u32| {
+        for p in h.server.players.values_mut() {
+            p.play.craft_skills = vec![CraftSkillState {
+                skill,
+                level,
+                today: 0,
+                available: 0,
+            }];
+        }
+    };
+    let id = 0x8130_0000_0000_0701;
+    let from = use_it(&mut h, b, me, id);
+    assert!(updates(&h, b, from).is_empty(), "not given with no skill");
+    assert_eq!(texts(&h, b, from), vec![(SHOW_TEXT, JUDGED)], "the refusal");
+    skilled(&mut h, HUMAN_ARMOR, 199);
+    let from = use_it(&mut h, b, me, id);
+    assert!(updates(&h, b, from).is_empty(), "not given at 199");
+    assert_eq!(texts(&h, b, from), vec![(SHOW_TEXT, JUDGED)]);
+    skilled(&mut h, LUGIAN_ARMOR, 200);
+    let from = use_it(&mut h, b, me, id);
+    assert_eq!(
+        updates(&h, b, from).len(),
+        1,
+        "given at 200 in another of its skills"
+    );
+    assert!(
+        !texts(&h, b, from).contains(&(SHOW_TEXT, JUDGED)),
+        "and not refused"
+    );
+}
+
+/// A quest step for heroes alone does not give its quest to a player who is none: the person says
+/// its refusal of that quest instead (a beacon of a raid whose crystal only a hero may use); a hero
+/// is given it.
+/// Behaviour: server.quests.a-step-for-heroes-alone
+#[test]
+fn a_step_for_heroes_alone_gives_its_quest_only_to_a_hero_and_the_person_says_why() {
+    use yalain_content::heroes::HeroGates;
+    const RAID: u32 = 0x4000_0355;
+    const BEACON: u32 = 0x4700_1486;
+    const NOT_HERO: u32 = 0xD236_9908;
+    let gift = step(RAID, 0, Trigger::Use(BEACON), Update::Bestow);
+    let mut h = Harness::new();
+    h.server.content = ContentPack {
+        objects: vec![object(0x8130_0000_0000_0702, BEACON, [61.0, 241.0, -44.6])],
+        hero_gates: HeroGates {
+            steps: vec![gift.clone()],
+            gives: Vec::new(),
+        },
+        ..ContentPack::default()
+    };
+    h.server.quests = QuestTable {
+        quests: vec![quest(RAID, 0x2500_1706, 1)],
+        steps: vec![gift],
+        gives: Vec::new(),
+        rooms: Vec::new(),
+    };
+    h.server.talk = TalkTable {
+        lines: vec![line(
+            BEACON,
+            NOT_HERO,
+            Role::RefuseUse,
+            How::Tell,
+            Some(RAID),
+        )],
+    };
+    let (b, me) = h.player_in_world("one", "Elara");
+    let id = 0x8130_0000_0000_0702;
+    let from = use_it(&mut h, b, me, id);
+    assert!(
+        updates(&h, b, from).is_empty(),
+        "not given to one who is no hero"
+    );
+    assert_eq!(
+        texts(&h, b, from),
+        vec![(HEAR_TELL, NOT_HERO)],
+        "the refusal"
+    );
+    for p in h.server.players.values_mut() {
+        yalain_world::focus::set_hero_kept(&mut p.qualities, true);
+    }
+    let from = use_it(&mut h, b, me, id);
+    assert_eq!(updates(&h, b, from).len(), 1, "given to a hero");
+    assert!(
+        !texts(&h, b, from).contains(&(HEAR_TELL, NOT_HERO)),
+        "and not refused"
+    );
+}
+
+/// A step waiting on a quest never completed gives its quest to a player who has never had that
+/// quest, or has it under way for the first time; not to one who has completed it, nor to one
+/// given it again since and not yet done with it.
+/// Behaviour: server.quests.a-step-waits-on-a-quest-never-completed
+#[test]
+fn a_step_waiting_on_a_quest_never_completed_refuses_one_who_ever_completed_it() {
+    const DESCENT: u32 = 0x4000_02A0;
+    const RETRACING: u32 = 0x4000_02A1;
+    const AGENT: u32 = 0x4700_3198;
+    const LATAUA: u32 = 0x4700_319A;
+    let agent = 0x8130_0000_0000_0701;
+    let lataua = 0x8130_0000_0000_0702;
+    let retracing = Step {
+        requires: vec![(DESCENT, Need::NeverDone)],
+        ..step(RETRACING, 0, Trigger::Use(LATAUA), Update::Bestow)
+    };
+    let mut h = Harness::new();
+    h.server.content = ContentPack {
+        objects: vec![
+            object(agent, AGENT, [61.0, 241.0, -44.6]),
+            object(lataua, LATAUA, [62.0, 241.0, -44.6]),
+        ],
+        ..ContentPack::default()
+    };
+    h.server.quests = QuestTable {
+        quests: vec![
+            quest(DESCENT, 0x2500_2A0E, 1),
+            quest(RETRACING, 0x2500_2A0F, 1),
+        ],
+        steps: vec![
+            step(DESCENT, 0, Trigger::Use(AGENT), Update::Bestow),
+            step(DESCENT, 1, Trigger::Use(AGENT), Update::Complete),
+            retracing,
+        ],
+        gives: Vec::new(),
+        rooms: Vec::new(),
+    };
+    let given = |h: &Harness, b: usize, from: usize, quest: u32| {
+        updates(h, b, from)
+            .iter()
+            .any(|(k, r)| *k == 0x1000_0000 && r.id == quest)
+    };
+    let (b, me) = h.player_in_world("one", "Elara");
+    // Never had it: given.
+    let from = use_it(&mut h, b, me, lataua);
+    assert!(
+        given(&h, b, from, RETRACING),
+        "given to one who never had it"
+    );
+    // Under way for the first time: given.
+    holding(&mut h, &[(DESCENT, status::UNDERWAY, 1)], 1);
+    let from = use_it(&mut h, b, me, lataua);
+    assert!(
+        given(&h, b, from, RETRACING),
+        "given while it is under way the first time"
+    );
+    // Done: not given.
+    holding(&mut h, &[], 1);
+    use_it(&mut h, b, me, agent);
+    use_it(&mut h, b, me, agent);
+    let held = |h: &Harness| {
+        h.server
+            .players
+            .values()
+            .next()
+            .and_then(|p| p.play.quests.iter().find(|q| q.quest == DESCENT).copied())
+            .map(|q| q.status)
+    };
+    assert_eq!(held(&h), Some(status::COMPLETED), "the other done");
+    let from = use_it(&mut h, b, me, lataua);
+    assert!(!given(&h, b, from, RETRACING), "not given once it is done");
+    // Given again and not yet done: still not given.
+    let from = use_it(&mut h, b, me, agent);
+    assert!(given(&h, b, from, DESCENT), "the other given again");
+    assert_eq!(held(&h), Some(status::UNDERWAY));
+    let from = use_it(&mut h, b, me, lataua);
+    assert!(
+        !given(&h, b, from, RETRACING),
+        "not given while the other is under way again"
+    );
+    let kept = h
+        .server
+        .players
+        .values()
+        .next()
+        .map(|p| p.play.completed_before.clone());
+    assert_eq!(kept, Some(vec![DESCENT]), "remembered as completed before");
 }
 
 /// A quest that fails when its player dies fails as the player dies, told before the death's

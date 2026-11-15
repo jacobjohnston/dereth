@@ -29,6 +29,7 @@ pub use probe::{AppProbe, AppProbeMut};
 
 mod access;
 mod display;
+mod explore;
 mod frame;
 mod hook;
 mod hud;
@@ -36,6 +37,7 @@ mod input;
 mod interaction;
 mod motion;
 mod movement;
+mod places;
 mod report;
 mod scripted;
 mod session;
@@ -849,15 +851,18 @@ pub struct App<S: Shell> {
     nav_academies: Option<Vec<u16>>,
     /// Spells that fizzled since the travel's last step.
     travel_fizzles: usize,
-    /// The server's published portal table, when a host fetched it (`--nav-published`), taken
+    /// The documents the server publishes, as a host fetched them (`--nav-published`, or those
+    /// the world's status names, `--world-status`): its portal table and its places, each taken
     /// into the travel at the next frame.
-    pub published_portals: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    pub published: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// How many times the movement stage has carried out the player's own movement of the
     /// character (a key, a stick or a mouse button, under any interface), and how many of those
     /// the frame hook and the travel had heard of when each last ran.
     player_moves: u64,
     hook_player_moves: u64,
     travel_player_moves: u64,
+    /// The house profiles the world's places have taken in, of those the model has received.
+    places_house_notices: u64,
     /// The last reported, so a transition is logged once.
     pub last_link_status: Option<crate::net::LinkStatus>,
     /// The bad-packets-received counter, reported when it moves.
@@ -937,6 +942,8 @@ pub struct App<S: Shell> {
     window_has_no_extent: bool,
     /// The performance capture `@perfcapture` started, while it records.
     pub perf_capture: Option<crate::perf_capture::PerfCapture>,
+    /// `--explore`'s state while the mode runs: how fast its camera flies.
+    pub explore: Option<crate::explore::Explore>,
     /// The commit the program was built from, as its host names it, for `@report`.
     pub build_commit: &'static str,
     /// Time when `0x0013` made the session playable, used by `--linger`.
@@ -1100,6 +1107,9 @@ pub struct App<S: Shell> {
 
     /// Which of the game's own per-frame duties have run this frame. See [`FrameDuties`].
     duties: FrameDuties,
+    /// The interface on the world the launcher named, which the save keeps for that world once
+    /// the player changes it in game. `None` for a run no launcher named a world for.
+    interface_world: Option<dereth_client_contract::options::interface::WorldChoice>,
 }
 
 /// How long a frame of a connected client gives the object identity verdicts while nothing waits
@@ -1322,13 +1332,13 @@ fn nav_character(
     // A route may use only the recall commands the world has: `@lifestone` recalls only where
     // it is not a death, and `@marketplace` only where the world has the Marketplace recall.
     out.recall_commands = Vec::new();
-    if features.lifestone_recall {
+    if dereth_rules::gates::Gate::LifestoneRecall.available(&features) {
         out.recall_commands.push((
             dereth_navigation::Recall::Lifestone,
             String::from("lifestone"),
         ));
     }
-    if features.marketplace_recall {
+    if dereth_rules::gates::Gate::MarketplaceRecall.available(&features) {
         out.recall_commands.push((
             dereth_navigation::Recall::Marketplace,
             String::from("marketplace"),

@@ -94,10 +94,12 @@ pub fn is_relayed(slug: &str) -> bool {
     RELAYED_WORLDS.iter().any(|r| r.slug == slug)
 }
 
-/// `world` as the client is to reach it: at the relay on this computer, on `port`.
+/// `world` as the client is to reach it: at the relay on this computer, on `port`, with the
+/// server's own address kept as [`World::upstream`], which the client keeps the world's files
+/// under.
 #[must_use]
 pub fn on_relay(mut world: World, port: u16) -> World {
-    world.endpoint = Some(Endpoint {
+    world.upstream = world.endpoint.replace(Endpoint {
         address: std::net::Ipv4Addr::LOCALHOST.to_string(),
         port,
         transport: None,
@@ -188,7 +190,8 @@ mod tests {
         assert_eq!((w.slug.as_str(), w.relayed), ("ac1999", true));
         assert!(w.accepts("dereth-0.4", None));
         assert!(!w.accepts("acclient-6096", Some("1802")));
-        assert_eq!(choices::required_set_for(&w), SetKind::Original);
+        assert_eq!(choices::required_set_for(&w), SetKind::Classic);
+        assert!(choices::plays_launch_pair(&w));
         let said = describe(&w);
         assert_eq!(said.era.as_deref(), Some("launch"));
         assert_eq!(
@@ -207,6 +210,12 @@ mod tests {
         let played = on_relay(w, 9200);
         let at = played.endpoint.unwrap();
         assert_eq!((at.address.as_str(), at.port), ("127.0.0.1", 9200));
+        let server = played.upstream.unwrap();
+        assert_eq!(
+            (server.address.as_str(), server.port),
+            ("ac1999.cobradragon.com", 9110),
+            "the server's own address is kept"
+        );
     }
 
     #[test]

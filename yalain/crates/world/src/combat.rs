@@ -73,6 +73,9 @@ pub mod error {
     pub const TOO_FAR: u32 = 30019;
 }
 
+/// How the line of a creature players may not harm is shown when one attacks it: as a refusal.
+pub const KEPT_OUT_SHOWN_AS: u32 = crate::social::REFUSED;
+
 /// Modes.
 pub mod mode {
     pub use auberean_physics::motion::PEACE;
@@ -378,11 +381,15 @@ pub fn may_attack_player<S: Store>(s: &Server<S>, world: ConnId, other: ConnId) 
 }
 
 /// May a player harm a thing? A pet is as its owner ([`may_attack_player`]), its own owner's
-/// excepted; any other creature may be fought.
+/// excepted; a creature the world's rows keep players from harming is kept out (as the client's own
+/// check refuses a target whose permissions keep players out); any other creature may be fought.
 ///
 /// # Errors
 /// Why not (the client writes the text).
 pub fn may_attack_thing<S: Store>(s: &Server<S>, world: ConnId, thing: u64) -> Result<(), u32> {
+    if kept_out_line(s, thing).is_some() {
+        return Err(crate::kingdoms::refusal::KEPT_OUT);
+    }
     let Some(owner) = s.pets.by_id.get(&thing).map(|p| p.owner) else {
         return Ok(());
     };
@@ -390,6 +397,16 @@ pub fn may_attack_thing<S: Store>(s: &Server<S>, world: ConnId, thing: u64) -> R
         Some((c, _)) if *c != world => may_attack_player(s, world, *c),
         _ => Ok(()),
     }
+}
+
+/// Is a thing a creature players may not harm, and with what line is a player's attack on it told
+/// (none for one whose row gives none)?
+pub(crate) fn kept_out_line<S: Store>(s: &Server<S>, thing: u64) -> Option<Option<(u32, u32)>> {
+    if s.creature_rows.kept_out.is_empty() {
+        return None;
+    }
+    let t = s.things.get(thing).filter(|t| t.creature.is_some())?;
+    s.creature_rows.kept_out.get(&t.template).copied()
 }
 
 /// The bits of a hook's attacker health change and attacker PK damage change.
@@ -530,6 +547,10 @@ pub fn begin<S: Store>(
         None => {
             if let Err(err) = may_attack_thing(s, world, target) {
                 progress::private(net, world, &failed(err));
+                if let Some(Some(line)) = kept_out_line(s, target) {
+                    let m = crate::chat::show_text(KEPT_OUT_SHOWN_AS, progress::text(line));
+                    progress::private(net, world, &m);
+                }
                 progress::private(net, world, &attack_state(false));
                 return;
             }
@@ -1238,6 +1259,9 @@ pub fn lands<S: Store>(s: &mut Server<S>, net: &mut ServerNet, mut l: Landing, c
     if hurts && other.is_none() {
         crate::treasure::on_hit(s, net, l.world, l.target, clock);
     }
+    if alive && l.outcome.landed() && other.is_none() {
+        crate::treasure::applied_on_blow(s, net, l.world, l.target, clock);
+    }
     if alive && l.outcome.landed() {
         crate::equip::blow_landed(s, net, l.world);
     }
@@ -1316,6 +1340,102 @@ pub fn lands<S: Store>(s: &mut Server<S>, net: &mut ServerNet, mut l: Landing, c
         .is_some_and(crate::things::Thing::alive)
     {
         crate::ai::go_after(s, net, l.target, me, clock);
+    }
+}
+
+/// A blow struck with a weapon lands: each effect the weapon's template names for what it hits
+/// ([`crate::item_use::HIT`]) goes on, at the template's spellcraft, by the effect's own chance at
+/// it; a slayer among them harms a creature of a superclass it names by its spellcraft times the
+/// number with it ([`crate::treasure::slayer_harm`]), told as its own story, and does nothing to
+/// anything else. An effect put on is cast by the striker from the weapon.
+pub(crate) fn weapon_hit_effects<S: Store>(
+    s: &mut Server<S>,
+    net: &mut ServerNet,
+    by: u64,
+    weapon: u64,
+    on: On,
+    clock: Clock,
+) {
+    let Some(list) = s
+        .things
+        .get(weapon)
+        .and_then(|w| s.hit_effects.get(&w.template))
+        .cloned()
+    else {
+        return;
+    };
+    let by_player = s.players.values().any(|p| p.character == by);
+    for e in list {
+        if let On::Creature(t) = on {
+            if !s.things.get(t).is_some_and(crate::things::Thing::alive) {
+                return;
+            }
+        }
+        let Some(kind) = s.effect_table.get(e.state).map(|d| d.kind.clone()) else {
+            continue;
+        };
+        let chance = s.effect_table.chance(e.state, e.spellcraft);
+        if chance < 1.0 && !s.rng.chance(chance) {
+            continue;
+        }
+        if let crate::effect_defs::Kind::Slayer(classes) = kind {
+            let On::Creature(target) = on else { continue };
+            let superclass = s
+                .things
+                .get(target)
+                .and_then(|t| s.catalog.get(t.template))
+                .and_then(|t| {
+                    t.props
+                        .word(yalain_content::props::creature_property::SUPER_CLASS)
+                });
+            let harm = superclass.map_or(0, |c| {
+                crate::treasure::slayer_harm(&classes, c, e.spellcraft)
+            });
+            if harm > 0 {
+                crate::effects::creature_health(s, net, target, -harm, by, clock);
+            }
+            continue;
+        }
+        crate::effects::apply_on(
+            s,
+            net,
+            on,
+            e.state,
+            crate::effects::Cast {
+                caster: by,
+                spellcraft: e.spellcraft,
+                pk: by_player,
+                item: weapon,
+                ..crate::effects::Cast::default()
+            },
+            clock,
+        );
+    }
+}
+
+/// The first weapon a creature holds, which its blows are struck with.
+fn creature_weapon<S: Store>(s: &Server<S>, creature: u64) -> Option<u64> {
+    s.things
+        .get(creature)
+        .and_then(|t| t.creature.as_ref())
+        .and_then(|c| c.weapons.first().copied())
+}
+
+/// A creature's blow lands on a player still standing: its weapon's effects for what it hits go on
+/// ([`weapon_hit_effects`]).
+pub(crate) fn creature_blow_landed<S: Store>(
+    s: &mut Server<S>,
+    net: &mut ServerNet,
+    creature: u64,
+    target: ConnId,
+    clock: Clock,
+) {
+    let standing = s
+        .players
+        .get(&target)
+        .is_some_and(|p| p.trip.is_none() && !is_dead(p));
+    if let Some(weapon) = creature_weapon(s, creature).filter(|_| standing) {
+        weapon_hit_effects(s, net, creature, weapon, On::Player(target), clock);
     }
 }
 
@@ -1806,8 +1926,9 @@ pub fn armor_on<S: Store>(s: &Server<S>, world: ConnId) -> f32 {
 
 /// A creature within reach of its target strikes, when its next attack is due: a heal or a buff on
 /// itself by its chance ([`crate::missiles::helps`]), else a special at hand by its chance (one that
-/// throws a missile looses it even this near), else one of its basic melee attacks drawn by its
-/// weights (the plain strike for a creature that names none).
+/// throws a missile looses it even this near), else one of its basic melee and magic attacks
+/// drawn by their weights, a bolt of magic cast from where it stands (the plain strike for a
+/// creature that names neither). Its basic missiles are for afar.
 pub fn creature_strikes<S: Store>(
     s: &mut Server<S>,
     net: &mut ServerNet,
@@ -1823,8 +1944,12 @@ pub fn creature_strikes<S: Store>(
         return;
     }
     let (basic, specials) = crate::missiles::attacks_of(&s.skill_table, &c.stats);
-    let melee: Vec<crate::missiles::AttackSkill> =
-        basic.into_iter().filter(|a| !a.missile).collect();
+    // In reach it draws among its melee and magic basic attacks: a bolt of magic is cast from
+    // where it stands, a missile only from afar.
+    let near: Vec<crate::missiles::AttackSkill> = basic
+        .into_iter()
+        .filter(|a| a.kind != Kind::Missile)
+        .collect();
     let distance = s
         .things
         .get(id)
@@ -1859,8 +1984,12 @@ pub fn creature_strikes<S: Store>(
         .and_then(|t| t.creature.as_ref())
         .map(|c| c.stats.clone())
         .unwrap_or_default();
-    let skill = crate::missiles::pick_basic(s, &stats, &melee)
+    let skill = crate::missiles::pick_basic(s, &stats, &near)
         .unwrap_or(crate::missiles::CREATURE_ATTACKS[0]);
+    if skill.missile {
+        crate::missiles::launch(s, net, id, target, skill, false, clock);
+        return;
+    }
     let next = creature_strike_with(s, net, id, target, skill, false, clock);
     if let Some(c) = s.things.get_mut(id).and_then(|t| t.creature.as_mut()) {
         c.next_attack = now + next;
@@ -1885,6 +2014,7 @@ pub fn creature_strike_with<S: Store>(
         return unknown;
     };
     let (natural, variance) = (c.stats.natural_damage, c.stats.natural_variance);
+    let threshold = rules::threshold_of(&c.stats);
     let Some(p) = s.players.get(&target) else {
         return unknown;
     };
@@ -1915,6 +2045,7 @@ pub fn creature_strike_with<S: Store>(
                 variance,
                 added: skill.added + more,
                 factor: skill.factor,
+                threshold,
             },
             my_level,
             armor,
@@ -1984,6 +2115,7 @@ pub fn creature_strike_lands<S: Store>(
     {
         hurt_player(s, net, target, creature, harm.left, clock);
         crate::effects::harm_back(s, net, creature, id, harm.back, clock);
+        creature_blow_landed(s, net, creature, target, clock);
     }
 }
 
@@ -2110,6 +2242,7 @@ pub fn thing_strikes_thing<S: Store>(
         variance: stats.natural_variance,
         added: skill.added,
         factor: skill.factor,
+        threshold: rules::threshold_of(&stats),
     };
     let critical = outcome == Outcome::Critical;
     let damage = match (outcome.landed(), crate::pets::armor_of(s, target)) {

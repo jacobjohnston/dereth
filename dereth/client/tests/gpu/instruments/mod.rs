@@ -1,16 +1,34 @@
 //! Instruments: frame writers, ignored with a reason and never counted as coverage.
 
+mod air_frames;
 mod building_boundary_frames;
+mod camera_walk_frames;
+pub(crate) mod cliff_frames;
 pub(crate) mod drawn_ground_names;
 mod dungeon_web_frames;
+pub(crate) mod far_shadow_frames;
 mod horizon_frames;
+mod impostor_cut_frames;
 pub(crate) mod nameplate_frames;
+mod pack_creature_frames;
+mod pack_death_frames;
+mod pack_fight_frames;
+mod pack_launcher_frames;
+mod pack_nameplate_frames;
+mod pack_toggle_frames;
 pub(crate) mod remaster_frames;
 pub(crate) mod remaster_look_frames;
 mod remaster_pack_frames;
 mod remaster_water_frames;
 mod scenery_edge_frames;
+mod scenery_radius_frames;
+mod shore_frames;
+mod skinned_body_frames;
+mod skinned_crowd_frames;
 mod smooth_animation_frames;
 mod smooth_movement_frames;
 pub(crate) mod stations;
+mod still_frames;
+pub(crate) mod sway_shadow_frames;
+mod tree_handover_frames;
 mod turn_pop_frames;

@@ -19,6 +19,7 @@
 //! | `place KEY` | a destination |
 //! | `loot 0xVALUE` | a death-loot profile |
 //! | `keeper 0xTEMPLATE` | a storekeeper |
+//! | `store KEY` | a shop of a world's own: a store template's copy under its own title |
 //! | `sale 0xSTORE ORDINAL` | a store's listing |
 //! | `quest 0xID` | a quest's server values |
 //! | `step 0xQUEST KEY` | a step of a quest |
@@ -63,12 +64,37 @@ impl Era {
     }
 }
 
+/// The saved states a world numbers its own records in (`0x6F...`), inclusive: well above the
+/// highest the game's own files hold, those of the final retail client and of the end of retail
+/// alike, so a world's record never takes the id of one a player's files have.
+pub const WORLD_STATES: (u32, u32) = (0x6F10_0000, 0x6FFF_FFFF);
+
+/// The world's own saved states a shop's copy of its store template takes, inclusive: the first of
+/// [`WORLD_STATES`], up to below [`WORLD_RECIPES`].
+pub const SHOP_COPIES: (u32, u32) = (WORLD_STATES.0, WORLD_RECIPES.0 - 1);
+
+/// The world's own saved states its recipe rows (`[[recipe]]`) take, inclusive, above every shop's
+/// copy ([`SHOP_COPIES`]).
+pub const WORLD_RECIPES: (u32, u32) = (0x6F7E_0000, 0x6F7E_FFFF);
+
+// The two lie inside the world's own saved states and share no id, however many shops a world has.
+const _: () = assert!(
+    WORLD_STATES.0 <= SHOP_COPIES.0
+        && SHOP_COPIES.0 <= SHOP_COPIES.1
+        && SHOP_COPIES.1 < WORLD_RECIPES.0
+        && WORLD_RECIPES.0 <= WORLD_RECIPES.1
+        && WORLD_RECIPES.1 <= WORLD_STATES.1
+);
+
 /// What the game's symbols name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Kind {
     /// A static object a pack places: its world id is numbered within its landblock, above the
     /// highest the base uses there.
     Static,
+    /// A shop's copy of its store template (`[[store]]`, by its key): a saved state numbered in
+    /// [`SHOP_COPIES`].
+    Store,
 }
 
 impl fmt::Display for Kind {
@@ -78,17 +104,22 @@ impl fmt::Display for Kind {
 }
 
 impl SymbolKind for Kind {
-    const KINDS: &'static [Self] = &[Self::Static];
+    const KINDS: &'static [Self] = &[Self::Static, Self::Store];
 
     fn kind_name(self) -> &'static str {
         match self {
             Self::Static => "static",
+            Self::Store => "store",
         }
     }
 
     fn numbering(self) -> Numbering {
         match self {
             Self::Static => Numbering::InLandblock,
+            Self::Store => Numbering::Counted {
+                start: SHOP_COPIES.0,
+                world_sets: false,
+            },
         }
     }
 
@@ -102,13 +133,14 @@ impl Dialect for Ac2 {
     const PRODUCT: &'static str = "Yalain";
     const BUILD_COMMAND: &'static str = "yalain world compile";
     const ITEM_FORMS: &'static str = "object <key>@<XXYY>, camp <key>@<XXYY>, place <key>, \
-         loot <value>, keeper <template>, sale <store> <ordinal>, quest <id>, \
+         loot <value>, keeper <template>, store <key>, sale <store> <ordinal>, quest <id>, \
          step <quest> <key>, talk <key>, weapon <name>, route <key>, area <XXYY>, \
          clearing <key>@<XXYY>, death_treasure <key>, treasure_pool <name>, \
          treasure_value <level>, treasure_rules, treasure_sort <sort>, treasure_word <sort> <word>, \
          treasure_look <template>, treasure_potion <kind>, \
          treasure_family <sort> <order>, item_use <template>, book <template>, \
-         start_item <template>, concealing <effect> <class|any>, npc_table <name>, \
+         start_item <template>, interaction <key>, recipe <id>, combination <key>, object_states <key>, \
+         sequence <key>, concealing <effect> <class|any>, npc_table <name>, \
          friend_table <table>, creature <template>, or landblock <XXYY>";
     const NAMES_BASE: bool = true;
     type Kind = Kind;
@@ -144,6 +176,8 @@ pub enum Item {
     Loot { profile: u32 },
     /// A storekeeper, by its template.
     Keeper { template: u32 },
+    /// A shop of the world's own, by its key.
+    Store { key: String },
     /// A store's listing, by its store template and its ordinal.
     Sale { store: u32, ordinal: u32 },
     /// A quest's server values, by its id.
@@ -186,12 +220,16 @@ pub enum Item {
     EffectName { name: String },
     /// A scheduled event, by its key.
     Event { key: String },
+    /// A count the whole world keeps, by its key.
+    Tally { key: String },
     /// What an effect does to kingdom points, by the effect's saved state.
     PointsBonus { effect: u32 },
     /// The tip a player is shown once, by the moment it is shown at.
     Popup { on: String },
     /// What the world says of an effect, by the effect's saved state.
     EffectRule { effect: u32 },
+    /// What the world says an effect the install holds no saved state of does, by its name.
+    EffectRuleNamed { name: String },
     /// The values treasure is drawn worth, by the level of the creature that leaves it.
     TreasureValue { level: u32 },
     /// The rules every treasure item draws by: the world has one.
@@ -216,12 +254,30 @@ pub enum Item {
     Book { template: u32 },
     /// What every new character is given as it first enters, by the template.
     StartItem { template: u32 },
+    /// What an item used on another makes, by its key.
+    Interaction { key: String },
+    /// The states objects of some templates hold, by the row's key.
+    ObjectStates { key: String },
+    /// An order of uses judged against objects' states, by its key.
+    Sequence { key: String },
+    /// Levers whose pulls open doors, by the row's key.
+    Lever { key: String },
+    /// An object that takes a set of items and then opens the way, by the row's key.
+    Offering { key: String },
+    /// Placed objects a camp's creatures guard, by the row's key.
+    Guarded { key: String },
+    /// Placed objects of which one stands at a time, by the row's key.
+    Shifting { key: String },
     /// A region's surveyor's map recipes, by the region's key.
     MapRecipes { region: String },
     /// The totem spellbinding makes of a sort of item, by the sort's name.
     Spellbinding { sort: String },
     /// What a refining recipe yields, by its script package's name.
     Refining { recipe: String },
+    /// A recipe the world defines, by its id.
+    Recipe { id: u32 },
+    /// What a recipe that works out its own product makes of a set of ingredients, by its key.
+    Combination { key: String },
     /// What creatures of a class (none: every creature) make of a concealing effect's holder, by
     /// the effect and the class.
     Concealing { effect: u32, class: Option<u32> },
@@ -231,6 +287,12 @@ pub enum Item {
     FriendTable { table: u32 },
     /// What the world says of a template's creatures, by the template.
     Creature { template: u32 },
+    /// Creatures that let pass a player holding an item or bearing an effect, by the row's key.
+    SafePassage { key: String },
+    /// An effect creatures of some templates hold from their first moment, by the row's key.
+    CreatureEffect { key: String },
+    /// A defended device, by its template.
+    Defense { device: u32 },
     /// A species of dye plant, by its plant's template.
     Plant { template: u32 },
     /// What a dye plant pollinated with a pollen gives, by the plant's template and the pollen's.
@@ -268,6 +330,7 @@ impl Item {
             ["keeper", t] => Self::Keeper {
                 template: number(t)?,
             },
+            ["store", key] => Self::Store { key: symbol(key)? },
             ["sale", s, o] => Self::Sale {
                 store: number(s)?,
                 ordinal: number(o)?,
@@ -308,6 +371,7 @@ impl Item {
                 name: identifier(name)?,
             },
             ["event", key] => Self::Event { key: symbol(key)? },
+            ["tally", key] => Self::Tally { key: symbol(key)? },
             ["points_bonus", effect] => Self::PointsBonus {
                 effect: number(effect)?,
             },
@@ -315,8 +379,11 @@ impl Item {
                 name: identifier(name)?,
             },
             ["popup", on] => Self::Popup { on: symbol(on)? },
-            ["effect_rule", effect] => Self::EffectRule {
-                effect: number(effect)?,
+            ["effect_rule", effect] => match number(effect) {
+                Some(effect) => Self::EffectRule { effect },
+                None => Self::EffectRuleNamed {
+                    name: identifier(effect)?,
+                },
             },
             ["treasure_value", level] => Self::TreasureValue {
                 level: number(level)?,
@@ -354,6 +421,13 @@ impl Item {
             ["start_item", template] => Self::StartItem {
                 template: number(template)?,
             },
+            ["interaction", key] => Self::Interaction { key: symbol(key)? },
+            ["object_states", key] => Self::ObjectStates { key: symbol(key)? },
+            ["sequence", key] => Self::Sequence { key: symbol(key)? },
+            ["lever", key] => Self::Lever { key: symbol(key)? },
+            ["offering", key] => Self::Offering { key: symbol(key)? },
+            ["guarded", key] => Self::Guarded { key: symbol(key)? },
+            ["shifting", key] => Self::Shifting { key: symbol(key)? },
             ["map_recipes", region] => Self::MapRecipes {
                 region: symbol(region)?,
             },
@@ -363,6 +437,8 @@ impl Item {
             ["refining", recipe] => Self::Refining {
                 recipe: identifier(recipe)?,
             },
+            ["recipe", id] => Self::Recipe { id: number(id)? },
+            ["combination", key] => Self::Combination { key: symbol(key)? },
             ["concealing", effect, class] => Self::Concealing {
                 effect: number(effect)?,
                 class: match *class {
@@ -378,6 +454,11 @@ impl Item {
             },
             ["creature", template] => Self::Creature {
                 template: number(template)?,
+            },
+            ["safe_passage", key] => Self::SafePassage { key: symbol(key)? },
+            ["creature_effect", key] => Self::CreatureEffect { key: symbol(key)? },
+            ["defense", device] => Self::Defense {
+                device: number(device)?,
             },
             ["plant", template] => Self::Plant {
                 template: number(template)?,
@@ -417,6 +498,7 @@ impl fmt::Display for Item {
             Self::Place { key } => write!(f, "place {key}"),
             Self::Loot { profile } => write!(f, "loot {profile:#x}"),
             Self::Keeper { template } => write!(f, "keeper {template:#010x}"),
+            Self::Store { key } => write!(f, "store {key}"),
             Self::Sale { store, ordinal } => write!(f, "sale {store:#010x} {ordinal}"),
             Self::Quest { id } => write!(f, "quest {id:#010x}"),
             Self::Step { quest, key } => write!(f, "step {quest:#010x} {key}"),
@@ -438,9 +520,11 @@ impl fmt::Display for Item {
             Self::TreasurePool { name } => write!(f, "treasure_pool {name}"),
             Self::EffectName { name } => write!(f, "effect_name {name}"),
             Self::Event { key } => write!(f, "event {key}"),
+            Self::Tally { key } => write!(f, "tally {key}"),
             Self::PointsBonus { effect } => write!(f, "points_bonus {effect:#010x}"),
             Self::Popup { on } => write!(f, "popup {on}"),
             Self::EffectRule { effect } => write!(f, "effect_rule {effect:#010x}"),
+            Self::EffectRuleNamed { name } => write!(f, "effect_rule {name}"),
             Self::TreasureValue { level } => write!(f, "treasure_value {level}"),
             Self::TreasureRules => write!(f, "treasure_rules"),
             Self::TreasureSort { sort } => write!(f, "treasure_sort {sort}"),
@@ -453,9 +537,18 @@ impl fmt::Display for Item {
             Self::ItemUse { template } => write!(f, "item_use {template:#010x}"),
             Self::Book { template } => write!(f, "book {template:#010x}"),
             Self::StartItem { template } => write!(f, "start_item {template:#010x}"),
+            Self::Interaction { key } => write!(f, "interaction {key}"),
+            Self::ObjectStates { key } => write!(f, "object_states {key}"),
+            Self::Sequence { key } => write!(f, "sequence {key}"),
+            Self::Lever { key } => write!(f, "lever {key}"),
+            Self::Offering { key } => write!(f, "offering {key}"),
+            Self::Guarded { key } => write!(f, "guarded {key}"),
+            Self::Shifting { key } => write!(f, "shifting {key}"),
             Self::MapRecipes { region } => write!(f, "map_recipes {region}"),
             Self::Spellbinding { sort } => write!(f, "spellbinding {sort}"),
             Self::Refining { recipe } => write!(f, "refining {recipe}"),
+            Self::Recipe { id } => write!(f, "recipe {id:#010x}"),
+            Self::Combination { key } => write!(f, "combination {key}"),
             Self::Concealing {
                 effect,
                 class: Some(c),
@@ -467,6 +560,9 @@ impl fmt::Display for Item {
             Self::NpcTable { name } => write!(f, "npc_table {name}"),
             Self::FriendTable { table } => write!(f, "friend_table {table:#x}"),
             Self::Creature { template } => write!(f, "creature {template:#010x}"),
+            Self::SafePassage { key } => write!(f, "safe_passage {key}"),
+            Self::CreatureEffect { key } => write!(f, "creature_effect {key}"),
+            Self::Defense { device } => write!(f, "defense {device:#010x}"),
             Self::Plant { template } => write!(f, "plant {template:#010x}"),
             Self::PlantCross { plant, pollen } => {
                 write!(f, "plant_cross {plant:#010x} {pollen:#010x}")

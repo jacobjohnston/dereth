@@ -6,10 +6,12 @@
 //! (a soulbound weapon's named bonus, an instrument's unseen appearance, a crafted regeneration
 //! bonus).
 
+use auberean_script::native_object::{TextInfo, VariableValue};
 use yalain_content::{Prop, Props};
 use yalain_net::ConnId;
 use yalain_testkit::play::{server_call, use_of};
 use yalain_testkit::{Harness, WORN_HEALTH_RATE_EFFECT};
+use yalain_world::calls::Node;
 use yalain_world::effect_defs::{EffectDef, Kind, Scale};
 use yalain_world::effects::{self, function as effect_fn, learned, WORN};
 use yalain_world::equip::function as equip_fn;
@@ -43,6 +45,7 @@ fn effect(state: u32, internal_flags: u32, name: Option<(u32, u32)>) -> EffectDe
         external_flags: 0x5,
         internal_flags,
         ends_at_logout: false,
+        ends_at_teleport: false,
         enum_value: 0,
         eq_class: state & 0xFFFF,
         name,
@@ -179,7 +182,7 @@ fn a_worn_item_puts_its_effects_on_before_the_answer_and_takes_them_off_before_t
         "the records, the named one's text, then the answer"
     );
     let texts = h.texts(b, from);
-    assert_eq!(texts, [(2, learned::TEXT.0)], "one text, of kind 2");
+    assert_eq!(texts, [(2, learned::LINE)], "one text, of kind 2");
     let ids: Vec<u32> = records(&h, world).iter().map(|e| e.eid).collect();
 
     let from = use_it(&mut h, b, me, chest);
@@ -199,6 +202,60 @@ fn a_worn_item_puts_its_effects_on_before_the_answer_and_takes_them_off_before_t
         .collect();
     assert_eq!(removed, ids, "each of its records");
     assert!(records(&h, world).is_empty(), "nothing left on");
+}
+
+/// The texts a client was shown since `from`.
+fn shown(h: &Harness, b: usize, from: usize) -> Vec<TextInfo> {
+    h.calls(b, from)
+        .into_iter()
+        .filter(|(f, _)| *f == SHOW_TEXT)
+        .filter_map(|(_, v)| {
+            v.iter().find_map(|x| match x.root() {
+                Some(Node::TextInfo(t)) => Some(t.clone()),
+                _ => None,
+            })
+        })
+        .collect()
+}
+
+/// A text's variable that holds another text: its string and table.
+fn var(t: &TextInfo, id: u32) -> Option<(u32, u32)> {
+    t.variables.iter().find_map(|v| match &v.value {
+        VariableValue::Nested(n) if v.id == id => Some((n.string_id, n.table)),
+        _ => None,
+    })
+}
+
+/// The line a worn effect tells, naming the effect and the chest: "The <effect> applies to you."
+/// where the effect's own table holds no line (2017: 182 of 182), and the line of its own table
+/// where it holds one (an emblem's, 1 of 1).
+/// Behaviour: server.equip.worn-effects-come-on-and-off
+#[test]
+fn a_worn_effect_tells_its_own_tables_line_or_else_that_it_applies() {
+    let (mut h, b, me, _) = wearer();
+    let from = h.bots[b].inbox.len();
+    h.arm(b, me, CHEST);
+    let said = shown(&h, b, from);
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert_eq!((said[0].string_id, said[0].table), learned::APPLIES);
+    assert_eq!(var(&said[0], learned::EFFECT_VAR), Some(NAMED_NAME));
+    assert_eq!(var(&said[0], learned::GIVER_VAR), Some(CHEST_NAME));
+
+    let (mut h, b, me, _) = wearer();
+    h.server
+        .effect_table
+        .lines
+        .insert(NAMED, (learned::LINE, NAMED_NAME.1));
+    let from = h.bots[b].inbox.len();
+    h.arm(b, me, CHEST);
+    let said = shown(&h, b, from);
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert_eq!(
+        (said[0].string_id, said[0].table),
+        (learned::LINE, NAMED_NAME.1),
+        "its own table's"
+    );
+    assert_eq!(var(&said[0], learned::GIVER_VAR), Some(CHEST_NAME));
 }
 
 /// A sword whose template names an effect when wielded: wielded, its record comes on before the
@@ -276,4 +333,69 @@ fn an_items_effects_stay_on_through_a_death_that_ends_a_buff_of_the_same_effect(
     let left = records(&h, world);
     assert_eq!(left.len(), 1, "the buff ended: {left:?}");
     assert_eq!((left[0].item, left[0].flags), (sword, WORN));
+}
+
+/// A weapon whose template names a quest's move for its wielder moves the quest as it is wielded,
+/// before the answer, and holds no record of it; at the phase it moved to, wielding it again moves
+/// nothing.
+/// Behaviour: server.equip.worn-effect-moves-a-quest
+#[test]
+fn a_weapon_naming_a_quests_move_moves_the_quest_as_it_is_wielded() {
+    use yalain_world::quests::{phase_of, update};
+    use yalain_world::state::QuestState;
+    const QUEST: u32 = 0x4000_7201;
+    const ADVANCES: u32 = 0x6F00_7204;
+    const BLADE: u32 = 0x4700_7203;
+    let (mut h, b, me, world) = wearer();
+    let mut q = super::kill_quests::quest(3);
+    q.id = QUEST;
+    h.server.quests.quests.push(q);
+    h.server.catalog.insert(yalain_testkit::test_template(
+        BLADE,
+        0x1067,
+        Props::default(),
+    ));
+    h.server
+        .catalog
+        .implements
+        .insert(BLADE, yalain_world::skill_use::implement::SWORD);
+    h.server.effect_table.effects.insert(
+        ADVANCES,
+        EffectDef {
+            kind: Kind::Quest {
+                quest: QUEST,
+                update: update::ADVANCE | 2,
+            },
+            duration: Scale::default(),
+            internal_flags: 0x4140_0512,
+            ..effect(ADVANCES, 0, None)
+        },
+    );
+    h.server.worn_effects.insert(
+        BLADE,
+        vec![UsageEffect {
+            state: ADVANCES,
+            spellcraft: 1.0,
+        }],
+    );
+    h.server
+        .players
+        .get_mut(&world)
+        .expect("in the world")
+        .play
+        .quests
+        .push(QuestState {
+            quest: QUEST,
+            status: yalain_world::quests::status::UNDERWAY,
+            phase: 1,
+            started: 1_000_000,
+            updated: 1_000_000,
+        });
+    let phase = |h: &Harness| phase_of(&h.server.players[&world].play.quests, QUEST);
+    let first = h.arm(b, me, BLADE);
+    assert_eq!(phase(&h), 2);
+    assert!(records(&h, world).iter().all(|e| e.item != first));
+    use_it(&mut h, b, me, first);
+    h.arm(b, me, BLADE);
+    assert_eq!(phase(&h), 2);
 }

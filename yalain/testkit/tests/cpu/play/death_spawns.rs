@@ -42,7 +42,7 @@ fn kill(h: &mut Harness, by: u64, effects: &[&str]) -> (u32, u64) {
     let template = t.template;
     let c = t.creature.as_mut().expect("a creature");
     c.stats.attacks_first = false;
-    c.stats.death_effects = effects.iter().map(ToString::to_string).collect();
+    c.stats.death_effects = effects.iter().map(|e| ((*e).to_string(), 1)).collect();
     let clock = h.clock();
     combat::hurt_creature(&mut h.server, &mut h.net, beetle, by, 50, clock);
     (template, beetle)
@@ -63,6 +63,7 @@ fn lasting(state: u32, kind: Kind) -> EffectDef {
         external_flags: 0,
         internal_flags: 0x1100_0003,
         ends_at_logout: false,
+        ends_at_teleport: false,
         enum_value: 0,
         eq_class: 4174,
         name: None,
@@ -148,6 +149,10 @@ fn a_death_spawn_stands_at_its_offset_from_the_killer_as_the_killer_faces() {
             chance: 1.0,
             offset: [0.0, -3.0],
             lasts: None,
+            kingdom: None,
+            at: None,
+            to: None,
+            name: None,
         },
     );
     // A quarter turn about the vertical.
@@ -176,6 +181,55 @@ fn a_death_spawn_stands_at_its_offset_from_the_killer_as_the_killer_faces() {
     }
 }
 
+/// A creature a death makes holds the effects the world's rows give its template from its first
+/// moment, as a camp's does.
+/// Behaviour: server.creatures.effects-from-the-first-moment
+#[test]
+fn a_creature_a_death_makes_holds_the_effects_its_rows_give_its_template() {
+    const HELD: u32 = 0x6F00_0124;
+    let (mut h, me) = world();
+    let helper = beetle_template(&h);
+    h.server
+        .effect_table
+        .effects
+        .insert(HELD, lasting(HELD, Kind::Other));
+    h.server
+        .creature_rows
+        .effects
+        .push(yalain_content::creature_rows::CreatureEffect {
+            templates: vec![helper],
+            effect: HELD,
+            spellcraft: vec![(0.0, 7.0)],
+        });
+    h.server.death_spawns.insert(
+        EFFECT.into(),
+        DeathSpawn {
+            template: helper,
+            count: 1,
+            chance: 1.0,
+            offset: [0.0, -3.0],
+            lasts: None,
+            kingdom: None,
+            at: None,
+            to: None,
+            name: None,
+        },
+    );
+    let before = living(&h);
+    kill(&mut h, me, &[EFFECT]);
+    let made: Vec<u64> = living(&h)
+        .into_iter()
+        .filter(|id| !before.contains(id))
+        .collect();
+    assert_eq!(made.len(), 1);
+    let held: Vec<(u32, f32)> =
+        yalain_world::effects::records_of(&h.server, yalain_world::effects::On::Creature(made[0]))
+            .iter()
+            .map(|e| (e.state, e.spellcraft))
+            .collect();
+    assert_eq!(held, [(HELD, 7.0)]);
+}
+
 /// The kill goes to who did the most damage, wherever it has gone since. What the death makes appears
 /// only if that one stands near the death: not beside whoever it now stands among, and not in other
 /// cells altogether. One at the edge of how near makes it.
@@ -192,6 +246,10 @@ fn a_killer_far_from_the_death_makes_nothing() {
             chance: 1.0,
             offset: [0.0, 2.0],
             lasts: None,
+            kingdom: None,
+            at: None,
+            to: None,
+            name: None,
         },
     );
     let beetle = *living(&h).last().expect("a beetle");
@@ -244,6 +302,10 @@ fn a_death_spawn_with_no_chance_makes_nothing() {
             chance: 0.0,
             offset: [0.0, 2.0],
             lasts: None,
+            kingdom: None,
+            at: None,
+            to: None,
+            name: None,
         },
     );
     let before = living(&h).len();
@@ -266,6 +328,10 @@ fn only_so_many_of_a_death_effects_creatures_live_at_once() {
             chance: 1.0,
             offset: [0.0, 2.0],
             lasts: None,
+            kingdom: None,
+            at: None,
+            to: None,
+            name: None,
         },
     );
     for _ in 0..yalain_world::death_spawn::MOST {
@@ -274,7 +340,7 @@ fn only_so_many_of_a_death_effects_creatures_live_at_once() {
         let beetle = *living(&h).first().expect("a beetle");
         let t = h.server.things.get_mut(beetle).expect("the beetle");
         t.health = 1;
-        t.creature.as_mut().expect("a creature").stats.death_effects = vec![EFFECT.into()];
+        t.creature.as_mut().expect("a creature").stats.death_effects = vec![(EFFECT.into(), 1)];
         t.creature.as_mut().expect("a creature").stats.attacks_first = false;
         let clock = h.clock();
         combat::hurt_creature(&mut h.server, &mut h.net, beetle, me, 50, clock);
@@ -291,6 +357,58 @@ fn only_so_many_of_a_death_effects_creatures_live_at_once() {
         .count();
     assert!(live <= yalain_world::death_spawn::MOST, "{live}");
     assert!(live >= yalain_world::death_spawn::MOST - 5, "{live}");
+}
+
+/// A death effect whose row makes a portal makes it at its offset from the killer, and the portals
+/// standing count toward how many of the effect's there may be, as creatures living do.
+/// Behaviour: server.creatures.death-spawns-limited
+#[test]
+fn a_death_effects_portals_standing_count_toward_its_limit() {
+    use yalain_content::{Prop, Props};
+    const PORTAL: u32 = 0x4700_9102;
+    let (mut h, me) = world();
+    let mut props = Props::default();
+    props.set("PortalDestination", Prop::Text("Somewhere".into()));
+    let template = yalain_testkit::test_template(PORTAL, 0xF12, props);
+    h.server.places_by_name.insert(
+        "somewhere".into(),
+        yalain_content::Place {
+            cell: 0x7000_0001,
+            origin: [10.0, 10.0, 50.0],
+            rotation: [1.0, 0.0, 0.0, 0.0],
+        },
+    );
+    h.server.death_spawns.insert(
+        EFFECT.into(),
+        DeathSpawn {
+            template: PORTAL,
+            count: 20,
+            chance: 1.0,
+            offset: [0.0, 2.0],
+            lasts: None,
+            kingdom: None,
+            at: None,
+            to: None,
+            name: None,
+        },
+    );
+    let standing = |h: &Harness| {
+        h.server
+            .things
+            .by_id
+            .values()
+            .filter(|t| t.template == PORTAL)
+            .count()
+    };
+    for _ in 0..2 {
+        // A world's creatures come with a catalog of their own.
+        h.add_creatures(1);
+        h.server.catalog.insert(template.clone());
+        h.run(1);
+        kill(&mut h, me, &[EFFECT]);
+        h.run(2);
+    }
+    assert_eq!(standing(&h), yalain_world::death_spawn::MOST);
 }
 
 /// An item whose use names such an effect makes what it makes at its offset from its user, as the
@@ -314,6 +432,10 @@ fn an_items_use_makes_what_its_effect_names_before_its_user() {
             chance: 1.0,
             offset: [0.0, 2.0],
             lasts: None,
+            kingdom: None,
+            at: None,
+            to: None,
+            name: None,
         },
     );
     let mut props = Props::default();
@@ -404,6 +526,10 @@ fn a_gem_whose_row_makes_what_cannot_be_made_is_refused_and_kept() {
             chance: 1.0,
             offset: [0.0, 2.0],
             lasts: None,
+            kingdom: None,
+            at: None,
+            to: None,
+            name: None,
         },
     );
     let mut props = Props::default();
@@ -485,6 +611,10 @@ fn gem(h: &mut Harness, lasts: Option<f32>) -> u64 {
             chance: 1.0,
             offset: [0.0, 2.0],
             lasts,
+            kingdom: None,
+            at: None,
+            to: None,
+            name: None,
         },
     );
     let mut props = Props::default();
@@ -593,4 +723,313 @@ fn a_gem_makes_its_dummy_however_many_stand() {
             .is_none_or(Vec::is_empty),
         "uses don't count against what kills may make"
     );
+}
+
+/// The portals standing in the world: each one's id, where it stands and where it leads.
+fn portals(h: &Harness) -> Vec<(u64, [f32; 3], Option<[f32; 3]>)> {
+    let mut v: Vec<_> = h
+        .server
+        .things
+        .by_id
+        .values()
+        .filter(|t| t.kind == yalain_world::things::Kind::Portal)
+        .map(|t| {
+            (
+                t.id,
+                t.at.map_or([0.0; 3], |a| a.origin),
+                t.destination.map(|d| d.origin),
+            )
+        })
+        .collect();
+    v.sort_unstable_by_key(|p| p.0);
+    v
+}
+
+/// The world with three beetles, a portal template that leads nowhere the world knows, and a
+/// player.
+fn portal_world() -> (Harness, u64, u32) {
+    use yalain_content::{Prop, Props};
+    const PORTAL: u32 = 0x4700_9201;
+    let mut h = Harness::new();
+    h.add_creatures(3);
+    let mut props = Props::default();
+    props
+        .set("PortalDestination", Prop::Text("Nowhere_Known".into()))
+        .set("PortalFlags", Prop::Word(0x1000_0000));
+    h.server
+        .catalog
+        .insert(yalain_testkit::test_template(PORTAL, 0xF12, props));
+    let (_, me) = h.player_in_world("one", "Kestrel");
+    h.run(20);
+    (h, me, PORTAL)
+}
+
+/// A row of a creature's own, at a place: the death of one of its kind, which names no death effect,
+/// stands the row's portal at the row's place, leading to the row's own place, for the row's time;
+/// a death while it stands makes no second one; once it is gone, the next death stands another.
+/// Behaviour: server.creatures.a-kill-opens-a-portal-for-a-while
+#[test]
+fn a_creatures_death_stands_its_rows_portal_at_its_place_for_its_time_one_at_a_time() {
+    let (mut h, me, portal) = portal_world();
+    let platform = yalain_content::Place {
+        cell: 0x0299_0109,
+        origin: [70.0, 230.0, -44.6],
+        rotation: [1.0, 0.0, 0.0, 0.0],
+    };
+    let below = yalain_content::Place {
+        cell: 0x7000_0001,
+        origin: [10.0, 10.0, 50.0],
+        rotation: [1.0, 0.0, 0.0, 0.0],
+    };
+    let template = beetle_template(&h);
+    h.server.death_spawns.insert(
+        DeathSpawn::of_creature(template),
+        DeathSpawn {
+            template: portal,
+            count: 1,
+            chance: 1.0,
+            offset: [0.0, 0.0],
+            lasts: Some(60.0),
+            kingdom: None,
+            at: Some(platform),
+            to: Some(below),
+            name: None,
+        },
+    );
+    assert!(portals(&h).is_empty());
+    kill(&mut h, me, &[]);
+    let stood = portals(&h);
+    assert_eq!(stood.len(), 1, "{stood:?}");
+    assert_eq!(stood[0].1, platform.origin, "at its place");
+    assert_eq!(stood[0].2, Some(below.origin), "leading to its own place");
+    kill(&mut h, me, &[]);
+    assert_eq!(portals(&h), stood, "one at a time");
+    let t = h.now.0;
+    while h.now.0 < t + 61.0 {
+        h.step();
+    }
+    assert!(portals(&h).is_empty(), "gone after its time");
+    kill(&mut h, me, &[]);
+    assert_eq!(portals(&h).len(), 1, "the next death stands another");
+}
+
+/// A row of a creature's own with no place stands what it makes at its offset from where the
+/// creature died, as it faced, wherever its killer stands.
+/// Behaviour: server.creatures.a-kill-opens-a-portal-for-a-while
+#[test]
+fn a_creatures_own_row_without_a_place_makes_its_creatures_where_it_died_wherever_its_killer_is() {
+    let (mut h, me) = world();
+    h.add_creatures(1);
+    let helper = beetle_template(&h);
+    h.server.death_spawns.insert(
+        DeathSpawn::of_creature(helper),
+        DeathSpawn {
+            template: helper,
+            count: 1,
+            chance: 1.0,
+            offset: [0.0, 2.0],
+            lasts: None,
+            kingdom: None,
+            at: None,
+            to: None,
+            name: None,
+        },
+    );
+    let beetle = *living(&h).last().expect("a beetle");
+    let died = {
+        let t = h.server.things.get_mut(beetle).expect("the beetle");
+        let at = t.at.as_mut().expect("placed");
+        at.rotation = [1.0, 0.0, 0.0, 0.0];
+        *at
+    };
+    // The killer far off, in another landblock.
+    for p in h.server.players.values_mut() {
+        p.position.cell = 0x7000_0001;
+    }
+    let before = living(&h);
+    kill(&mut h, me, &[]);
+    let made: Vec<u64> = living(&h)
+        .into_iter()
+        .filter(|id| !before.contains(id))
+        .collect();
+    assert_eq!(made.len(), 1, "made though its killer is far");
+    let got = h
+        .server
+        .things
+        .get(made[0])
+        .and_then(|t| t.at)
+        .expect("placed");
+    assert!(
+        (got.origin[0] - died.origin[0]).abs() < 0.01
+            && (got.origin[1] - (died.origin[1] + 2.0)).abs() < 0.01,
+        "{got:?} from {died:?}"
+    );
+}
+
+/// A creature's row whose portal template requires a kingdom, and that names none itself, stands a
+/// portal for that kingdom alone.
+/// Behaviour: server.places.a-made-portal-keeps-its-templates-kingdom
+#[test]
+fn a_creatures_death_portal_is_for_the_kingdom_its_template_requires() {
+    let (mut h, me, portal) = portal_world();
+    let mut t = h.server.catalog.get(portal).cloned().expect("the portal");
+    t.props
+        .set("Usage_RequiredFaction", yalain_content::Prop::Word(4));
+    h.server.catalog.insert(t);
+    let template = beetle_template(&h);
+    h.server.death_spawns.insert(
+        DeathSpawn::of_creature(template),
+        DeathSpawn {
+            template: portal,
+            count: 1,
+            chance: 1.0,
+            offset: [0.0, 0.0],
+            lasts: Some(60.0),
+            kingdom: None,
+            at: None,
+            to: Some(yalain_content::Place {
+                cell: 0x7000_0001,
+                origin: [10.0, 10.0, 50.0],
+                rotation: [1.0, 0.0, 0.0, 0.0],
+            }),
+            name: None,
+        },
+    );
+    kill(&mut h, me, &[]);
+    let kingdoms: Vec<Option<u32>> = h
+        .server
+        .things
+        .by_id
+        .values()
+        .filter(|t| t.kind == yalain_world::things::Kind::Portal)
+        .map(|t| t.facts.kingdom)
+        .collect();
+    assert_eq!(kingdoms, [Some(4)], "the template's kingdom");
+}
+
+/// The name a client is told an object by as it is made, if its create names one.
+fn told_name(
+    h: &Harness,
+    b: usize,
+    from: usize,
+    id: u64,
+) -> Option<auberean_protocol::text::StringInfo> {
+    use auberean_protocol::types::WeenieDesc;
+    h.world_messages(b, from).into_iter().find_map(|m| match m {
+        auberean_protocol::ServerMessage::CreateObject(o)
+            if o.id == id && o.weenie.mask & WeenieDesc::NAME != 0 =>
+        {
+            Some(o.weenie.name)
+        }
+        _ => None,
+    })
+}
+
+/// A creature's row that names what it makes: its portal is told to the killer's client by the
+/// row's name, a string reference, in place of its template's, and examined by it; a row naming it
+/// in new prose has it told and examined by that text; a row naming nothing leaves its template's.
+/// Behaviour: server.places.a-made-thing-takes-its-rows-name
+#[test]
+fn a_portal_a_row_makes_is_told_and_examined_by_the_rows_name() {
+    use yalain_content::Words;
+    const ROWS_NAME: (u32, u32) = (0x1B6D_27C1, 0x2500_1B44);
+    let template_name = (0x1111_2222, 0x2500_1E91);
+    for name in [
+        Some(Words::Ref(ROWS_NAME.0, ROWS_NAME.1)),
+        Some(Words::Literal("Way Below".into())),
+        None,
+    ] {
+        let (mut h, me, portal) = portal_world();
+        let mut named = h.server.catalog.get(portal).cloned().expect("its template");
+        named.description.name = Some(template_name);
+        named.facts.name = Some(template_name);
+        h.server.catalog.insert(named);
+        let template = beetle_template(&h);
+        h.server.death_spawns.insert(
+            DeathSpawn::of_creature(template),
+            DeathSpawn {
+                template: portal,
+                count: 1,
+                chance: 1.0,
+                offset: [0.0, 2.0],
+                lasts: None,
+                kingdom: None,
+                at: None,
+                to: Some(yalain_content::Place {
+                    cell: 0x7000_0001,
+                    origin: [10.0, 10.0, 50.0],
+                    rotation: [1.0, 0.0, 0.0, 0.0],
+                }),
+                name: name.clone(),
+            },
+        );
+        let from = h.bots[0].inbox.len();
+        kill(&mut h, me, &[]);
+        h.run(5);
+        let made = portals(&h);
+        assert_eq!(made.len(), 1, "{name:?}");
+        let told = told_name(&h, 0, from, made[0].0).expect("told with a name");
+        let examined = examined(&mut h, made[0].0);
+        let facts = h.server.things.get(made[0].0).expect("standing").facts;
+        // The profile of an object of that name: the request repeated, then its lines.
+        let of_name = |n| {
+            let name = yalain_world::profile::item_named(n);
+            yalain_world::profile::npc(0, name, &facts).packed(&[])
+        };
+        let want = match &name {
+            Some(Words::Ref(s, t)) => {
+                assert_eq!((told.string_id, told.table_id), (*s, *t));
+                assert_eq!(told.literal, None);
+                yalain_world::profile::string(*t, *s)
+            }
+            Some(Words::Literal(text)) => {
+                let shown: Vec<u16> = text.encode_utf16().collect();
+                assert_eq!(told.literal.map(|l| l.0), Some(shown));
+                yalain_world::profile::literal(text)
+            }
+            None => {
+                assert_eq!((told.string_id, told.table_id), template_name);
+                yalain_world::profile::string(template_name.1, template_name.0)
+            }
+        };
+        assert!(examined.ends_with(&of_name(want)), "examined: {name:?}");
+    }
+}
+
+/// What a client's examination of an object says: its profile's bytes.
+fn examined(h: &mut Harness, object: u64) -> Vec<u8> {
+    use auberean_script::native_object::NativeObject;
+    use yalain_world::calls::{self, Node};
+    let mut bytes = Vec::new();
+    for w in [0x4000_0002u32, 0] {
+        bytes.extend(w.to_le_bytes());
+    }
+    bytes.extend(object.to_le_bytes());
+    bytes.extend(0x3FFu32.to_le_bytes());
+    let mut b = yalain_world::graph::Builder::new();
+    b.native(154, NativeObject::Packed { ty: 154, bytes });
+    let about = auberean_script::args::Arg::Object(b.graph());
+    let from = h.bots[0].inbox.len();
+    h.bots[0].send(
+        true,
+        auberean_protocol::queue::WEENIE,
+        &yalain_testkit::play::server_call(yalain_world::requests::function::EXAMINE, &[about]),
+    );
+    h.run(30);
+    h.world_messages(0, from)
+        .into_iter()
+        .filter_map(|m| match m {
+            auberean_protocol::ServerMessage::PlayerCall(c)
+                if c.function.0 == yalain_world::profile::EXAMINATION_PROFILE =>
+            {
+                let v = calls::values(&c.args?.0).ok()?;
+                match v[0].root() {
+                    Some(Node::Native { ty: 153, bytes }) => Some(bytes.clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .concat()
 }

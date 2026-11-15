@@ -204,10 +204,17 @@ pub(crate) struct Shadow {
     blocks: HashMap<u16, u32>,
     // ORDER-OK: as above.
     levels: HashMap<u16, u64>,
-    // ORDER-OK: as above. Each block's contents but its ground, as one number.
-    contents: HashMap<u16, u64>,
+    // ORDER-OK: as above. The choice of levels each block held when its levels were last read
+    // ([`super::BlockDraw::levels_serial`]): they are read again only once it holds another.
+    level_serials: HashMap<u16, u64>,
+    // ORDER-OK: as above. Each block as it was last sent, its build's number aside.
+    contents: HashMap<u16, rm::Block>,
     // ORDER-OK: as above. What each block's scenery was lifted by, as one number (0 for none).
     shifts: HashMap<u16, u64>,
+    // ORDER-OK: as above. The ground cover each block last grew, and what it grew from.
+    covers: HashMap<u16, Cover>,
+    /// A block's ground cover grew whole on the last frame, and is sent on this one.
+    cover_whole: bool,
     /// The world's vertices last sent, and their serial.
     drawn_world: Option<(u64, std::sync::Arc<rm::DrawnWorld>)>,
     /// The far forest last sent: the pack's far pictures, the trees within reach, and the cover.
@@ -218,6 +225,9 @@ pub(crate) struct Shadow {
     objects: HashMap<rm::ObjectKey, u64>,
     // ORDER-OK: as above.
     previous: HashMap<rm::ObjectKey, Vec<glam::Mat4>>,
+    // ORDER-OK: as above. The near ground's offset under each animated static, kept with what it
+    // was worked out from ([`super::remaster_ground::RemasterGround::still_shift_at`]).
+    host_nears: HashMap<rm::ObjectKey, (u64, u32, f32)>,
     previous_view_projection: Option<glam::Mat4>,
     origin: Option<[i32; 2]>,
     serial: u64,
@@ -225,17 +235,109 @@ pub(crate) struct Shadow {
     pub(super) now: f64,
 }
 
-/// Everything a block holds but its ground and its build's number, as one number: a block built
-/// again with the same number changed only its ground.
-fn contents_of(b: &rm::Block) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    format!(
-        "{:?}",
-        (&b.placements, &b.degrades, &b.rooms, &b.lights, &b.lamps)
-    )
-    .hash(&mut h);
-    h.finish()
+/// About the most ground cover grown in one frame, placements, while the landscape streams within
+/// a budget: a block's cover is thousands, each lifted onto the drawn ground, so a block's is grown
+/// a row of cells at a time over a few frames, and the block is sent once it is whole.
+const COVER_A_FRAME: usize = 2500;
+
+/// What ground cover a frame may still grow, while the landscape streams within a budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CoverBudget {
+    /// Placements still to grow this frame.
+    left: usize,
+    /// A block's cover grew whole this frame: it is sent on the next, which grows none, so the
+    /// frame that sends a block whose cover grew over frames does not grow cover as well.
+    whole: bool,
+}
+
+impl CoverBudget {
+    /// A frame's budget: none the frame after a cover grew whole, when that block is sent.
+    fn after(whole: bool) -> Self {
+        Self {
+            left: if whole { 0 } else { COVER_A_FRAME },
+            whole: false,
+        }
+    }
+}
+
+/// What a block's ground cover grows from: its full-detail ground, its terrain, its buildings,
+/// the covers and what they are lifted by. A block built again from the same grows the same.
+#[derive(Debug, Clone, PartialEq)]
+struct CoverInputs {
+    vertices: Vec<Vec3>,
+    cuts: Vec<bool>,
+    water: Vec<dereth_terrain::land::water::WaterType>,
+    words: [u16; 81],
+    buildings: Vec<glam::Vec3>,
+    covers: Vec<dereth_assets::art_pack::ManifestCover>,
+    lifts: u64,
+    knobs: dereth_terrain::land::drawn::Knobs,
+}
+
+/// The ground cover a block grew, and what it grew from: whole once every row is grown.
+#[derive(Debug, Clone)]
+pub(crate) struct Cover {
+    inputs: CoverInputs,
+    placements: Vec<rm::Placement>,
+    /// The rows grown so far (see [`super::remaster_cover::cover_rows`]).
+    rows: usize,
+}
+
+impl Cover {
+    /// The cover `inputs` grow in `rows` rows, `grow` growing one onto what is grown: what
+    /// `entry` holds when it grew from the same, or grown a row at a time while `allowance`
+    /// lasts, at least a row (or all of it at once with none). `None` until it is whole, and
+    /// within an allowance on the frame it grows whole too, which the allowance then counts
+    /// ([`CoverBudget::whole`]); what is grown is kept for the next frame.
+    fn grow<'a>(
+        entry: std::collections::hash_map::Entry<'a, u16, Cover>,
+        inputs: CoverInputs,
+        rows: usize,
+        mut allowance: Option<&mut CoverBudget>,
+        mut grow: impl FnMut(&CoverInputs, usize, &mut Vec<rm::Placement>),
+    ) -> Option<&'a [rm::Placement]> {
+        // Grown again only from something new: a block is built again far more often than what
+        // its cover grows from changes (its light, its neighbors' detail).
+        let c = entry.or_insert_with(|| Cover {
+            inputs: inputs.clone(),
+            placements: Vec::new(),
+            rows: 0,
+        });
+        if c.inputs != inputs {
+            *c = Cover {
+                inputs,
+                placements: Vec::new(),
+                rows: 0,
+            };
+        }
+        let grown = c.rows < rows;
+        while c.rows < rows {
+            if allowance.as_deref().is_some_and(|b| b.left == 0) {
+                return None;
+            }
+            let before = c.placements.len();
+            grow(&c.inputs, c.rows, &mut c.placements);
+            c.rows += 1;
+            if let Some(b) = allowance.as_deref_mut() {
+                b.left = b.left.saturating_sub((c.placements.len() - before).max(1));
+            }
+        }
+        if let Some(b) = allowance.filter(|_| grown) {
+            b.whole = true;
+            return None;
+        }
+        Some(&c.placements)
+    }
+}
+
+/// Whether `b` holds what `last` did, its ground and its build's number aside: a block built
+/// again that does changed only its ground, if that.
+fn same_contents(last: &rm::Block, b: &rm::Block) -> bool {
+    last.placements == b.placements
+        && last.degrades == b.degrades
+        && last.rooms == b.rooms
+        && last.lights == b.lights
+        && last.lamps == b.lamps
 }
 
 /// What an object is built from, as one number: the setup, the appearance its meshes are shared
@@ -278,7 +380,7 @@ fn build_of(
     h
 }
 
-fn mat(f: &Frame) -> glam::Mat4 {
+pub(super) fn mat(f: &Frame) -> glam::Mat4 {
     frame_matrix(f)
 }
 
@@ -311,7 +413,7 @@ fn light_indices(
     (lights, count)
 }
 
-fn v3(v: Vec3) -> glam::Vec3 {
+pub(super) fn v3(v: Vec3) -> glam::Vec3 {
     glam::Vec3::new(v.x, v.y, v.z)
 }
 
@@ -417,7 +519,12 @@ fn block_delta(
     mesh: &dereth_terrain::land::mesh::LandblockMesh,
     ground: &super::remaster_ground::RemasterGround,
     store: Option<&RetailDatStore>,
-) -> rm::Block {
+    (covers, allowance): (
+        &[dereth_assets::art_pack::ManifestCover],
+        Option<&mut CoverBudget>,
+    ),
+    cache: &mut HashMap<u16, Cover>,
+) -> Option<rm::Block> {
     let own = u32::try_from(block.degrade.len()).unwrap_or(u32::MAX);
     let mut first = own;
     let rooms = block
@@ -475,7 +582,61 @@ fn block_delta(
         })
         .collect();
     let lamps = store.map_or_else(Vec::new, |store| block_lamps(store, at, block, ground));
-    rm::Block {
+    let mut placements: Vec<rm::Placement> = block
+        .remaster_placements
+        .iter()
+        .map(|p| {
+            let mut placed = placement(p, 0);
+            // LINT-OK: block coordinates, far inside f32's exact range.
+            #[allow(clippy::cast_precision_loss)]
+            let (x, y) = (
+                at.0 as f32 * dereth_terrain::land::drawn::BLOCK_METERS + p.frame.origin.x,
+                at.1 as f32 * dereth_terrain::land::drawn::BLOCK_METERS + p.frame.origin.y,
+            );
+            placed.lifts = ground.lifts(x, y, p.frame.origin.z);
+            placed
+        })
+        .collect();
+    // The pack's ground cover, on full-detail ground.
+    if let (false, Some(cover_ground)) = (covers.is_empty(), super::remaster_cover::ground_of(mesh))
+    {
+        let buildings: Vec<glam::Vec3> = placements
+            .iter()
+            .filter(|p| p.kind == rm::PlacementKind::Building)
+            .map(|p| p.frame.w_axis.truncate())
+            .collect();
+        let inputs = CoverInputs {
+            vertices: mesh.vertices.clone(),
+            cuts: mesh.sw_to_ne_cut.clone(),
+            water: mesh.cell_water.clone(),
+            words: block.terrain,
+            buildings,
+            covers: covers.to_vec(),
+            lifts: ground.lifts_key(at),
+            knobs: ground.knobs().clone(),
+        };
+        let rows = super::remaster_cover::cover_rows(covers);
+        let grown = Cover::grow(
+            cache.entry(id),
+            inputs,
+            rows,
+            allowance,
+            |inputs, row, out| {
+                super::remaster_cover::grow_row(
+                    at,
+                    &cover_ground,
+                    &block.terrain,
+                    covers,
+                    &inputs.buildings,
+                    &|x, y, z| ground.lifts(x, y, z),
+                    row,
+                    out,
+                );
+            },
+        )?;
+        placements.extend_from_slice(grown);
+    }
+    let b = rm::Block {
         block: id,
         generation: block.remaster_generation,
         terrain: rm::Terrain {
@@ -484,26 +645,13 @@ fn block_delta(
             cuts: mesh.sw_to_ne_cut.clone(),
             words: block.terrain,
         },
-        placements: block
-            .remaster_placements
-            .iter()
-            .map(|p| {
-                let mut placed = placement(p, 0);
-                // LINT-OK: block coordinates, far inside f32's exact range.
-                #[allow(clippy::cast_precision_loss)]
-                let (x, y) = (
-                    at.0 as f32 * dereth_terrain::land::drawn::BLOCK_METERS + p.frame.origin.x,
-                    at.1 as f32 * dereth_terrain::land::drawn::BLOCK_METERS + p.frame.origin.y,
-                );
-                placed.lifts = ground.lifts(x, y, p.frame.origin.z);
-                placed
-            })
-            .collect(),
+        placements,
         degrades: block_degrades(block).map(degrade).collect(),
         rooms,
         lights,
         lamps,
-    }
+    };
+    Some(b)
 }
 
 /// The lamps of `block`'s outdoor placements, block-local, each as high as its placement is drawn:
@@ -611,6 +759,10 @@ struct Moving {
     object: Option<rm::Object>,
     parts: Vec<Posed>,
     cell: u32,
+    /// What holds it, and the holder's part it hangs on.
+    held_by: Option<(rm::ObjectKey, u16)>,
+    /// The animation its parts are playing.
+    motion: Option<rm::Motion>,
 }
 
 /// What `meshes` draws at each level of each part, with the looks of `parts`.
@@ -644,24 +796,93 @@ fn object_parts(
         .collect()
 }
 
-/// The object `key` on `setup`, built as `build`, its parts' meshes `meshes`, posed from the part
-/// array `parts` with each part's level and draw frame from `levels` and `draw_pos`, standing in
-/// `cell` and in the world when `drawn`, drawn `lift` meters above where it stands; the object
-/// itself is made only when `sent` has another build.
+/// How fast, and which way, the cycle `seq` repeats asks to carry its object, in the object's own
+/// space before its scale, meters a second ([`rm::Motion::velocity`]): the ground each of its
+/// animation's frames moves the object on, at the rate it plays them, with the motion's own
+/// steady speed. It is what the object would cover were nothing in its way: a creature pressed
+/// against a crowd still asks it.
+pub(super) fn cycle_velocity(seq: &dereth_animation::seq::Sequence) -> glam::Vec3 {
+    seq.first_cyclic()
+        .map_or_else(|| v3(seq.velocity), |c| node_velocity(seq, c, None))
+}
+
+/// How fast, and which way, the node `node` of `seq` carries its object, as [`cycle_velocity`]
+/// reads a cycle's: over all its frames, or at the frame `at` alone (a link whose steps carry the
+/// object on a stopping stride, then stand).
+pub(super) fn node_velocity(
+    seq: &dereth_animation::seq::Sequence,
+    node: usize,
+    at: Option<f64>,
+) -> glam::Vec3 {
+    let steady = v3(seq.velocity);
+    let Some(node) = seq.nodes().get(node) else {
+        return steady;
+    };
+    let Some(steps) = node.anim.pos_frames.as_ref() else {
+        return steady;
+    };
+    let (low, high) = match at {
+        Some(f) => {
+            let f = dereth_primitives::num::to_i32_f64(f.floor())
+                .clamp(node.low_frame, node.high_frame.max(node.low_frame));
+            (f, f)
+        }
+        None => (node.low_frame, node.high_frame),
+    };
+    let frames = || (low..=high).filter_map(|i| steps.get(usize::try_from(i).ok()?));
+    let count = frames().count();
+    if count == 0 {
+        return steady;
+    }
+    let sum = frames().fold(glam::Vec3::ZERO, |a, f| a + v3(f.origin));
+    #[allow(clippy::cast_precision_loss)] // an animation's frames
+    let each = sum / count as f32;
+    steady + each * node.framerate
+}
+
+/// The node of `seq` and the frame of it, keyframes and the share of one between them, a body
+/// whose parts are placed `ahead` seconds on is drawn at, as its parts are drawn: between the
+/// keyframes, while they are drawn between them; at the keyframe the parts stand at, with `None`.
+/// `None` with no animation.
+pub(super) fn drawn_at(
+    seq: &dereth_animation::seq::Sequence,
+    ahead: Option<f64>,
+) -> Option<(usize, f64)> {
+    let curr = seq.curr()?;
+    let Some(ahead) = ahead else {
+        return Some((curr, seq.frame_number().floor()));
+    };
+    let b = seq.between(ahead)?;
+    // Toward the next keyframe in the node, or past its last toward the next node's first.
+    let step = if b.to.0 == b.from.0 {
+        f64::from(b.to.1 - b.from.1)
+    } else {
+        f64::from(seq.nodes().get(b.from.0)?.framerate.signum())
+    };
+    Some((b.from.0, f64::from(b.from.1) + step * f64::from(b.share)))
+}
+
+/// The object `key` on `setup`, built as `build`, laying the palettes `palettes`, its parts'
+/// meshes `meshes`, posed from `driver`'s parts with each part's level and draw frame from
+/// `levels` and `draw_pos`, standing in `cell` and in the world when `drawn`, drawn `lift` meters
+/// above where it stands; the object itself is made only when `sent` has another build.
 #[allow(clippy::too_many_arguments)] // one parameter per input the reading takes
 fn read_moving(
-    (key, setup, build): (rm::ObjectKey, u32, u64),
+    (key, setup, build, palettes, who): (rm::ObjectKey, u32, u64, Vec<u32>, rm::Who),
     sent: &HashMap<rm::ObjectKey, u64>,
     meshes: &[PartLevels],
-    parts: &[dereth_animation::parts::PhysicsPart],
+    driver: &dereth_animation::driver::MotionDriver,
     (levels, draw_pos): (&[u32], &[Frame]),
     cell: u32,
     (drawn, lift): (bool, f32),
 ) -> Moving {
+    let parts = &driver.part_array.parts[..];
     let object = (sent.get(&key) != Some(&build)).then(|| rm::Object {
         key,
         setup,
         parts: object_parts(meshes, parts),
+        palettes,
+        who,
     });
     let posed = (0..meshes.len())
         .map(|i| {
@@ -688,46 +909,97 @@ fn read_moving(
         object,
         parts: posed,
         cell,
+        held_by: None,
+        motion: super::remaster_slots::motion_of(driver, lift),
     }
 }
 
 /// Every moving object of the scene, in the scene's order: the server's, then the body, then each
 /// block's animated statics; `sent` is what the receiver was last sent of them. What stands
-/// outdoors is drawn on the remaster's ground.
-fn moving(draw: &SceneDraw, ws: &WorldState, sent: &HashMap<rm::ObjectKey, u64>) -> Vec<Moving> {
+/// outdoors is drawn on the remaster's ground: an animated static on the ground under it as
+/// `nears` keeps it, by its key.
+fn moving(
+    draw: &SceneDraw,
+    ws: &WorldState,
+    sent: &HashMap<rm::ObjectKey, u64>,
+    nears: &mut HashMap<rm::ObjectKey, (u64, u32, f32)>,
+) -> Vec<Moving> {
     use dereth_physics::landdefs::is_outdoors;
-    let lift = |outdoors: bool, at: Vec3| {
-        if outdoors {
-            draw.remaster_ground.shift_at(at)
-        } else {
-            0.0
-        }
-    };
     let mut out = Vec::new();
+    // What holds each held thing: the holder (the body when it is the player), and the holder's
+    // part its holding location hangs on.
+    let mut held_by: HashMap<dereth_primitives::ObjectId, (rm::ObjectKey, u16)> = HashMap::new();
+    // The body is the player's: the id the server named it by.
+    let player = ws
+        .character
+        .as_ref()
+        .map(|c| ws.player_object_id().unwrap_or(c.object_id()));
+    for (id, o) in &ws.objects {
+        let Some((holder, location)) = o.sim.parent else {
+            continue;
+        };
+        let entry = if player == Some(holder) {
+            ws.character.as_ref().and_then(|c| {
+                c.driver()
+                    .part_array
+                    .setup
+                    .as_ref()
+                    .and_then(|s| s.holding_locations.get(&location).map(|l| l.part_id))
+            })
+        } else {
+            ws.objects.get(&holder).and_then(|h| {
+                h.sim
+                    .driver
+                    .borrow()
+                    .part_array
+                    .setup
+                    .as_ref()
+                    .and_then(|s| s.holding_locations.get(&location).map(|l| l.part_id))
+            })
+        };
+        if let Some(part) = entry.and_then(|p| u16::try_from(p).ok()) {
+            let key = if player == Some(holder) {
+                rm::ObjectKey::Body
+            } else {
+                rm::ObjectKey::Server(holder.0)
+            };
+            held_by.insert(*id, (key, part));
+        }
+    }
     for (id, d) in &draw.object_draws {
         let Some(o) = ws.objects.get(id) else {
             continue;
         };
         let driver = o.sim.driver.borrow();
+        let who = rm::Who {
+            weenie: o.weenie,
+            launcher: o.held_launcher,
+        };
         out.push(read_moving(
             (
                 rm::ObjectKey::Server(id.0),
                 d.setup.0,
-                build_of(d.setup, d.appearance.as_ref(), &d.meshes, 0),
+                // Who it is decides whether a pack draws its body for it: a change sends it again.
+                build_of(d.setup, d.appearance.as_ref(), &d.meshes, 0)
+                    ^ u64::from(who.launcher) << 63,
+                driver
+                    .part_array
+                    .described_palettes
+                    .iter()
+                    .map(|p| p.0)
+                    .collect(),
+                who,
             ),
             sent,
             &d.meshes,
-            &driver.part_array.parts,
+            &driver,
             (&d.part_levels, &d.part_draw_pos),
             ws.object_draw_cell(o).map_or(0, |c| c.0),
-            (
-                o.drawn,
-                lift(
-                    ws.object_draw_cell(o).is_some_and(is_outdoors),
-                    o.frame.origin,
-                ),
-            ),
+            (o.drawn, draw.remaster_ground.object_lift(ws, o)),
         ));
+        if let Some(m) = out.last_mut() {
+            m.held_by = held_by.get(id).copied();
+        }
     }
     if let Some(c) = ws.character.as_ref() {
         if !draw.character_parts.is_empty() {
@@ -742,20 +1014,28 @@ fn moving(draw: &SceneDraw, ws: &WorldState, sent: &HashMap<rm::ObjectKey, u64>)
                         &draw.character_parts,
                         draw.remaster_body_generation,
                     ),
+                    driver
+                        .part_array
+                        .described_palettes
+                        .iter()
+                        .map(|p| p.0)
+                        .collect(),
+                    rm::Who::default(),
                 ),
                 sent,
                 &draw.character_parts,
-                &driver.part_array.parts,
+                &driver,
                 (&draw.character_part_levels, &draw.character_part_draw_pos),
                 c.position().cell.0,
-                (
-                    true,
-                    lift(is_outdoors(c.position().cell), c.render_frame().origin),
-                ),
+                (true, draw.remaster_ground.body_lift(c)),
             ));
         }
     }
-    for block in draw.blocks.values() {
+    let live_hosts = draw.live_hosts(ws);
+    for (key, block) in &draw.blocks {
+        if !live_hosts.live(*key) {
+            continue;
+        }
         for h in &block.hosts {
             let Some(meshes) = h.meshes.as_deref() else {
                 continue;
@@ -764,29 +1044,44 @@ fn moving(draw: &SceneDraw, ws: &WorldState, sent: &HashMap<rm::ObjectKey, u64>)
                 .emitters
                 .get(h.placement)
                 .map_or(DataId(0), |e| e.setup);
+            let key = animated(h.cell.0, h.placement);
+            // The host stands in the world's own coordinates, and stays where it stands: the
+            // ground under it is worked out once and kept.
+            let at = Vec3::new(
+                h.frame.origin.x - draw.remaster_ground.global.0,
+                h.frame.origin.y - draw.remaster_ground.global.1,
+                h.frame.origin.z,
+            );
+            let lift = if is_outdoors(h.cell) {
+                let near = draw.remaster_ground.near_key(at);
+                let mut kept = nears.get(&key).copied();
+                let lift = draw.remaster_ground.still_shift_at(at, near, &mut kept);
+                if let Some(k) = kept {
+                    nears.insert(key, k);
+                }
+                lift
+            } else {
+                0.0
+            };
             out.push(read_moving(
                 (
-                    animated(h.cell.0, h.placement),
+                    key,
                     setup.0,
                     build_of(setup, None, meshes, block.remaster_generation),
+                    h.driver
+                        .part_array
+                        .described_palettes
+                        .iter()
+                        .map(|p| p.0)
+                        .collect(),
+                    rm::Who::default(),
                 ),
                 sent,
                 meshes,
-                &h.driver.part_array.parts,
+                &h.driver,
                 (&h.part_levels, &h.part_draw_pos),
                 h.cell.0,
-                (
-                    true,
-                    // The host stands in the world's own coordinates.
-                    lift(
-                        is_outdoors(h.cell),
-                        Vec3::new(
-                            h.frame.origin.x - draw.remaster_ground.global.0,
-                            h.frame.origin.y - draw.remaster_ground.global.1,
-                            h.frame.origin.z,
-                        ),
-                    ),
-                ),
+                (true, lift),
             ));
         }
     }
@@ -928,6 +1223,22 @@ pub(super) fn publish(draw: &SceneDraw, bridge: &mut Bridge, ws: &WorldState, si
     }
 
     // --- the blocks -----------------------------------------------------------------------
+    // The pack's ground cover whose kind is switched on.
+    let covers: Vec<dereth_assets::art_pack::ManifestCover> = {
+        let view = draw.remaster_view.borrow();
+        view.pack
+            .as_ref()
+            .map(|p| {
+                p.pack()
+                    .covers
+                    .iter()
+                    .filter(|c| p.model(c.id.0, view.packs).is_some())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut cover_budget = CoverBudget::after(sh.cover_whole);
     let mid = window.mid_width();
     let mut resident: Vec<u16> = Vec::new();
     for xi in 0..mid {
@@ -949,21 +1260,48 @@ pub(super) fn publish(draw: &SceneDraw, bridge: &mut Bridge, ws: &WorldState, si
             resident.push(id);
             let sent = sh.blocks.get(&id).copied();
             let at = (slot.block_x, slot.block_y);
-            let lifts_key = draw.remaster_ground.lifts_key(at);
+            // Ground cover grows on the viewer's block and those round it alone: a block is sent
+            // again as it comes into that ring or leaves it.
+            let near = (at.0 - origin[0]).abs() <= 1 && (at.1 - origin[1]).abs() <= 1;
+            let lifts_key = draw.remaster_ground.lifts_key(at)
+                ^ if near && !covers.is_empty() {
+                    0x00C0_7E20_0000_0000
+                } else {
+                    0
+                };
             if sent != Some(block.remaster_generation)
                 || sh.shifts.get(&id).copied().unwrap_or(0) != lifts_key
             {
-                sh.shifts.insert(id, lifts_key);
-                let b = Box::new(block_delta(
+                // A block coming in grows its cover at once. While the landscape streams within a
+                // budget, one sent before grows its cover a share a frame, and is drawn as it
+                // was until the cover is whole.
+                let bounded = sent.is_some() && draw.cfg.stream_budget.is_some();
+                let Some(b) = block_delta(
                     (id, at),
                     block,
                     mesh,
                     &draw.remaster_ground,
                     draw.remaster_view.borrow().store.as_ref(),
-                ));
-                let contents = contents_of(&b);
-                let same = sent.is_some() && sh.contents.get(&id) == Some(&contents);
-                if same {
+                    (
+                        if near { &covers } else { &[] },
+                        bounded.then_some(&mut cover_budget),
+                    ),
+                    &mut sh.covers,
+                ) else {
+                    continue;
+                };
+                let b = Box::new(b);
+                sh.shifts.insert(id, lifts_key);
+                let last = sent.and_then(|_| sh.contents.get_mut(&id));
+                let same = last.as_deref().is_some_and(|l| same_contents(l, &b));
+                let unchanged = same && last.as_deref().is_some_and(|l| l.terrain == b.terrain);
+                if unchanged {
+                    // Built again with nothing the remaster draws changed (its lighting, say):
+                    // nothing is sent.
+                } else if same {
+                    if let Some(l) = last {
+                        l.terrain = b.terrain.clone();
+                    }
                     // Built again for its ground alone (its level of detail or its stitching):
                     // the parts the remaster holds stay, and so do their levels.
                     deltas.push(rm::SceneDelta::GroundChanged(Box::new(rm::GroundDelta {
@@ -972,6 +1310,7 @@ pub(super) fn publish(draw: &SceneDraw, bridge: &mut Bridge, ws: &WorldState, si
                         terrain: b.terrain,
                     })));
                 } else {
+                    sh.contents.insert(id, (*b).clone());
                     deltas.push(if sent.is_some() {
                         rm::SceneDelta::BlockChanged(b)
                     } else {
@@ -980,14 +1319,19 @@ pub(super) fn publish(draw: &SceneDraw, bridge: &mut Bridge, ws: &WorldState, si
                     sh.levels.remove(&id);
                 }
                 sh.blocks.insert(id, block.remaster_generation);
-                sh.contents.insert(id, contents);
             }
-            let (levels, key) = block_levels(id, block);
-            if sh.levels.get(&id) != Some(&key) {
-                if !levels.levels.is_empty() || sh.levels.contains_key(&id) {
-                    frame.levels.push(levels);
+            // Read again only when the walk has chosen another level or turn for one of them.
+            if sh.level_serials.get(&id) != Some(&block.levels_serial)
+                || !sh.levels.contains_key(&id)
+            {
+                let (levels, key) = block_levels(id, block);
+                if sh.levels.get(&id) != Some(&key) {
+                    if !levels.levels.is_empty() || sh.levels.contains_key(&id) {
+                        frame.levels.push(levels);
+                    }
+                    sh.levels.insert(id, key);
                 }
-                sh.levels.insert(id, key);
+                sh.level_serials.insert(id, block.levels_serial);
             }
         }
     }
@@ -1002,23 +1346,28 @@ pub(super) fn publish(draw: &SceneDraw, bridge: &mut Bridge, ws: &WorldState, si
         deltas.push(rm::SceneDelta::BlockOut(id));
         sh.blocks.remove(&id);
         sh.levels.remove(&id);
+        sh.level_serials.remove(&id);
         sh.contents.remove(&id);
         sh.shifts.remove(&id);
+        sh.covers.remove(&id);
     }
+    sh.cover_whole = cover_budget.whole;
 
     // --- the moving objects ---------------------------------------------------------------
-    let objects = moving(draw, ws, &sh.objects);
+    let objects = moving(draw, ws, &sh.objects, &mut sh.host_nears);
+    let present: std::collections::HashSet<rm::ObjectKey> = objects.iter().map(|o| o.key).collect();
     let mut gone: Vec<rm::ObjectKey> = sh
         .objects
         .keys()
         .copied()
-        .filter(|k| !objects.iter().any(|o| o.key == *k))
+        .filter(|k| !present.contains(k))
         .collect();
     gone.sort_unstable();
     for key in gone {
         deltas.push(rm::SceneDelta::ObjectRemoved(key));
         sh.objects.remove(&key);
         sh.previous.remove(&key);
+        sh.host_nears.remove(&key);
     }
     for o in objects {
         if let Some(object) = o.object {
@@ -1046,12 +1395,23 @@ pub(super) fn publish(draw: &SceneDraw, bridge: &mut Bridge, ws: &WorldState, si
                 material: p.material,
             })
             .collect();
-        sh.previous
-            .insert(o.key, o.parts.iter().map(|p| p.transform).collect());
+        // Kept in place: the same parts are posed frame after frame.
+        let transforms = o.parts.iter().map(|p| p.transform);
+        match sh.previous.get_mut(&o.key) {
+            Some(kept) => {
+                kept.clear();
+                kept.extend(transforms);
+            }
+            None => {
+                sh.previous.insert(o.key, transforms.collect());
+            }
+        }
         frame.objects.push(rm::ObjectPose {
             key: o.key,
             cell: o.cell,
             parts: poses,
+            held_by: o.held_by,
+            motion: o.motion,
         });
     }
 
@@ -1173,6 +1533,9 @@ pub(super) fn publish(draw: &SceneDraw, bridge: &mut Bridge, ws: &WorldState, si
     // --- the moving objects' lights outdoors ---------------------------------------------
     frame.lamps = outdoor_lamps(draw, ws);
     frame.clock = sh.now;
+    frame.teleports = ws.character.as_ref().map_or(0, |c| {
+        c.stats.teleports_committed + c.stats.teleports_uncommitted
+    });
     let g = draw.degrade_globals(ws);
     frame.degrade = rm::DegradeBias {
         bias: if g.auto_update_deg_mul {
@@ -1184,6 +1547,7 @@ pub(super) fn publish(draw: &SceneDraw, bridge: &mut Bridge, ws: &WorldState, si
         disabled: g.degrades_disabled,
         force: g.force_level,
     };
+    frame.scenery_reach = scenery_reach(draw.cfg.object_rings());
 
     // --- the ground drawn over retail's ---------------------------------------------------
     frame.drawn = drawn_ground(draw, ws, &mut sh.drawn_world);
@@ -1196,6 +1560,22 @@ pub(super) fn publish(draw: &SceneDraw, bridge: &mut Bridge, ws: &WorldState, si
 /// (sent anew only when read anew, `world` keeping the last), and while the scene draws its offset
 /// the offset round the viewer, its knobs and the bodies the fine relief is leveled under.
 /// One tree far off, as the remaster draws it.
+/// How far the eye may stand from the viewer's body, meters, as the camera follows it.
+const CAMERA_REACH: f32 = 24.0;
+
+/// How far from the eye the blocks whose own scenery stands in the world reach at the least, with
+/// `radius` rings of blocks round the viewer's growing it ([`SceneConfig::object_rings`]): a block
+/// leaves them, or comes into them, only once the viewer stands a whole ring of blocks from it.
+/// 0 for none.
+///
+/// [`SceneConfig::object_rings`]: dereth_client_runtime::scene::SceneConfig::object_rings
+fn scenery_reach(radius: u32) -> f32 {
+    // LINT-OK: a radius of a few blocks.
+    #[allow(clippy::cast_precision_loss)]
+    let r = radius as f32;
+    (r * 192.0 - CAMERA_REACH).max(0.0)
+}
+
 pub(crate) type FarTree = rm::FarTree;
 
 impl super::far_trees::Tree for rm::FarTree {
@@ -1242,10 +1622,26 @@ fn forest(draw: &SceneDraw, sh: &mut Shadow) -> Option<rm::Forest> {
         sh.far_cover = None;
         return None;
     }
-    let serial = super::far_retail::set_serial(pack.map(|p| p.pack().serial), retail_models);
+    // The objects the pack draws its own models for near, whatever their kind, and which kinds.
+    let kinds = dereth_remaster::assets::pack::Category::ALL
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| view.packs.models(**c))
+        .fold(0u64, |bits, (k, _)| bits | 1 << k);
+    let serial = super::far_retail::set_serial(pack.map(|p| p.pack().serial), retail_models)
+        ^ view
+            .pack
+            .as_ref()
+            .map_or(0, |p| p.pack().serial.rotate_left(29) ^ kinds << 56);
     if sh.far_pack.as_ref().is_none_or(|p| p.serial != serial) {
-        sh.far_pack = super::far_retail::far_pack(pack.map(|p| p.far_pack()), retail)
-            .map(std::sync::Arc::new);
+        let swapped = view
+            .pack
+            .as_ref()
+            .map(|p| p.swapped(view.packs))
+            .unwrap_or_default();
+        sh.far_pack =
+            super::far_retail::far_pack(pack.map(|p| p.far_pack()), retail, &swapped, serial)
+                .map(std::sync::Arc::new);
     }
     if sh.far_trees.as_ref().is_none_or(|t| t.serial != far.serial) {
         let blocks = far
@@ -1408,12 +1804,308 @@ mod tests {
     //! Behaviour: none (experimental)
     use super::*;
 
+    /// A sequence of one ten-keyframe animation at thirty a second, `seconds` into it.
+    fn ten_keyframes(seconds: f64) -> dereth_animation::seq::Sequence {
+        use dereth_animation::data::{AnimData, AnimFrame, AnimationData, MapAssets};
+        let id = DataId(0x0300_0001);
+        let mut assets = MapAssets::default();
+        assets.animations.insert(
+            id.0,
+            std::sync::Arc::new(AnimationData {
+                num_frames: 10,
+                num_parts: 1,
+                pos_frames: None,
+                part_frames: (0..10)
+                    .map(|_| AnimFrame {
+                        frames: vec![Frame::default()],
+                        hooks: Vec::new(),
+                    })
+                    .collect(),
+                has_hooks: false,
+            }),
+        );
+        let mut s = dereth_animation::seq::Sequence::new();
+        s.append_animation(
+            AnimData {
+                anim_id: id,
+                low_frame: 0,
+                high_frame: -1,
+                framerate: 30.0,
+            },
+            &assets,
+        );
+        s.update(seconds, Some(&mut Frame::default()), &mut Vec::new());
+        s
+    }
+
+    /// Drawn at keyframes (the Smooth animations box off), a body is drawn at the keyframe its
+    /// sequence stands at; drawn between them, where its parts are drawn: the frames it has
+    /// gone into the next keyframe, and on as far as its parts are drawn ahead.
+    #[test]
+    fn a_body_is_drawn_at_its_keyframe_or_between_them_as_its_parts_are() {
+        let s = ten_keyframes(3.5 / 30.0);
+        let near = |a: Option<(usize, f64)>, b: (usize, f64)| {
+            a.is_some_and(|a| a.0 == b.0 && (a.1 - b.1).abs() < 1e-3)
+        };
+        assert!(
+            near(drawn_at(&s, None), (0, 3.0)),
+            "{:?}",
+            drawn_at(&s, None)
+        );
+        assert!(near(drawn_at(&s, Some(0.0)), (0, 3.5)));
+        let ahead = drawn_at(&s, Some(2.0 / 30.0));
+        assert!(near(ahead, (0, 5.5)), "{ahead:?}");
+        assert_eq!(
+            drawn_at(&dereth_animation::seq::Sequence::new(), None),
+            None
+        );
+    }
+
+    /// A run whose animation steps the object on a tenth of a meter a frame, played at `rate`
+    /// frames a second, with the motion's own steady speed `steady`.
+    fn stepping_run(rate: f32, steady: Vec3) -> dereth_animation::seq::Sequence {
+        use dereth_animation::data::{AnimData, AnimFrame, AnimationData, MapAssets};
+        let id = DataId(0x0300_0002);
+        let mut assets = MapAssets::default();
+        assets.animations.insert(
+            id.0,
+            std::sync::Arc::new(AnimationData {
+                num_frames: 10,
+                num_parts: 1,
+                pos_frames: Some(vec![
+                    Frame::new(
+                        Vec3::new(0.0, 0.1, 0.0),
+                        dereth_primitives::Quat::IDENTITY
+                    );
+                    10
+                ]),
+                part_frames: (0..10)
+                    .map(|_| AnimFrame {
+                        frames: vec![Frame::default()],
+                        hooks: Vec::new(),
+                    })
+                    .collect(),
+                has_hooks: false,
+            }),
+        );
+        let mut s = dereth_animation::seq::Sequence::new();
+        s.append_animation(
+            AnimData {
+                anim_id: id,
+                low_frame: 0,
+                high_frame: -1,
+                framerate: rate,
+            },
+            &assets,
+        );
+        s.set_velocity(steady);
+        s
+    }
+
+    /// A body's cycle asks the speed its animation steps its object on at the rate it plays, with
+    /// the motion's own steady speed, whether or not the object moves: a run of a tenth of a meter
+    /// a frame at thirty frames a second asks three meters a second ahead, and played backwards,
+    /// three behind.
+    #[test]
+    fn a_cycle_asks_the_speed_its_animation_steps_at_and_the_motions_own() {
+        let near = |a: glam::Vec3, b: glam::Vec3| (a - b).length() < 1e-4;
+        let ahead = cycle_velocity(&stepping_run(30.0, Vec3::new(0.0, 0.0, 0.0)));
+        assert!(near(ahead, glam::Vec3::new(0.0, 3.0, 0.0)), "{ahead:?}");
+        let behind = cycle_velocity(&stepping_run(-30.0, Vec3::new(0.0, 0.0, 0.0)));
+        assert!(near(behind, glam::Vec3::new(0.0, -3.0, 0.0)), "{behind:?}");
+        let both = cycle_velocity(&stepping_run(15.0, Vec3::new(0.5, 0.0, 0.0)));
+        assert!(near(both, glam::Vec3::new(0.5, 1.5, 0.0)), "{both:?}");
+        assert!(near(
+            cycle_velocity(&dereth_animation::seq::Sequence::new()),
+            glam::Vec3::ZERO
+        ));
+    }
+
+    /// A run's stopping link that steps its object on five centimeters a frame at thirty frames a
+    /// second for its first five frames, then stands for five; then the stand it stops in.
+    fn stopping_link() -> dereth_animation::seq::Sequence {
+        use dereth_animation::data::{AnimData, AnimFrame, AnimationData, MapAssets};
+        let mut assets = MapAssets::default();
+        for (id, step) in [(0x0300_0003, Some(0.05)), (0x0300_0004, None)] {
+            assets.animations.insert(
+                id,
+                std::sync::Arc::new(AnimationData {
+                    num_frames: 10,
+                    num_parts: 1,
+                    // Five frames of steps, then five standing.
+                    pos_frames: step.map(|y| {
+                        (0..10)
+                            .map(|k| {
+                                let y = if k < 5 { y } else { 0.0 };
+                                Frame::new(
+                                    Vec3::new(0.0, y, 0.0),
+                                    dereth_primitives::Quat::IDENTITY,
+                                )
+                            })
+                            .collect()
+                    }),
+                    part_frames: (0..10)
+                        .map(|_| AnimFrame {
+                            frames: vec![Frame::default()],
+                            hooks: Vec::new(),
+                        })
+                        .collect(),
+                    has_hooks: false,
+                }),
+            );
+        }
+        let mut s = dereth_animation::seq::Sequence::new();
+        for id in [0x0300_0003, 0x0300_0004] {
+            s.append_animation(
+                AnimData {
+                    anim_id: DataId(id),
+                    low_frame: 0,
+                    high_frame: -1,
+                    framerate: 30.0,
+                },
+                &assets,
+            );
+        }
+        s
+    }
+
+    /// A link asks the speed its own step carries the object at on the frame it plays, while the
+    /// stand it leads to asks none: a run's stopping stride of five centimeters a frame at thirty
+    /// frames a second carries it a meter and a half a second, then nothing once it stands; over
+    /// the whole link, half that.
+    #[test]
+    fn a_stopping_link_asks_the_speed_its_step_carries_the_object() {
+        let s = stopping_link();
+        let near = |a: glam::Vec3, b: glam::Vec3| (a - b).length() < 1e-4;
+        let step = node_velocity(&s, 0, Some(2.5));
+        assert!(near(step, glam::Vec3::new(0.0, 1.5, 0.0)), "{step:?}");
+        let stands = node_velocity(&s, 0, Some(7.0));
+        assert!(near(stands, glam::Vec3::ZERO), "{stands:?}");
+        let whole = node_velocity(&s, 0, None);
+        assert!(near(whole, glam::Vec3::new(0.0, 0.75, 0.0)), "{whole:?}");
+        assert!(near(cycle_velocity(&s), glam::Vec3::ZERO));
+        assert!(near(node_velocity(&s, 1, Some(3.0)), glam::Vec3::ZERO));
+    }
+
     #[test]
     fn the_near_and_far_planes_come_back_out_of_the_projection() {
         let p = glam::Mat4::perspective_lh(1.0, 1.5, 0.25, 900.0);
         let (near, far) = planes(p);
         assert!((near - 0.25).abs() < 1e-4, "{near}");
         assert!((far - 900.0).abs() < 0.5, "{far}");
+    }
+
+    /// What a block's cover grows from: nothing but `lifts`.
+    fn inputs(lifts: u64) -> CoverInputs {
+        CoverInputs {
+            vertices: Vec::new(),
+            cuts: Vec::new(),
+            water: Vec::new(),
+            words: [0; 81],
+            buildings: Vec::new(),
+            covers: Vec::new(),
+            lifts,
+            knobs: dereth_terrain::land::drawn::Knobs::default(),
+        }
+    }
+
+    /// A row of ten placements, each numbered by its row and place.
+    fn row(_: &CoverInputs, row: usize, out: &mut Vec<rm::Placement>) {
+        for k in 0..10u32 {
+            out.push(rm::Placement {
+                // LINT-OK: a test's few rows.
+                #[allow(clippy::cast_possible_truncation)]
+                id: (row as u32) << 8 | k,
+                kind: rm::PlacementKind::Object,
+                frame: glam::Mat4::IDENTITY,
+                scale: 1.0,
+                lifts: [0.0; 2],
+                parts: Vec::new(),
+            });
+        }
+    }
+
+    /// **A block's ground cover grows a share a frame and is sent whole, on a frame that grows
+    /// none**: within an allowance it is grown a row at a time over frames, never all on one;
+    /// the frame it grows whole it waits, and the next frame grows no cover, its own or another
+    /// block's, and sends it; what is sent is what growing it at once makes, in the same order.
+    #[test]
+    fn a_blocks_cover_grows_a_share_a_frame_and_is_sent_whole_on_a_frame_that_grows_none() {
+        let mut cache = HashMap::new();
+        let mut frames = 0;
+        let mut rows_grown = Vec::new();
+        let mut whole_last = false;
+        let grown = loop {
+            frames += 1;
+            let mut budget = if whole_last {
+                CoverBudget::after(true)
+            } else {
+                CoverBudget {
+                    left: 25,
+                    whole: false,
+                }
+            };
+            let before = rows_grown.len();
+            let mut counted = |i: &CoverInputs, r: usize, out: &mut Vec<rm::Placement>| {
+                rows_grown.push(r);
+                row(i, r, out);
+            };
+            let sent = Cover::grow(
+                cache.entry(1),
+                inputs(7),
+                8,
+                Some(&mut budget),
+                &mut counted,
+            )
+            .map(<[_]>::to_vec);
+            // Another block, its cover not grown yet, on the same frame.
+            let other = Cover::grow(
+                cache.entry(2),
+                inputs(7),
+                8,
+                Some(&mut budget),
+                &mut counted,
+            );
+            if let Some(g) = sent {
+                assert_eq!(
+                    rows_grown.len(),
+                    before,
+                    "the frame that sends it grows none"
+                );
+                assert!(other.is_none());
+                break g;
+            }
+            whole_last = budget.whole;
+            assert!(frames < 8, "it grows on");
+        };
+        assert_eq!(frames, 4, "three rows a frame, of eight, then sent");
+        assert_eq!(
+            rows_grown[..8],
+            (0..8).collect::<Vec<_>>(),
+            "each row once, in order"
+        );
+        let mut whole = HashMap::new();
+        let at_once = Cover::grow(whole.entry(1), inputs(7), 8, None, row).map(<[_]>::to_vec);
+        assert_eq!(Some(grown), at_once);
+    }
+
+    /// **A block built again grows its cover again only from something new**: the same inputs
+    /// take the cover grown, and new ones grow it again from its first row.
+    #[test]
+    fn a_blocks_cover_is_grown_again_only_from_something_new() {
+        let mut cache = HashMap::new();
+        let asked = std::cell::Cell::new(0);
+        let counted = |i: &CoverInputs, r: usize, out: &mut Vec<rm::Placement>| {
+            asked.set(asked.get() + 1);
+            row(i, r, out);
+        };
+        assert!(Cover::grow(cache.entry(1), inputs(7), 4, None, counted).is_some());
+        assert!(Cover::grow(cache.entry(1), inputs(7), 4, None, counted).is_some());
+        assert_eq!(asked.get(), 4, "grown once");
+        let mut none = CoverBudget::after(true);
+        assert!(Cover::grow(cache.entry(1), inputs(8), 4, Some(&mut none), counted).is_none());
+        assert!(Cover::grow(cache.entry(1), inputs(8), 4, None, counted).is_some());
+        assert_eq!(asked.get(), 8, "grown again, whole, for new lifts");
     }
 
     #[test]

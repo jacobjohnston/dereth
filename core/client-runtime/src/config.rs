@@ -24,17 +24,29 @@ use crate::corestrings::{display_string, ID_LAUNCHER_ONLY};
 /// The parse failed. Every one of these surfaces to the user as corestrings 205, because
 /// finalizing error output discards the accumulated text and shows that one string;
 /// the `detail` is what the retail client would have put in its full output text and thrown away.
+/// A switch of this client's own may say instead what was wrong ([`Self::said`]).
 #[derive(Debug, thiserror::Error)]
-#[error("{}", display_string(ID_LAUNCHER_ONLY, &[]))]
+#[error("{}", self.said.clone().unwrap_or_else(|| display_string(ID_LAUNCHER_ONLY, &[])))]
 pub struct ConfigError {
     /// What was given. Never shown by the retail client.
     pub detail: String,
+    /// The line shown in place of corestrings 205, for a switch the retail client never had.
+    pub said: Option<String>,
 }
 
 impl ConfigError {
     fn new(detail: impl Into<String>) -> Self {
         Self {
             detail: detail.into(),
+            said: None,
+        }
+    }
+
+    /// A failure that says `said` to the player.
+    fn saying(said: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+            said: Some(said.into()),
         }
     }
 }
@@ -205,6 +217,13 @@ pub struct Config {
     /// [`dereth_client_contract::options::interface::NEW_PLAYER`]). `None` leaves the interface
     /// option's registered one, the modern interface: what a run built in code starts in.
     pub new_player_interface: Option<dereth_client_contract::options::interface::Interface>,
+    /// `--interface <name>`: the interface the launcher starts every world in that the player has
+    /// not changed in game ([`dereth_client_contract::options::interface::world_start`]), over the
+    /// preferences file's own. `None` leaves it to the file.
+    pub interface: Option<dereth_client_contract::options::interface::Interface>,
+    /// `--world-slug <name>`: the launcher's name for the world, which an interface chosen in game
+    /// is kept under. `None` for a run no launcher named a world for.
+    pub world_slug: Option<String>,
     /// Which graphics backend to bring the device up on:
     /// `--renderer vulkan|d3d12`, else the `Renderer=` preference, else `None`, which leaves the
     /// choice to the default (Vulkan). A rebuild-only
@@ -298,6 +317,11 @@ pub struct Config {
     /// `None`: a folder per server in the per-user cache, with one folder in it for each world the
     /// server has served ([`crate::world_overlay::overlay_dir`]).
     pub overlay_dat_dir: Option<PathBuf>,
+    /// `--overlay-address <host>:<port>`: the server a world's overlay is kept under when the
+    /// client reaches the world at another address, a relay on this computer whose port changes
+    /// from run to run. Only the folder follows from it: the client connects to [`Self::host`] and
+    /// [`Self::port`] as ever. `None`: the address it connects to.
+    pub overlay_address: Option<(String, u32)>,
     /// `--object-visuals <world|legacy|modern>`: the era whose look the world's objects draw
     /// with, over `[Render] Objects` (which it also sets, so the options page shows it). `None`:
     /// the switch was not given and the preference stands; `Some(None)`: the world's own.
@@ -355,9 +379,20 @@ pub struct Config {
     /// `--nav-store <dir>`: where the travel keeps what it learns about portals and recalls, one
     /// file per world, and finds `hints.tsv`. `None` keeps them beside the preferences file.
     pub nav_store: Option<PathBuf>,
-    /// `--nav-published <url>`: a server's published portal table (`http://`, `https://`, or a
-    /// file), fetched at start and taken into the travel's store as the server's knowledge.
+    /// `--nav-published <url>`: a server's published portal table or places (`http://`,
+    /// `https://`, or a file), fetched at start and taken into the travel's stores as the
+    /// server's knowledge.
     pub nav_published: Option<String>,
+    /// `--world-status <url>`: the world's status document (`http://` or `https://`), which names
+    /// the documents the server publishes (its portal table and its places), fetched at start
+    /// and taken into the travel as `--nav-published`'s are. The launcher gives it for a world
+    /// whose status it reads.
+    pub world_status: Option<String>,
+    /// `--world-address <host:port>`: the world's address as its launcher lists it, which names
+    /// what the travel keeps of the world (its portals and places) in place of the address the
+    /// client gives its server: a browser's, whose server is the far end of its WebSocket, gives
+    /// every server the same.
+    pub world_address: Option<String>,
     /// `--nav-prep "<line>;<line>"`: chat lines typed once in the world, as the player types them:
     /// with `--nav-proof`, before it teleports, to set a test character up; without, five seconds
     /// after the character is in the world.
@@ -382,6 +417,8 @@ pub struct Config {
     /// registered default, **8**; the switch stays because a bench wants a cheap window.
     pub land_radius: u32,
     /// `--scenery-radius <n>`: how many rings of blocks grow scenery, buildings and static objects.
+    /// The landscape is meshed at full detail out to it, so they have full-detail ground to stand
+    /// on; 1 is retail's.
     pub scenery_radius: u32,
     /// `--stream-budget-ms <n>`: milliseconds per frame the landscape may spend building
     /// landblocks, nearest first, before the rest waits for later frames. `0` builds everything
@@ -402,6 +439,11 @@ pub struct Config {
     /// `--no-character`: leave the body out and fly the free camera over the static scene.
     /// Kept reachable so the static-scene regression does not disappear.
     pub character: bool,
+    /// `--explore [LOC]`: the world with no server and no body, and a free camera flown through
+    /// it ([`crate::explore`]). It never connects, and leaves the body and the plugins out.
+    pub explore: bool,
+    /// Where `--explore` starts the camera; `None` over Holtburg, as an offline run starts.
+    pub explore_start: Option<crate::report::ReportCamera>,
 
     // ---- the adaptive degrade ----
     /// Run the degradation governor, so its multiplier follows the measured frame rate and every
@@ -567,6 +609,8 @@ impl Default for Config {
             preferences_file: PathBuf::new(),
             preferences_named: false,
             new_player_interface: None,
+            interface: None,
+            world_slug: None,
             renderer: None,
             renderer_preference: None,
             renderer_argument: None,
@@ -579,6 +623,8 @@ impl Default for Config {
             nav_proof: None,
             nav_store: None,
             nav_published: None,
+            world_status: None,
+            world_address: None,
             nav_prep: Vec::new(),
             cell_statics: true,
             mesh_collision: true,
@@ -591,6 +637,8 @@ impl Default for Config {
             object_identity_ms: None,
             world: true,
             character: true,
+            explore: false,
+            explore_start: None,
             auto_degrades: true,
             time_of_day: None,
             connect: true,
@@ -637,6 +685,7 @@ impl Default for Config {
             art_pack_unticked: false,
             classic_dat_dir: None,
             overlay_dat_dir: None,
+            overlay_address: None,
             world_base: None,
             era: None,
             era_features: dereth_primitives::EraFeatureOverrides::default(),
@@ -801,6 +850,12 @@ const REBUILD_SWITCHES: &[Switch] = &[
         short: None,
         arity: Arity::Required,
     },
+    // The server the world's overlay is kept under, when the client reaches it through a relay.
+    Switch {
+        long: "overlay-address",
+        short: None,
+        arity: Arity::Required,
+    },
     // Which dat set the world is drawn from, when its overlay does not say.
     Switch {
         long: "world-base",
@@ -864,6 +919,17 @@ const REBUILD_SWITCHES: &[Switch] = &[
         short: None,
         arity: Arity::Required,
     },
+    // The launcher's interface for every world, and its name for the world played.
+    Switch {
+        long: "interface",
+        short: None,
+        arity: Arity::Required,
+    },
+    Switch {
+        long: "world-slug",
+        short: None,
+        arity: Arity::Required,
+    },
     // The retail `-prefs`, doubled.
     Switch {
         long: "prefs",
@@ -897,6 +963,18 @@ const REBUILD_SWITCHES: &[Switch] = &[
     // A server's published portal table.
     Switch {
         long: "nav-published",
+        short: None,
+        arity: Arity::Required,
+    },
+    // The world's status document, which names what the server publishes.
+    Switch {
+        long: "world-status",
+        short: None,
+        arity: Arity::Required,
+    },
+    // The world's address as its launcher lists it, for what the travel keeps of it.
+    Switch {
+        long: "world-address",
         short: None,
         arity: Arity::Required,
     },
@@ -947,6 +1025,12 @@ const REBUILD_SWITCHES: &[Switch] = &[
         long: "no-character",
         short: None,
         arity: Arity::None,
+    },
+    // Fly a camera through the world with no server, from a location or over Holtburg.
+    Switch {
+        long: "explore",
+        short: None,
+        arity: Arity::Optional,
     },
     // The adaptive degrade.
     Switch {
@@ -1094,6 +1178,15 @@ fn is_switch(tok: &str) -> bool {
     tok.chars().next().is_some_and(|c| CMD_CHARS.contains(&c))
 }
 
+/// Whether `tok` names a switch rather than being a word that merely starts like one: a command
+/// character followed by a letter or a second command character, so `-0.99` is a number.
+fn names_a_switch(tok: &str) -> bool {
+    let mut c = tok.chars();
+    c.next().is_some_and(|c| CMD_CHARS.contains(&c))
+        && c.next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || CMD_CHARS.contains(&c))
+}
+
 /// Strip **exactly one** leading command character, which is why `--rodat` is looked up as the long
 /// name `-rodat` and fails.
 fn strip_one(tok: &str) -> &str {
@@ -1202,6 +1295,7 @@ impl Config {
             mesh_collision: self.mesh_collision,
             land_radius: self.land_radius,
             scenery_radius: self.scenery_radius,
+            full_detail_scenery: true,
             character: self.character,
             auto_degrades: self.auto_degrades,
             time_of_day: self.time_of_day,
@@ -1222,8 +1316,8 @@ impl Config {
             stream_budget: match self.stream_budget_ms {
                 Some(0) => None,
                 Some(ms) => Some(std::time::Duration::from_millis(u64::from(ms))),
-                None => self
-                    .will_connect()
+                // A camera flown fast is never held up for the landscape either.
+                None => (self.will_connect() || self.explore)
                     .then_some(std::time::Duration::from_millis(4)),
             },
             // `[Render] TerrainBlending`, the only control there is for it.
@@ -1236,8 +1330,7 @@ impl Config {
             object_identity_budget: match self.object_identity_ms {
                 Some(0) => None,
                 Some(ms) => Some(std::time::Duration::from_millis(u64::from(ms))),
-                None => self
-                    .will_connect()
+                None => (self.will_connect() || self.explore)
                     .then_some(crate::app::IDENTITY_BACKGROUND_BUDGET),
             },
             ..crate::scene::SceneConfig::default()
@@ -1556,6 +1649,7 @@ impl Config {
                 continue;
             };
 
+            let joined: String;
             let value: Option<&str> = match sw.arity {
                 Arity::None => None,
                 Arity::Required => {
@@ -1573,6 +1667,16 @@ impl Config {
                             continue;
                         }
                     }
+                }
+                // `--explore`'s location may be given unquoted, as `/loc` writes it: every word
+                // up to the next switch, a negative number in it not being one.
+                Arity::Optional if table_is_rebuild && sw.long == "explore" => {
+                    let from = i;
+                    while argv.get(i).is_some_and(|v| !names_a_switch(v)) {
+                        i += 1;
+                    }
+                    joined = argv[from..i].join(" ");
+                    (from < i).then_some(joined.as_str())
                 }
                 Arity::Optional => match argv.get(i) {
                     Some(v) if !is_switch(v) => {
@@ -1698,6 +1802,15 @@ impl Config {
             "dat-dir" => self.dat_dir = PathBuf::from(v),
             "classic-dat-dir" => self.classic_dat_dir = Some(PathBuf::from(v)),
             "overlay-dat-dir" => self.overlay_dat_dir = Some(PathBuf::from(v)),
+            "overlay-address" => {
+                let bad = || ConfigError::new(format!("bad --overlay-address {v:?} (host:port)"));
+                let (host, port) = v.trim().rsplit_once(':').ok_or_else(bad)?;
+                let port = port.parse::<u16>().map_err(|_| bad())?;
+                if host.is_empty() {
+                    return Err(bad());
+                }
+                self.overlay_address = Some((host.to_owned(), u32::from(port)));
+            }
             "world-base" => {
                 self.world_base = Some(match v.trim().to_ascii_lowercase().as_str() {
                     "modern" => dereth_primitives::ContainerEra::Modern,
@@ -1830,6 +1943,18 @@ impl Config {
                 self.world_rules = dereth_rules::world::profile_rules(v)
                     .map_err(|e| ConfigError::new(format!("bad --world-profile: {e}")))?;
             }
+            "interface" => {
+                use dereth_client_contract::options::interface;
+                let value = interface::parse_value(interface::INTERFACE, v).ok_or_else(|| {
+                    ConfigError::new(format!(
+                        "--interface takes Horizon, Modern or Classic, not {v:?}"
+                    ))
+                })?;
+                self.interface = Some(interface::Interface::from_value(value));
+            }
+            "world-slug" => {
+                self.world_slug = Some(v.trim().to_owned()).filter(|s| !s.is_empty());
+            }
             "landblock" => {
                 self.landblock = u16::from_str_radix(v.trim_start_matches("0x"), 16)
                     .map_err(|_| ConfigError::new(format!("bad --landblock value {v:?}")))?;
@@ -1844,6 +1969,10 @@ impl Config {
             }
             "nav-store" => self.nav_store = Some(PathBuf::from(v)),
             "nav-published" => self.nav_published = Some(v.to_owned()),
+            "world-status" => self.world_status = Some(v.to_owned()),
+            "world-address" => {
+                self.world_address = Some(v.trim().to_owned()).filter(|a| !a.is_empty());
+            }
             "nav-prep" => {
                 self.nav_prep = v
                     .split(';')
@@ -1956,6 +2085,25 @@ impl Config {
             }
             "no-world" => self.world = false,
             "no-character" => self.character = false,
+            "explore" => {
+                self.explore = true;
+                self.connect = false;
+                self.character = false;
+                self.plugins = false;
+                self.explore_start = if v.trim().is_empty() {
+                    None
+                } else {
+                    Some(crate::explore::parse_start(v).map_err(|e| {
+                        ConfigError::saying(
+                            format!("Explore: can't read the location \"{}\".", v.trim()),
+                            format!("--explore: {e}"),
+                        )
+                    })?)
+                };
+                if let Some(start) = self.explore_start {
+                    self.landblock = start.block;
+                }
+            }
             // Leave the interior cells' baked objects out, so the same station can be
             // looked at with and without them. Always on in the client.
             "no-cell-statics" => self.cell_statics = false,
@@ -1989,6 +2137,19 @@ impl Config {
     #[must_use]
     pub fn will_connect(&self) -> bool {
         self.connect && !(self.account.is_empty() && self.host.is_empty())
+    }
+
+    /// The identity the travel keeps a world's portals and places under, for the world that
+    /// names itself `name`: its name and its address (`--world-address`, else the server's), since
+    /// two servers may share a name and hold different portals.
+    #[must_use]
+    pub fn travel_world(&self, name: &str) -> String {
+        match &self.world_address {
+            Some(address) => format!("{name}@{address}"),
+            // `-h` may carry the port itself.
+            None if self.host.contains(':') => format!("{name}@{}", self.host),
+            None => format!("{name}@{}:{}", self.host, self.port),
+        }
     }
 
     /// Whether a headless run keeps the system's clock: when asked (`--real-time`), or when it

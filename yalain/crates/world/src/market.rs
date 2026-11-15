@@ -21,7 +21,8 @@
 //!
 //! **What may not be sold**: an item attuned to its holder, and one bound by use in combat: refused,
 //! nothing taken and nothing moved. Nor anything by a character holding [`MOST_CONSIGNMENTS`] already,
-//! which is told so.
+//! on sale, expired or sold and not yet collected, which is told so in the client's own words; it
+//! may still restock one, and collecting one makes room.
 //!
 //! **A page** shows as many sales as a storekeeper's and names the whole listing's size; the client
 //! turns the pages as it does a storekeeper's (2017: no page of any store showed more than 7 of 510
@@ -69,8 +70,8 @@ use yalain_store::Store;
 use crate::call_limit::Bucket;
 use crate::calls::Value;
 use crate::graph::{hash, list, tag, Builder, Slot};
+use crate::holding::{self, Place, To};
 use crate::inventory::{self, Move};
-use crate::state::Held;
 use crate::{progress, session, store, Clock, Server};
 
 /// The market's calls.
@@ -130,12 +131,14 @@ pub const EXPIRY_LOOK: f64 = 60.0;
 /// A consignment's flag: expired.
 const FLAG_EXPIRED: u32 = 1;
 
-/// The most consignments a character holds at once. The client has words for a character's maximum,
-/// so the 2017 servers had one; its number was never recorded (of 2 sales put up in the recordings,
-/// a character's most is 2), so this is ours.
+/// The most consignments a character holds at once: on sale, expired or sold, until collected. The
+/// client has words for a character's maximum, so the 2017 servers had one; its number was never
+/// recorded (the recordings hold two characters' consignments, the most of one 2, and the client
+/// lists every consignment it is sent in one list), so this is ours.
 pub const MOST_CONSIGNMENTS: usize = 100;
-/// The words for a character at that maximum.
-pub const AT_THE_MOST: (u32, u32) = (0xCF60_26D2, 0x2500_0CEE);
+/// The refusal of a sale by a character at that maximum, which the client words "Cannot add
+/// consignment. The maximum number of consignments for your player has been reached."
+pub const AT_THE_MOST: u32 = 45_020;
 /// A connection's rows of pages, at once and each second (18 recorded asks, none of more than 13).
 pub const PAGE_ROWS_HELD: f64 = 2000.0;
 pub const PAGE_ROWS_A_SECOND: f64 = 1000.0;
@@ -316,11 +319,11 @@ pub fn ensure<S: Store>(s: &mut Server<S>) -> bool {
             if let Some(t) = s.catalog.get(c.template).cloned() {
                 let mut x = crate::things::Thing::of(c.item, &t, crate::things::Kind::Item);
                 x.quantity = c.offered.saturating_sub(c.sold).max(1);
-                x.container = Some((c.keeper, 1));
                 if let Some(kept) = read.item_states.iter().find(|k| k.id == c.item) {
                     kept.restore(&mut x);
                 }
                 s.things.insert(x);
+                let _ = holding::move_item(s, c.item, Place::Nowhere, To::Kept(c.keeper));
             }
         }
     }
@@ -1022,14 +1025,11 @@ pub fn sell<S: Store>(
         progress::private(net, world, &m);
         return;
     }
+    // Every consignment counts until it is collected, an expired one too, so what a character
+    // leaves with brokers is bounded and nothing of it is ever taken away.
     if s.market.list.iter().filter(|c| c.owner == me).count() >= MOST_CONSIGNMENTS {
-        let m = call(
-            store::function::REQUEST_DONE,
-            &[Arg::Int(store::error::SALE_REFUSED)],
-        );
+        let m = call(store::function::REQUEST_DONE, &[Arg::Int(AT_THE_MOST)]);
         progress::private(net, world, &m);
-        let told = crate::chat::show_text(1, progress::text(AT_THE_MOST));
-        progress::private(net, world, &told);
         return;
     }
     // An item bound to its seller stays with it, and so does one used in combat: its sale profile
@@ -1053,7 +1053,7 @@ pub fn sell<S: Store>(
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let charge = ((f64::from(quantity) * f64::from(price) * CHARGE).ceil() as u32).max(1);
     let money = store::money(&p.qualities);
-    if price <= 0.0 || money < charge {
+    if price <= 0.0 || money < charge || holding::place_of(s, item) != Some(Place::Pack(me)) {
         return;
     }
     let Some(p) = s.players.get_mut(&world) else {
@@ -1064,8 +1064,10 @@ pub fn sell<S: Store>(
     progress::send_int(net, world, store::MONEY, left.cast_signed());
     // The item leaves the pack (a part of a stack goes as a new item).
     let consigned = if quantity >= held.quantity {
-        p.play.items.retain(|h| h.id != item);
-        inventory::close_up(&mut p.play.items);
+        let _ = holding::move_item(s, item, Place::Pack(me), To::Kept(keeper));
+        if let Some(p) = s.players.get_mut(&world) {
+            inventory::close_up(&mut p.play.items);
+        }
         item
     } else {
         if let Some(h) = p.play.items.iter_mut().find(|h| h.id == item) {
@@ -1075,13 +1077,13 @@ pub fn sell<S: Store>(
             t.quantity -= quantity;
         }
         match inventory::split_off(s, item, quantity) {
-            Some(n) => n,
+            Some(n) => {
+                let _ = holding::move_item(s, n, Place::Nowhere, To::Kept(keeper));
+                n
+            }
             None => return,
         }
     };
-    if let Some(t) = s.things.get_mut(consigned) {
-        t.container = Some((keeper, 1));
-    }
     let m = Move {
         move_type: MOVE_IN,
         item,
@@ -1212,8 +1214,11 @@ pub fn restock<S: Store>(
     crate::quals::set_int(&mut p.qualities, store::MONEY, left_money.cast_signed());
     progress::send_int(net, world, store::MONEY, left_money.cast_signed());
     if all_taken {
-        p.play.items.retain(|h| h.id != item);
-        inventory::close_up(&mut p.play.items);
+        // Out of the pack, to be gone in a moment.
+        let _ = holding::move_item(s, item, Place::Pack(me), To::Nowhere);
+        if let Some(p) = s.players.get_mut(&world) {
+            inventory::close_up(&mut p.play.items);
+        }
     } else if let Some(h) = p.play.items.iter_mut().find(|h| h.id == item) {
         h.quantity -= quantity;
     }
@@ -1360,7 +1365,7 @@ pub fn collect<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, 
                     .find(|k| k.id == c.item)
                     .cloned()
             });
-        s.things.remove(c.item);
+        let _ = holding::destroy_item(s, c.item, Place::Kept(c.keeper));
         if let Some(stamp) = stamp {
             net.send(
                 world,
@@ -1474,7 +1479,8 @@ pub fn purchase<S: Store>(
     }
     // An item its template no longer makes isn't in the world to be bought, and one past its time
     // isn't on sale.
-    if left == 0 || s.things.get(item).is_none() || c.expired(s.game_now) {
+    if left == 0 || holding::place_of(s, item) != Some(Place::Kept(keeper)) || c.expired(s.game_now)
+    {
         progress::private(
             net,
             world,
@@ -1519,23 +1525,8 @@ pub fn purchase<S: Store>(
     s.market.list[i].sold = c.offered;
     // The item moves from the broker into the buyer's pack.
     let me = p.character;
-    if let Some(t) = s.things.get_mut(item) {
-        t.container = None;
-    }
-    let mut slot = 0;
-    if let Some(p) = s.players.get_mut(&world) {
-        slot = inventory::room_for_one(&mut p.play.items);
-        p.play.items.push(Held {
-            id: item,
-            template: c.template,
-            slot,
-            location: 0,
-            quantity: left,
-        });
-        if let Some(t) = s.things.get_mut(item) {
-            t.container = Some((me, slot));
-        }
-    }
+    let to = To::Pack(world, holding::Slot::Room);
+    let slot = holding::move_item(s, item, Place::Kept(keeper), to).unwrap_or(0);
     let stamp = inventory::contain_stamp(s, item);
     net.send(
         world,

@@ -7,9 +7,10 @@
 //! to vitals heals or hurts at once (health: the one changed tells it as a story, then its health;
 //! vigor: its vigor alone); a quest moved on (or failed), a recipe learned or forgotten happen at
 //! once; a teleport is no record, its player sent to its place when its time is up; a
-//! combination looks at the target's effects and adds what it adds; any other effect that lasts
-//! is added as a record. A player's ids count on from the last one it was given, across its
-//! sessions.
+//! combination looks at the target's effects and adds what it adds; a chain of other effects puts
+//! each on at once, in its order, as each does itself (its own appearance, if it names one, played
+//! first); any other effect that lasts is added as a record. A player's ids count on from the last
+//! one it was given, across its sessions.
 //!
 //! **A record** stays on its own clock: a new one never replaces or refreshes an older one, each
 //! running out at its cast time plus its timeout, when its client is told it is gone, up to the
@@ -49,6 +50,16 @@
 //! **A toggled skill that turns on no aura** ([`toggled_on`]) holds a record of each of its effects
 //! while it is on, told toggled ([`TOGGLED`]); turning it off, by its use or by portal space as an
 //! aura's, takes them off.
+//!
+//! **A force** ([`crate::effect_defs::Force`]: the heroes' Taunt, Armor and Reflection Force) is
+//! such a record held at a price, as the install's descriptions and the guides give it: each attack
+//! that reaches its holder costs the focus its data names at its spellcraft (1 to 5, or 2 to 10),
+//! and when the holder has less than that it turns off as its skill would, "You stop …" and all; a
+//! holder keeps one force of a class at a time, a new one turning off the one it held. A reply
+//! that watches its holder's vitals change (Taunt Force's, the one in the data) answers such an
+//! attack as it answers a harmful effect. No recording holds a force used: when the price is paid
+//! (on each attack, before the answers) and that the holder's focus may be spent to nothing are
+//! ours.
 //!
 //! **Lifestone protection.** A player is protected for three minutes as it is resurrected: the
 //! protection is added in the request's tick, before portal space, and its glow (the effect the
@@ -233,12 +244,43 @@ pub const TICK_FIRST: f64 = 5.6;
 pub const TICK_LEAST: f64 = 3.5;
 pub const TICK_MOST: f64 = 7.5;
 
-/// A recipe learned from an effect with a name: its text (type 2, the effect's name and the
-/// giver's as variables).
+/// What an effect's application tells (type 2, the effect's name and the giver's as variables):
+/// the line of the effect's own table, each table's under the one string id (a recipe or a skill
+/// granted, an item's effect put on; 2017: 79 of 79 such lines in the effect's own table). An
+/// item's effect whose table holds none says "The `<effect>` applies to you." (183 of 183 worn).
 pub mod learned {
-    pub const TEXT: (u32, u32) = (0xA727_FC98, 0x2500_1070);
+    pub const LINE: u32 = 0xA727_FC98;
+    pub const APPLIES: (u32, u32) = (LINE, 0x2500_0CE5);
     pub const EFFECT_VAR: u32 = 0xB69B_365C;
     pub const GIVER_VAR: u32 = 0x9FD3_465E;
+}
+
+/// The line a recipe granted by an effect tells: its own table's, for an effect with a name that
+/// someone gave (2017: each of the 46 such lines named who gave it), and none where its table holds
+/// none (15 of 15 such grants told nothing) or where it is cast quiet.
+#[must_use]
+pub fn recipe_line(table: &EffectTable, state: u32, cast: Cast) -> Option<(u32, u32)> {
+    let def = table.get(state)?;
+    if !matches!(def.kind, Kind::GrantRecipe(_))
+        || def.name.is_none()
+        || cast.giver.is_none()
+        || cast.quiet
+    {
+        return None;
+    }
+    table.line(state)
+}
+
+/// An effect's application told: its line, naming the effect and who gave it.
+fn applied(line: (u32, u32), effect: (u32, u32), giver: Option<(u32, u32)>) -> ServerMessage {
+    let mut vars = vec![progress::nested(
+        learned::EFFECT_VAR,
+        progress::text(effect),
+    )];
+    if let Some(g) = giver {
+        vars.push(progress::nested(learned::GIVER_VAR, progress::text(g)));
+    }
+    crate::chat::show_text(2, progress::text_with(line, vars))
 }
 
 /// The quality of damage added to a player's hits (an integer, 295).
@@ -380,7 +422,8 @@ pub fn next_eid(p: &mut crate::world::Player) -> u32 {
 }
 
 /// How an effect is cast: by whom, at what spellcraft, as a fight's effect or not, from which
-/// skill and item, and who gave it (its id and name, for the texts that name the giver).
+/// skill and item, who gave it (its id and name, for the texts that name the giver), and whether
+/// it tells its own line.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Cast {
     pub caster: u64,
@@ -392,6 +435,9 @@ pub struct Cast {
     /// It answers another effect, and so is not answered in turn: two holders can't go back and
     /// forth.
     pub answers: bool,
+    /// It tells no line of its own: a recipe or a skill it grants is granted in silence (a step's
+    /// or a give's `effects_quiet`).
+    pub quiet: bool,
 }
 
 /// The class priority of a record.
@@ -813,21 +859,25 @@ pub fn apply_on<S: Store>(
             if def.fx != 0 {
                 show_fx(s, net, world, def.fx);
             }
-            if let (Some(name), Some((_, giver))) = (def.name, cast.giver) {
-                let mut vars = vec![progress::nested(learned::EFFECT_VAR, progress::text(name))];
-                if let Some(g) = giver {
-                    vars.push(progress::nested(learned::GIVER_VAR, progress::text(g)));
-                }
-                progress::private(
-                    net,
-                    world,
-                    &crate::chat::show_text(2, progress::text_with(learned::TEXT, vars)),
-                );
+            if let (Some(name), Some(line)) = (def.name, recipe_line(&s.effect_table, state, cast))
+            {
+                let giver = cast.giver.and_then(|(_, g)| g);
+                progress::private(net, world, &applied(line, name, giver));
             }
             true
         }
         (Kind::RemoveRecipe(recipe), On::Player(world)) => {
             crate::craft::forget(s, net, world, *recipe);
+            true
+        }
+        // A craft experience reward: its amount at the spellcraft it is put on at, whole.
+        (Kind::CraftExperience(points), On::Player(world)) => {
+            let points = points.at(cast.spellcraft).unwrap_or(0.0).max(0.0).floor();
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            crate::craft::give_pool(s, net, world, points as u64);
+            if def.fx != 0 {
+                show_fx(s, net, world, def.fx);
+            }
             true
         }
         // The appearance played is the one the effect's own data names.
@@ -851,8 +901,65 @@ pub fn apply_on<S: Store>(
             }
             true
         }
+        (Kind::Reset(kind), On::Player(world)) => {
+            crate::skills::grant_reset(s, net, world, *kind);
+            true
+        }
+        (Kind::Untrains, On::Player(world)) => crate::skills::untrained_at_once(s, net, world),
+        // A skill trained is told as 2017's were: the repository and the skill, then the effect's
+        // own line of its table naming the effect and who gave it (none if its table holds none,
+        // or if it is cast quiet), then its appearance. A player who holds the skill already gains
+        // nothing and is told nothing.
+        (Kind::GrantSkill(skill), On::Player(world)) => {
+            if !crate::skills::trained_for_good(s, net, world, *skill) {
+                return false;
+            }
+            let line = s.effect_table.line(state).filter(|_| !cast.quiet);
+            if let (Some(name), Some(line)) = (def.name, line) {
+                let giver = cast.giver.and_then(|(_, g)| g);
+                progress::private(net, world, &applied(line, name, giver));
+            }
+            if def.fx != 0 {
+                show_fx(s, net, world, def.fx);
+            }
+            true
+        }
+        // The items an effect gives are made in its player's pack as the server's gift, told by
+        // nothing but their arrival (2017: 7 of 7 such gifts, each a gift's move with no line of
+        // its own).
+        (Kind::GrantItem(g), On::Player(world)) => {
+            if crate::inventory::give(s, net, world, g.template, g.count).is_none() {
+                return false;
+            }
+            if def.fx != 0 {
+                show_fx(s, net, world, def.fx);
+            }
+            true
+        }
+        // What a rule says an effect places stands at its player.
+        (Kind::Places(p), On::Player(world)) => {
+            crate::placing::place(s, net, world, p.clone(), clock).is_some()
+        }
+        // A dispel takes off every record its target holds of the effects it names, as each would
+        // go at its end; nothing comes back of itself.
+        (Kind::Dispel(list), _) => {
+            let gone: Vec<u32> = records_of(s, on)
+                .iter()
+                .filter(|e| list.contains(&e.state))
+                .map(|e| e.eid)
+                .collect();
+            for eid in gone {
+                remove_on(s, net, on, eid);
+            }
+            if def.fx != 0 {
+                show_fx_on(s, net, on, def.fx);
+            }
+            true
+        }
+        // A taunt counts by its share at the spellcraft it is cast at (a skill's rating).
         (Kind::Taunt(share), On::Creature(id)) => {
-            crate::ai::taunted(s, id, cast.caster, *share, clock.local.0);
+            let share = share.at(cast.spellcraft).unwrap_or(0.0);
+            crate::ai::taunted(s, id, cast.caster, share, clock.local.0);
             true
         }
         (
@@ -860,14 +967,33 @@ pub fn apply_on<S: Store>(
             On::Creature(_),
         )
         | (Kind::Taunt(_), On::Player(_))
-        | (Kind::VitaeTap(_) | Kind::VitaeRestore(_), On::Creature(_))
+        | (
+            Kind::VitaeTap(_)
+            | Kind::VitaeRestore(_)
+            | Kind::Reset(_)
+            | Kind::Untrains
+            | Kind::GrantSkill(_)
+            | Kind::GrantItem(_)
+            | Kind::Places(_),
+            On::Creature(_),
+        )
         | (Kind::Aura(_), _) => false,
         // A pet is summoned as its skill's use ends ([`crate::pets`]), never as an effect; a
-        // recall is its skill's trip ([`crate::skill_use`]).
+        // recall is its skill's trip, or its quest update's ([`crate::skill_use::effect_recall`]).
         (Kind::Pet { .. } | Kind::Recall(_) | Kind::Resurrect { .. }, _) => false,
         (Kind::Combo(c), _) => {
             combine(s, net, on, &def, c, cast, clock);
             true
+        }
+        (Kind::Instants(_), _) => {
+            if def.fx != 0 {
+                show_fx_on(s, net, on, def.fx);
+            }
+            let mut did = false;
+            for each in chained(&s.effect_table, state) {
+                did |= apply_on(s, net, on, each, cast, clock);
+            }
+            did
         }
         (
             Kind::Other
@@ -883,6 +1009,31 @@ pub fn apply_on<S: Store>(
             true
         }
     }
+}
+
+/// The effects a chain of them puts on, in its order: a chain held in it by its own (each chain
+/// once, so a chain that holds itself ends).
+#[must_use]
+pub fn chained(table: &EffectTable, state: u32) -> Vec<u32> {
+    fn walk(table: &EffectTable, state: u32, seen: &mut Vec<u32>, out: &mut Vec<u32>) {
+        if seen.contains(&state) {
+            return;
+        }
+        seen.push(state);
+        let Some(Kind::Instants(list)) = table.get(state).map(|d| &d.kind) else {
+            return;
+        };
+        for &each in list {
+            if matches!(table.get(each).map(|d| &d.kind), Some(Kind::Instants(_))) {
+                walk(table, each, seen, out);
+            } else {
+                out.push(each);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(table, state, &mut Vec::new(), &mut out);
+    out
 }
 
 /// Does a ward its target holds keep this effect off (one of its classes, or one of the effects it
@@ -959,8 +1110,10 @@ fn reply_to<S: Store>(
     }
 }
 
-/// An attack has reached a player: each counter it holds may answer, by its chance at its
-/// spellcraft, with its effect on the attacker. An effect's harm over time is no attack.
+/// An attack has reached a player: each force it holds is paid for, or turns off ([`forces_pay`]);
+/// then each counter it holds, and each reply that watches its vitals change, may answer, by its
+/// chance at its spellcraft, with its effect on the attacker. An effect's harm over time is no
+/// attack.
 pub fn answer_attack<S: Store>(
     s: &mut Server<S>,
     net: &mut ServerNet,
@@ -968,23 +1121,33 @@ pub fn answer_attack<S: Store>(
     by: u64,
     clock: Clock,
 ) {
+    forces_pay(s, net, world);
     let Some(p) = s.players.get(&world) else {
         return;
     };
     let me = p.character;
-    let counters: Vec<(u32, f32, f32, u64)> = p
+    let counters: Vec<(u32, f32, f32, u64, bool)> = p
         .play
         .effects
         .iter()
-        .filter_map(|r| match &s.effect_table.get(r.state)?.kind {
-            Kind::Counter { effect, chance } => {
-                let at = chance.at(r.spellcraft)?;
-                Some((*effect, at, r.spellcraft, r.item))
+        .filter_map(|r| {
+            let d = s.effect_table.get(r.state)?;
+            match &d.kind {
+                Kind::Counter { effect, chance } => {
+                    let at = chance.at(r.spellcraft)?;
+                    Some((*effect, at, r.spellcraft, r.item, false))
+                }
+                Kind::Reply { effect, chance, .. }
+                    if d.internal_flags & crate::effect_defs::WATCHES_VITALS != 0 =>
+                {
+                    let at = chance.at(r.spellcraft)?;
+                    Some((*effect, at, r.spellcraft, r.item, true))
+                }
+                _ => None,
             }
-            _ => None,
         })
         .collect();
-    for (effect, chance, spellcraft, item) in counters {
+    for (effect, chance, spellcraft, item, answers) in counters {
         if !s.rng.chance(chance) {
             continue;
         }
@@ -994,10 +1157,83 @@ pub fn answer_attack<S: Store>(
             spellcraft,
             pk: true,
             item,
+            answers,
             ..Cast::default()
         };
         apply_on(s, net, on, effect, cast, clock);
     }
+}
+
+/// The vitals a force may cost (its quality and its greatest's): vigor and focus. No force of the
+/// data asks health.
+const FORCE_VITALS: [(u32, u32); 2] = [
+    (quality::VIGOR, quality::VIGOR_MAX),
+    (quality::FOCUS, quality::FOCUS_MAX),
+];
+
+/// An attack has reached a player: each force it holds costs its price at its spellcraft, the vital
+/// sent; one whose price the player can't pay in full turns off instead ([`force_off`]).
+fn forces_pay<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId) {
+    let Some(p) = s.players.get(&world) else {
+        return;
+    };
+    let held: Vec<(EffectState, crate::effect_defs::Force)> = p
+        .play
+        .effects
+        .iter()
+        .filter_map(|r| Some((*r, s.effect_table.force(r.state)?.clone())))
+        .collect();
+    for (record, force) in held {
+        let Some(&(cur, max_quality)) = FORCE_VITALS.iter().find(|(q, _)| *q == force.vital) else {
+            continue;
+        };
+        let Some(p) = s.players.get(&world) else {
+            return;
+        };
+        let max = max_vital(s, p, max_quality).max(1);
+        let was = quals::int(&p.qualities, cur).unwrap_or(max);
+        let cost = force.cost(record.spellcraft);
+        if was < cost {
+            force_off(s, net, world, record);
+        } else if cost > 0 {
+            if let Some(p) = s.players.get_mut(&world) {
+                quals::set_int(&mut p.qualities, cur, was - cost);
+            }
+            progress::send_int(net, world, cur, was - cost);
+        }
+    }
+}
+
+/// A force's record turns off as its skill turned off by a use would, without the use: the skill's
+/// toggle off, the record taken off, "You stop …" with the skill's name, its appearance stopped.
+fn force_off<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, record: EffectState) {
+    let skill = s
+        .skill_table
+        .skills
+        .iter()
+        .find(|(_, d)| record.skill != 0 && d.state == record.skill)
+        .map(|(id, d)| (*id, d.name));
+    if let Some((id, _)) = skill {
+        progress::private(net, world, &toggle_call(false, id));
+    }
+    let stop = toggled_records_off(s, net, world, &[record]);
+    if let Some((_, name)) = skill {
+        progress::private(net, world, &toggled_off_text(name));
+    }
+    stop_fx(s, net, world, &stop);
+}
+
+/// "You stop …", a toggled skill's name in it.
+#[must_use]
+pub fn toggled_off_text(name: (u32, u32)) -> ServerMessage {
+    let text = progress::text_with(
+        toggled_off::TEXT,
+        vec![progress::nested(
+            toggled_off::SKILL_VAR,
+            progress::text(name),
+        )],
+    );
+    crate::chat::show_text(2, text)
 }
 
 /// What an attack's harm comes to once its target's effects have watched it: what is left of it
@@ -1065,6 +1301,38 @@ pub fn answer_harm<S: Store>(s: &mut Server<S>, on: On, harm: i32, by_a_player: 
         left = left.max(0);
     }
     Harm { left, back }
+}
+
+/// What is left of harm an effect does a target once the watchers it holds that watch effects' harm
+/// have taken from it: the top of each class, the higher classes first, each drawing as it does of an
+/// attack and taking its amount of what those before it left, rounded up, never below nothing. None
+/// sends any back. Only watchers that watch effects' harm draw.
+pub fn effect_harm_left<S: Store>(s: &mut Server<S>, on: On, harm: i32) -> i32 {
+    let mut watchers: Vec<(u32, crate::effect_defs::Watcher, f32)> =
+        applying(&s.effect_table, records_of(s, on))
+            .into_iter()
+            .filter_map(|r| {
+                let d = s.effect_table.get(r.state)?;
+                match &d.kind {
+                    Kind::Watcher(w) if w.effects => {
+                        Some((d.eq_class, (**w).clone(), r.spellcraft))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+    watchers.sort_by_key(|w| std::cmp::Reverse(w.0));
+    let mut left = harm;
+    for (_, w, spellcraft) in watchers {
+        let absorbed = drawn(s, &w.absorbs, spellcraft);
+        if left <= 0 {
+            continue;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let of = if w.shares { left as f32 } else { 1.0 };
+        left -= dereth_primitives::num::to_i32((of * absorbed).ceil());
+    }
+    left.max(0)
 }
 
 /// What a target's effects sent back reaches its attacker: a player loses that health, and may die
@@ -1360,7 +1628,8 @@ fn health_story(
 }
 
 /// Change a creature's health by an amount: its story of it, then a hurt (which may kill it) or a
-/// heal (not past its greatest health).
+/// heal (not past its greatest health). Harm is what its watchers of effects' harm leave of it
+/// ([`effect_harm_left`]); none left, nothing is told.
 pub(crate) fn creature_health<S: Store>(
     s: &mut Server<S>,
     net: &mut ServerNet,
@@ -1371,6 +1640,12 @@ pub(crate) fn creature_health<S: Store>(
 ) {
     let Some(alive) = s.things.get(id).map(crate::things::Thing::alive) else {
         return;
+    };
+    // What its watchers of effects' harm take is never told.
+    let amount = if alive && amount < 0 {
+        -effect_harm_left(s, On::Creature(id), -amount)
+    } else {
+        amount
     };
     if amount == 0 || (!alive && amount > 0) {
         return;
@@ -1412,10 +1687,11 @@ fn harm_by_player(me: u64, amount: i32, (caster, pk): (u64, bool)) -> bool {
 }
 
 /// Change a player's vital by an amount (a heal: positive), not past its greatest value; the
-/// story of a health change tells the whole amount. Harm another player did is told as PK damage
-/// too. Harm that takes its last health kills it, the caster its killer, or none for its own: 2017,
-/// 4 of 4 players a creature's effect took to no health had their death told; no recording has a
-/// player's own harm do it.
+/// story of a health change tells the whole amount. Harm to health is what its watchers of effects'
+/// harm leave of it ([`effect_harm_left`]); none left, nothing is told. Harm another player did is
+/// told as PK damage too. Harm that takes its last health kills it, the caster its killer, or none
+/// for its own: 2017, 4 of 4 players a creature's effect took to no health had their death told; no
+/// recording has a player's own harm do it.
 fn change_vital<S: Store>(
     s: &mut Server<S>,
     net: &mut ServerNet,
@@ -1425,6 +1701,16 @@ fn change_vital<S: Store>(
     (caster, pk): (u64, bool),
     clock: Clock,
 ) {
+    // What its watchers of effects' harm take is never told.
+    let amount = if cur == quality::HEALTH && amount < 0 {
+        let left = -effect_harm_left(s, On::Player(world), -amount);
+        if left == 0 {
+            return;
+        }
+        left
+    } else {
+        amount
+    };
     let Some(p) = s.players.get(&world) else {
         return;
     };
@@ -1891,6 +2177,7 @@ fn immunity_ended<S: Store>(
         item: ended.item,
         giver: None,
         answers: true,
+        quiet: false,
     };
     add_on(s, net, on, &def, cast, Shape::TIMED, clock);
 }
@@ -2191,6 +2478,27 @@ pub fn resurrected<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: Conn
     stop
 }
 
+/// A player is taken somewhere: the records of effects that end at a teleport go, as it goes into
+/// portal space (2017: the two trips a player holding such a record took ended them in the tick it
+/// was told of its teleport, both records at the second).
+pub fn teleported<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId) {
+    let gone: Vec<u32> = s.players.get(&world).map_or_else(Vec::new, |p| {
+        p.play
+            .effects
+            .iter()
+            .filter(|e| {
+                s.effect_table
+                    .get(e.state)
+                    .is_some_and(|d| d.ends_at_teleport)
+            })
+            .map(|e| e.eid)
+            .collect()
+    });
+    for eid in gone {
+        remove(s, net, world, eid);
+    }
+}
+
 /// The effect registry a session start carries: the records, the id counter, each class's top
 /// effect, the records by category, the qualities and appearances the top effects apply.
 #[must_use]
@@ -2456,14 +2764,36 @@ pub fn toggled_on<S: Store>(
             | Kind::Taunt(_)
             | Kind::VitaeTap(_)
             | Kind::VitaeRestore(_)
+            | Kind::Reset(_)
+            | Kind::Untrains
+            | Kind::GrantSkill(_)
+            | Kind::GrantItem(_)
+            | Kind::Places(_)
             | Kind::Aura(_)
             | Kind::Pet { .. }
             | Kind::Recall(_)
             | Kind::Resurrect { .. }
             | Kind::Combo(_)
+            | Kind::Instants(_)
     );
     if !record || warded(s, On::Player(world), &def) {
         return None;
+    }
+    if s.effect_table.force(state).is_some() {
+        let others: Vec<EffectState> = s.players.get(&world).map_or_else(Vec::new, |p| {
+            p.play
+                .effects
+                .iter()
+                .filter(|r| {
+                    s.effect_table.force(r.state).is_some()
+                        && s.effect_table.get(r.state).map(|d| d.eq_class) == Some(def.eq_class)
+                })
+                .copied()
+                .collect()
+        });
+        for other in others {
+            force_off(s, net, world, other);
+        }
     }
     let shape = Shape {
         flags: TOGGLED,
@@ -2724,14 +3054,16 @@ pub fn attuned_by_effect<S: Store>(s: &Server<S>, t: &crate::things::Thing) -> b
     })
 }
 
-/// A message about an item to all who see it: its holder alone unless it is in hand.
+/// A message about an item to all who know it: its holder, if a player holds it, and every other
+/// client that knows it (one that sees it lying, or in a corpse), each taking its stamps in turn.
 fn tell_of_item<S: Store>(s: &mut Server<S>, net: &mut ServerNet, item: u64, m: &ServerMessage) {
     let Some(t) = s.things.get(item) else {
         return;
     };
-    let holder = t.wielded.or(t.container).map(|(holder, _)| holder);
-    if let Some(world) = holder.and_then(|h| crate::social::world_of(s, h)) {
-        crate::inventory::to_holder(s, net, world, item, m);
+    let holder = t.wielded.map(|(holder, _)| holder).or(t.container);
+    match holder.and_then(|h| crate::social::world_of(s, h)) {
+        Some(world) => crate::inventory::to_holder(s, net, world, item, m),
+        None => crate::inventory::to_knowers(s, net, item, m),
     }
 }
 
@@ -3215,8 +3547,10 @@ pub fn show_fxs<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId,
 /// each that its client is shown (2017: an instrument's own appearance effects, never shown,
 /// sent nothing in 21 of 21 wields) a record of its own, cast by the item at its spellcraft and
 /// from it, held until the item comes off (flags [`WORN`]); then, for an effect a death does not
-/// end, "The `<effect>` applies to you." naming the item (2017: 176 of 200 such records; 276 of 277
-/// of the others had none); its appearance shown when no other record shows it. Returns the ids.
+/// end, the line of its own table naming the item, or "The `<effect>` applies to you." where its
+/// table holds none (2017: 176 of 200 such records; 276 of 277 of the others had none); its
+/// appearance shown when no other record shows it. An effect that moves a quest moves it then,
+/// as it does itself, and holds no record. Returns the ids.
 pub fn put_on_worn<S: Store>(
     s: &mut Server<S>,
     net: &mut ServerNet,
@@ -3228,6 +3562,19 @@ pub fn put_on_worn<S: Store>(
     let name = s.things.get(item).and_then(|t| t.facts.name);
     let mut ids = Vec::new();
     for (state, spellcraft) in effects {
+        let cast = Cast {
+            caster: item,
+            spellcraft: *spellcraft,
+            item,
+            ..Cast::default()
+        };
+        if s.effect_table
+            .get(*state)
+            .is_some_and(|d| matches!(d.kind, Kind::Quest { .. }))
+        {
+            apply_on(s, net, On::Player(world), *state, cast, clock);
+            continue;
+        }
         let Some(def) = s
             .effect_table
             .get(*state)
@@ -3235,12 +3582,6 @@ pub fn put_on_worn<S: Store>(
             .cloned()
         else {
             continue;
-        };
-        let cast = Cast {
-            caster: item,
-            spellcraft: *spellcraft,
-            item,
-            ..Cast::default()
         };
         let shape = Shape {
             flags: WORN,
@@ -3253,18 +3594,8 @@ pub fn put_on_worn<S: Store>(
         };
         ids.push(eid);
         if let (false, Some(effect)) = (def.removed_on_death(), def.name) {
-            let mut vars = vec![progress::nested(
-                learned::EFFECT_VAR,
-                progress::text(effect),
-            )];
-            if let Some(n) = name {
-                vars.push(progress::nested(learned::GIVER_VAR, progress::text(n)));
-            }
-            progress::private(
-                net,
-                world,
-                &crate::chat::show_text(2, progress::text_with(learned::TEXT, vars)),
-            );
+            let line = s.effect_table.line(*state).unwrap_or(learned::APPLIES);
+            progress::private(net, world, &applied(line, effect, name));
         }
         if def.fx != 0 && shows_once(s, On::Player(world), def.fx) {
             show_fx_on(s, net, On::Player(world), def.fx);

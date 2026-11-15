@@ -223,6 +223,8 @@ impl SceneDraw {
         let mut ws = WorldState::new(&land.region, &cfg);
         let mut scene = Self {
             cfg,
+            #[cfg(feature = "remaster")]
+            scenery_asked: cfg.scenery_radius,
             // Leaves every shadow at the value
             // the first preference-update poll installs, so the frame after a load does
             // no work: seeded from the profile that was just applied, not from the defaults.
@@ -299,6 +301,7 @@ impl SceneDraw {
             frame_portal_stamps: std::cell::Cell::new((0, 0)),
             frame_building_cells: std::cell::Cell::new(0),
             frame_costs: std::cell::Cell::new(FrameCosts::default()),
+            degrade_stats_of: None,
             detail_from: DetailSource::World,
             sky: None,
             sky_region: sky_region.map(Box::new),
@@ -914,8 +917,12 @@ impl SceneDraw {
             work.remaster_refused = self.apply_remaster(live.fidelity.remaster(), store, gpu);
             self.apply_remaster_rows(remaster_rows::RemasterRows::of(&live.fidelity), gpu);
             self.poll_remaster_look(gpu);
+            // The scenery distance the remaster draws, or the one asked for without it.
+            let scenery = self.scenery_radius_drawn(&live.fidelity);
+            work.scenery_changed = scenery != self.cfg.scenery_radius;
+            self.cfg.scenery_radius = scenery;
         }
-        if !(work.flushed || work.mid_radius_changed) {
+        if !(work.flushed || work.mid_radius_changed || work.scenery_changed) {
             return Ok(work);
         }
         if work.flushed {
@@ -943,7 +950,7 @@ impl SceneDraw {
             ws.streamer.window.mid_radius()
         };
         let viewer = ws.streamer.window.viewer_block();
-        ws.streamer.window = LandblockWindow::new(radius);
+        ws.streamer.window = LandblockWindow::with_spec(radius, self.cfg.window_spec());
         if let Some(v) = viewer {
             // Every slot comes back `Fetched` because the array did not exist, which is
             // `update_block`'s full-reload path -- the same one `WorldScene::load` takes.
@@ -995,7 +1002,7 @@ impl SceneDraw {
         radius: u32,
     ) -> Result<(), WorldError> {
         let viewer = ws.streamer.window.viewer_block();
-        ws.streamer.window = LandblockWindow::new(radius);
+        ws.streamer.window = LandblockWindow::with_spec(radius, self.cfg.window_spec());
         if let Some(v) = viewer {
             let actions = ws.streamer.window.update_block(v);
             self.queue(ws, &actions);
@@ -1976,9 +1983,10 @@ impl SceneDraw {
 
     /// Where the point a name over `id` stands on is on screen, in pixels, and its depth as the
     /// world is drawn: over its drawn origin at a height that does not follow its animation
-    /// ([`WorldState::name_top`]), raised with the body where the ground is drawn off where
-    /// physics puts it ([`Self::drawn_lift`]), seen from where the camera is this frame. `None`
-    /// behind the camera or for an object not drawn.
+    /// ([`WorldState::name_top`]; over what the art pack draws in place of its parts, where it
+    /// does), raised with the body where the ground is drawn off where physics puts it
+    /// ([`Self::drawn_lift`]), seen from where the camera is this frame. `None` behind the camera
+    /// or for an object not drawn.
     ///
     /// No depth for an object outdoors seen from a room: the outdoors is drawn before the room's
     /// depth is cleared and its openings stamped back nearer, so the world keeps no depth of its
@@ -1990,6 +1998,17 @@ impl SceneDraw {
         id: ObjectId,
         viewport: (u32, u32),
     ) -> Option<(f32, f32, Option<f32>)> {
+        #[cfg(feature = "remaster")]
+        let top = {
+            let who = ws
+                .objects
+                .get(&id)
+                .map_or((None, false), |o| (o.weenie, o.held_launcher));
+            ws.name_top_drawn(id, |driver, own| {
+                self.pack_name_height((id, who), driver, own)
+            })?
+        };
+        #[cfg(not(feature = "remaster"))]
         let top = ws.name_top(id)?;
         let top = Vec3::new(top.x, top.y, top.z + self.drawn_lift(ws, id));
         let (x, y, depth) = self.screen_point(ws, viewport, top)?;
@@ -2007,12 +2026,7 @@ impl SceneDraw {
         #[cfg(feature = "remaster")]
         if self.remaster_ground.active {
             if let Some(o) = ws.objects.get(&id) {
-                if ws
-                    .object_draw_cell(o)
-                    .is_some_and(dereth_physics::landdefs::is_outdoors)
-                {
-                    return self.remaster_ground.shift_at(o.frame.origin);
-                }
+                return self.remaster_ground.object_lift(ws, o);
             }
         }
         let _ = (ws, id);

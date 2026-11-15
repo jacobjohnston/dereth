@@ -34,8 +34,55 @@ public static const uint FRAME_EXTENT = 20;
 // Where the near ground gives way to the far, meters from the eye (x, y), and z 1 while a far
 // ground is drawn: what stands on the ground is lifted onto it mixed the same way.
 public static const uint FRAME_LIFT = 22;
-// The hue an art pack's leaves are pulled toward, in turns (x), and how far (y, 0 not at all).
-public static const uint FRAME_FOLIAGE = 23;
+// How far round the screen patterns a tree's pictures are cut by are turned this frame, while the
+// smoothing or an upscaler lays frames over each other: x the pattern that picks a card's view, y
+// the one that cuts its coverage, 0 to 1; z 1 while they turn at all, 0 while they hold still.
+public static const uint FRAME_DITHER = 23;
+// The wind an art pack's trees sway in: xy its push east and north, meters a second; z the
+// weather's clock within its period, seconds.
+public static const uint FRAME_WIND = 24;
+
+// The material flag of a surface drawn under its vertices' colors, and of an art pack's leaves.
+public static const uint VERTEX_COLORED = 512;
+public static const uint PACK_FOLIAGE = 1024;
+
+public static const float SWAY_TAU = 6.2831853;
+// The sway's motions, each a whole number of cycles in the weather's clock's period (1200 s), so
+// the clock's wrap moves nothing: the slow swing (about 5 s), the gusts that roll across the land
+// (about 20 s), a sideways rock (about 4 s) and the leaves' flutter (about 1 s).
+public static const float SWAY_SWING = SWAY_TAU * 229.0 / 1200.0;
+public static const float SWAY_GUST = SWAY_TAU * 61.0 / 1200.0;
+public static const float SWAY_ROCK = SWAY_TAU * 311.0 / 1200.0;
+public static const float SWAY_FLUTTER = SWAY_TAU * 1259.0 / 1200.0;
+
+// How far the wind moves the vertex at `pos` of a growing model standing at `origin` (both the
+// frame's space), which bends `bend` meters at a wind of a meter a second, in the frame's wind `w`
+// (its row of the frame's constants); a cut-out leaf (`leaf`) flutters as well. The model leans
+// with the wind, further in a gust, and swings about that lean; trees apart swing apart. Only
+// `origin`'s xy is read.
+public float3 swayed(float4 w, float bend, float3 origin, float3 pos, bool leaf)
+{
+    float strength = length(w.xy);
+    if (strength < 1e-4)
+    {
+        return float3(0.0, 0.0, 0.0);
+    }
+    float2 along = w.xy / strength;
+    float2 across = float2(-along.y, along.x);
+    float t = w.z;
+    float phase = dot(origin.xy, float2(0.173, 0.131));
+    float gust = 0.5 + 0.5 * sin(t * SWAY_GUST - dot(origin.xy, float2(0.021, 0.017)));
+    float swing = sin(t * SWAY_SWING + phase);
+    float rock = sin(t * SWAY_ROCK + phase * 1.7);
+    float reach = bend * strength;
+    float3 d = float3(along * reach * (0.4 + 0.35 * gust + 0.25 * swing) + across * reach * 0.12 * rock, 0.0);
+    if (leaf)
+    {
+        float f = sin(t * SWAY_FLUTTER + dot(pos, float3(1.7, 1.3, 2.1)));
+        d += float3(across * 0.05, 0.03) * strength * min(reach * 4.0, 1.0) * f;
+    }
+    return d;
+}
 
 // `c` in hue (turns), saturation and value.
 float3 hsv_of(float3 c)
@@ -67,21 +114,6 @@ float3 rgb_of(float3 hsv)
 {
     float3 k = frac(hsv.x + float3(1.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0;
     return hsv.z * lerp(float3(1.0, 1.0, 1.0), saturate(abs(k) - 1.0), hsv.y);
-}
-
-// An art pack's leaf color `c` pulled toward the frame's foliage hue: its hue taken that share of
-// the way, by the shorter way round, its saturation and value as they were.
-public float3 pack_foliage(uint frame, float3 c)
-{
-    float4 f = row(frame, FRAME_FOLIAGE);
-    if (f.y <= 0.0)
-    {
-        return c;
-    }
-    float3 hsv = hsv_of(c);
-    float off = frac(hsv.x - f.x + 0.5) - 0.5;
-    hsv.x = frac(f.x + off * (1.0 - f.y));
-    return rgb_of(hsv);
 }
 
 // The light classes, which the material target's first channel carries.

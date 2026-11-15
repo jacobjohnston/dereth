@@ -67,7 +67,7 @@ fn place(id: u64, template: u32, kind: Kind, origin: [f32; 3]) -> ContentObject 
 fn quest(id: u32, phases: u32) -> QuestDef {
     QuestDef {
         id,
-        name: (0xA860_7CEC, 0x2500_2958),
+        name: Words::Ref(0xA860_7CEC, 0x2500_2958),
         description: (0x6C45_9364, 0x2500_2958),
         icon: 0x4100_034B,
         play_fx: true,
@@ -86,9 +86,11 @@ fn quest(id: u32, phases: u32) -> QuestDef {
         subquests: Vec::new(),
         min_level: 0,
         fails_on_death: false,
+        fails_on_logout: false,
+        fails_on_teleport: false,
         once: false,
         fellows: yalain_content::quests::Fellows::default(),
-        last_waits: false,
+        ranges: Vec::new(),
         hero_only: false,
         pay: yalain_content::quests::CompletionPay::default(),
         required: None,
@@ -98,6 +100,7 @@ fn quest(id: u32, phases: u32) -> QuestDef {
 
 fn step(quest: u32, needs: u32, trigger: Trigger, update: Update) -> Step {
     Step {
+        key: String::new(),
         quest,
         needs,
         trigger,
@@ -108,17 +111,21 @@ fn step(quest: u32, needs: u32, trigger: Trigger, update: Update) -> Step {
         counts: Vec::new(),
         effects: Vec::new(),
         text: None,
+        recipes: Vec::new(),
         placed: "authored for a test".into(),
         requires: Vec::new(),
         takes: Vec::new(),
         races: Vec::new(),
         effects_last: false,
+        effects_quiet: false,
         wants: None,
         fellows: false,
         levels: None,
         xp_share: 0.0,
         to: None,
         transforms: None,
+        chance: None,
+        to_fellows: false,
     }
 }
 
@@ -640,6 +647,51 @@ fn a_give_whose_walk_ends_out_of_reach_is_refused() {
     assert!(holds(&h, me, item));
 }
 
+/// A walk to give that ends at rest 6.4 m from the far person's center hands the item over when the
+/// person's body is 4.45 m wide (as wide as one 2017's players walked to and used from 9.4 m off its
+/// center): the walk ends at its range from the person's side, here 1.95 m off. With the body not
+/// known the walk measures to the center, and the same place is refused as one that could not get
+/// there.
+///
+/// Behaviour: server.gives.walk-ends-at-the-persons-side
+#[test]
+fn a_give_whose_walk_ends_by_a_wide_persons_side_is_handed_over() {
+    for wide in [true, false] {
+        let mut h = world();
+        if wide {
+            h.server.catalog.bodies.insert(FAR_T, [4.45, 6.29]);
+        }
+        let (b, me) = player(&mut h, "one", "Elara");
+        let (item, slot) = hold(&mut h, me, JUNK, 1);
+        let from = h.bots[b].inbox.len();
+        h.bots[b].send(true, queue::WEENIE, &give(me, item, slot, FAR, 1));
+        h.run(4);
+        assert!(answers(&h, b, from).is_empty(), "walking");
+        let at = h.server.players[&world_of(&h, me)].position;
+        let here = auberean_primitives::Vec3::new(59.0, 260.0 - 6.4, at.origin[2]);
+        let stamp = h.server.players[&world_of(&h, me)].teleport_stamp;
+        for _ in 0..2 {
+            let idle = yalain_world::world::IDLE_MOTION;
+            h.bots[b].send(true, queue::WEENIE, &report(at.cell, here, 0, idle, stamp));
+            h.run(3);
+        }
+        h.run(steps(HANDED_AFTER) + 8);
+        let a = answers(&h, b, from);
+        assert_eq!(a.len(), 1, "{a:?}");
+        let handing = h.world_messages(b, from).iter().any(|m| {
+            matches!(m,
+            ServerMessage::PlayBehavior(e) if e.action.behavior == HANDING)
+        });
+        if wide {
+            assert_eq!(a[0].status, 0);
+            assert!(handing, "handed over");
+        } else {
+            assert_eq!(a[0].status, status::CANT_GET_THERE);
+            assert!(!handing, "not handed over");
+        }
+    }
+}
+
 /// A part of a stack given to a step that keeps it is taken, the rest staying in the pack with
 /// its quantity told.
 ///
@@ -1123,21 +1175,12 @@ fn a_steps_vitae_tap_takes_a_tenth_of_the_vitae() {
     );
 }
 
-/// A world's tap of vitae takes the share its rule names, and one whose rules name none takes 2017's
-/// tenth with Aun Aulatah's tap; a world that names any has its rows' alone.
+/// A world's tap of vitae takes the share its rule names: a half, put on by a step.
 ///
 /// Behaviour: server.gives.vitae-tap
 #[test]
-fn a_vitae_tap_takes_what_its_rule_says_and_without_rules_2017s() {
-    use yalain_world::effect_defs::{vitae_taps_or_2017, EffectRules, Kind};
-    let mut none = EffectRules::default();
-    assert!(vitae_taps_or_2017(&mut none), "named none");
-    assert_eq!(none.vitae_taps.get(&yalain_testkit::VITAE_TAP), Some(&0.1));
-    let mut own = EffectRules::default();
-    own.vitae_taps.insert(0x6F00_7777, 0.5);
-    assert!(!vitae_taps_or_2017(&mut own));
-    assert_eq!(own.vitae_taps.len(), 1, "its rows alone");
-    // A half, put on by a step.
+fn a_vitae_tap_takes_the_share_its_rule_names() {
+    use yalain_world::effect_defs::Kind;
     let mut h = world();
     let tap = h
         .server
@@ -1316,6 +1359,8 @@ fn hero_world(effects: Vec<u32>, transforms: Option<Transformation>) -> Harness 
             takes: vec![BOJU_GEM],
             effects,
             transforms,
+            chance: None,
+            to_fellows: false,
             ..step(
                 ELYSA,
                 4,
@@ -1378,45 +1423,14 @@ fn a_give_that_makes_a_hero_does_so_when_the_transformation_is_through() {
     );
 }
 
-/// A world whose steps name no transformation transforms the player of a give's step putting on
-/// the hero's transformation as 2017 did, 25.59 s after the answer; once a world names any, a step
-/// it names none for runs at once and makes no hero.
+/// A give's step whose row names no transformation runs at once and makes no hero, even one that
+/// puts on the hero's transformation effect.
 ///
 /// Behaviour: server.gives.hero-transformation
 #[test]
-fn without_rows_the_heros_transformation_is_2017s_and_with_them_the_rows_alone() {
-    let mut h = hero_world(vec![gives::HERO_TRANSFORMATION], None);
-    assert!(gives::transformations_or_2017(&mut h.server.quests));
-    assert_eq!(
-        h.server.quests.steps[0].transforms,
-        Some(gives::transformation_2017())
-    );
-    assert_eq!(gives::transformation_2017().seconds, 25.59);
-    let (b, me) = player(&mut h, "one", "Elara");
-    at_phase(&mut h, ELYSA, 4);
-    let (gem, slot) = hold(&mut h, me, BOJU_GEM, 1);
-    let from = h.bots[b].inbox.len();
-    h.bots[b].send(true, queue::WEENIE, &give(me, gem, slot, OBJECT, 1));
-    h.run(steps(HANDED_AFTER) + steps(25.59) - 10);
-    assert!(updates(&h, b, from).is_empty(), "not yet");
-    h.run(12);
-    let world = world_of(&h, me);
-    assert!(yalain_world::focus::is_hero(
-        &h.server.players[&world].qualities
-    ));
-    // A world naming a transformation for another step: this one is a plain step.
-    let mut h = hero_world(vec![gives::HERO_TRANSFORMATION], None);
-    h.server.quests.steps.push(Step {
-        transforms: Some(transformation()),
-        ..step(
-            ELYSA,
-            9,
-            Trigger::Give(BOJU_GEM, OBJECT_T),
-            Update::Complete,
-        )
-    });
-    assert!(!gives::transformations_or_2017(&mut h.server.quests));
-    assert_eq!(h.server.quests.steps[0].transforms, None);
+fn a_step_whose_row_names_no_transformation_runs_at_once_and_makes_no_hero() {
+    const HERO_TRANSFORMATION: u32 = 0x6F00_1C6F;
+    let mut h = hero_world(vec![HERO_TRANSFORMATION], None);
     let (b, me) = player(&mut h, "one", "Elara");
     at_phase(&mut h, ELYSA, 4);
     let (gem, slot) = hold(&mut h, me, BOJU_GEM, 1);
@@ -1523,6 +1537,7 @@ fn taking(item: Option<u32>) -> Give {
         counts: Vec::new(),
         effects: Vec::new(),
         text: None,
+        effects_quiet: false,
         fx: None,
         requires: Vec::new(),
         placed: "authored for a test".into(),
@@ -1580,6 +1595,193 @@ fn a_give_moving_no_quest_keeps_the_item_says_its_lines_and_gives_its_items() {
         |m| matches!(m, ServerMessage::DoFx(e) if e.sender.id == PERSON && e.action.fx == TOKEN_FX),
     );
     assert!(played, "the person plays what the row says");
+}
+
+/// A give that moves no quest and adds to a tally adds as it takes each item, never past the tally's
+/// full; one that waits on the tally not yet full refuses the item once it is, handing it back.
+///
+/// Behaviour: server.tallies.steps-and-gives-fill-a-shared-count
+#[test]
+fn a_give_moving_no_quest_adds_to_a_tally_until_it_is_full() {
+    use yalain_content::tallies::{Adds, Gate, Holds, Reset, Tally, TallyTable};
+    let mut h = world();
+    let row = taking(Some(OFFERING));
+    h.server.quests.gives.push(row.clone());
+    h.server.content.tallies = TallyTable {
+        tallies: vec![Tally {
+            key: "supplies".into(),
+            full: 3,
+            starts: None,
+            resets: Reset::Never,
+            clears: Vec::new(),
+        }],
+        gives: vec![(
+            row.clone(),
+            Gate {
+                tally: "supplies".into(),
+                holds: Holds::NotFull,
+            },
+        )],
+        give_adds: vec![(
+            row,
+            Adds {
+                tally: "supplies".into(),
+                by: 2,
+            },
+        )],
+        ..TallyTable::default()
+    };
+    let (b, me) = player(&mut h, "one", "Elara");
+    let count = |h: &Harness| yalain_world::tallies::count(&h.server, "supplies");
+    let offering = hold(&mut h, me, OFFERING, 1);
+    give_ashes(&mut h, b, me, offering, 1);
+    assert!(!holds(&h, me, offering.0), "taken");
+    assert_eq!(count(&h), 2);
+    let offering = hold(&mut h, me, OFFERING, 1);
+    give_ashes(&mut h, b, me, offering, 1);
+    assert!(!holds(&h, me, offering.0), "taken");
+    assert_eq!(count(&h), 3, "never past full");
+    let offering = hold(&mut h, me, OFFERING, 1);
+    let (lines, _) = give_ashes(&mut h, b, me, offering, 1);
+    assert!(holds(&h, me, offering.0), "refused once it is full");
+    assert_eq!(lines, vec![PLAIN_REFUSAL]);
+    assert_eq!(count(&h), 3);
+}
+
+/// A give that moves no quest and waits on a craft skill refuses the item to a player under its
+/// level, handing it back; at the level in one of the skills it names it takes it.
+///
+/// Behaviour: server.quests.craft-skill-gate
+#[test]
+fn a_give_waiting_on_a_craft_skill_takes_the_item_only_at_its_level() {
+    use yalain_content::crafts::{CraftGate, CraftGates};
+    use yalain_world::state::CraftSkillState;
+    const TOOLS: u32 = 0x6F00_06A7;
+    let mut h = world();
+    let row = taking(Some(OFFERING));
+    h.server.quests.gives.push(row.clone());
+    h.server.content.craft_gates = CraftGates {
+        steps: Vec::new(),
+        gives: vec![(
+            row,
+            CraftGate {
+                skills: vec![TOOLS],
+                at_least: 100,
+            },
+        )],
+    };
+    let (b, me) = player(&mut h, "one", "Elara");
+    let at = |h: &mut Harness, level: u32| {
+        let world = world_of(h, me);
+        h.server
+            .players
+            .get_mut(&world)
+            .expect("in the world")
+            .play
+            .craft_skills = vec![CraftSkillState {
+            skill: TOOLS,
+            level,
+            today: 0,
+            available: 0,
+        }];
+    };
+    at(&mut h, 99);
+    let offering = hold(&mut h, me, OFFERING, 1);
+    let (lines, _) = give_ashes(&mut h, b, me, offering, 1);
+    assert!(holds(&h, me, offering.0), "refused under the level");
+    assert_eq!(lines, vec![PLAIN_REFUSAL]);
+    at(&mut h, 100);
+    give_ashes(&mut h, b, me, offering, 1);
+    assert!(!holds(&h, me, offering.0), "taken at the level");
+}
+
+/// A give that moves no quest and is for heroes alone refuses the item to a player who is none,
+/// handing it back; from a hero it takes it.
+///
+/// Behaviour: server.quests.a-step-for-heroes-alone
+#[test]
+fn a_give_for_heroes_alone_takes_the_item_only_from_a_hero() {
+    use yalain_content::heroes::HeroGates;
+    let mut h = world();
+    let row = taking(Some(OFFERING));
+    h.server.quests.gives.push(row.clone());
+    h.server.content.hero_gates = HeroGates {
+        steps: Vec::new(),
+        gives: vec![row],
+    };
+    let (b, me) = player(&mut h, "one", "Elara");
+    let offering = hold(&mut h, me, OFFERING, 1);
+    let (lines, _) = give_ashes(&mut h, b, me, offering, 1);
+    assert!(holds(&h, me, offering.0), "refused to one who is no hero");
+    assert_eq!(lines, vec![PLAIN_REFUSAL]);
+    let world = world_of(&h, me);
+    yalain_world::focus::set_hero_kept(
+        &mut h
+            .server
+            .players
+            .get_mut(&world)
+            .expect("in the world")
+            .qualities,
+        true,
+    );
+    give_ashes(&mut h, b, me, offering, 1);
+    assert!(!holds(&h, me, offering.0), "taken from a hero");
+}
+
+/// A quest step or a give naming several items to pick from gives one of them each time it runs,
+/// by their weights, beside what it always gives: an offering handed in again and again brings
+/// one gem or the other, never both and never none.
+///
+/// Behaviour: server.gives.one-of-several
+#[test]
+fn a_step_or_a_give_naming_several_items_gives_one_of_them_each_time() {
+    const TIMES: u32 = 24;
+    let held_of = |h: &Harness, me: u64, template: u32| -> u32 {
+        h.server.players[&world_of(h, me)]
+            .play
+            .items
+            .iter()
+            .filter(|x| {
+                h.server
+                    .things
+                    .get(x.id)
+                    .is_some_and(|t| t.template == template)
+            })
+            .map(|x| x.quantity.max(1))
+            .sum()
+    };
+    for by_step in [true, false] {
+        let mut h = world();
+        h.server
+            .catalog
+            .insert(yalain_testkit::test_template(GEM, 0x1067, Props::default()));
+        let pick = vec![(GEM, 1), (IMBUED, 1)];
+        if by_step {
+            let st = Step {
+                key: "pick".into(),
+                takes: vec![OFFERING],
+                ..step(QUEST, 0, Trigger::Give(OFFERING, PERSON_T), Update::Nothing)
+            };
+            h.server.quests.steps.push(st.clone());
+            h.server.item_rows.step_picks = vec![(st, pick)];
+        } else {
+            let row = taking(Some(OFFERING));
+            h.server.quests.gives.push(row.clone());
+            h.server.item_rows.give_picks = vec![(row, pick)];
+        }
+        let (b, me) = player(&mut h, "one", "Elara");
+        for _ in 0..TIMES {
+            let offering = hold(&mut h, me, OFFERING, 1);
+            give_ashes(&mut h, b, me, offering, 1);
+            assert!(!holds(&h, me, offering.0), "step {by_step}: taken");
+        }
+        let (gems, imbued) = (held_of(&h, me, GEM), held_of(&h, me, IMBUED));
+        assert_eq!(gems + imbued, TIMES, "step {by_step}: one a time");
+        assert!(
+            gems > 0 && imbued > 0,
+            "step {by_step}: {gems} and {imbued}"
+        );
+    }
 }
 
 /// A give whose gift this world can't make takes nothing: the item goes back to its giver, whole.
@@ -1733,6 +1935,117 @@ fn a_give_requiring_a_phase_runs_at_it_and_a_step_comes_first() {
     let (lines, moved) = give_ashes(&mut h, b, me, ashes, 1);
     assert_eq!(lines, vec![TAKING_LINE], "the phase it requires");
     assert!(moved.is_empty());
+    assert!(!holds(&h, me, ashes.0));
+}
+
+/// A give that requires a quest failed runs only with it failed; under way, the item is refused
+/// and handed back.
+///
+/// Behaviour: server.quests.a-step-requires-a-quest-failed
+#[test]
+fn a_give_requiring_a_quest_failed_runs_only_once_it_has_failed() {
+    const TIMER: u32 = 0x4000_7777;
+    let mut h = world();
+    h.server.quests.gives.push(Give {
+        requires: vec![(TIMER, Need::Failed)],
+        ..taking(Some(ASHES))
+    });
+    h.server
+        .talk
+        .lines
+        .push(taking_line(Some(ASHES), TAKING_LINE, 0));
+    let (b, me) = player(&mut h, "one", "Elara");
+    let ashes = hold(&mut h, me, ASHES, 1);
+    at_phase(&mut h, TIMER, 1);
+    let (lines, _) = give_ashes(&mut h, b, me, ashes, 1);
+    assert_eq!(lines, vec![PLAIN_REFUSAL], "under way");
+    assert!(holds(&h, me, ashes.0), "handed back");
+    for p in h.server.players.values_mut() {
+        for q in &mut p.play.quests {
+            if q.quest == TIMER {
+                q.status = yalain_world::quests::status::FAILED;
+                q.phase = 0;
+            }
+        }
+    }
+    let (lines, _) = give_ashes(&mut h, b, me, ashes, 1);
+    assert_eq!(lines, vec![TAKING_LINE], "failed");
+    assert!(!holds(&h, me, ashes.0));
+}
+
+/// A give that requires a quest never completed takes the item from one who never completed it;
+/// from one who completed it, even given it again since, the item is refused and handed back.
+///
+/// Behaviour: server.quests.a-step-waits-on-a-quest-never-completed
+#[test]
+fn a_give_requiring_a_quest_never_completed_refuses_one_who_ever_completed_it() {
+    const DESCENT: u32 = 0x4000_02A0;
+    let mut h = world();
+    h.server.quests.gives.push(Give {
+        requires: vec![(DESCENT, Need::NeverDone)],
+        ..taking(Some(ASHES))
+    });
+    h.server
+        .talk
+        .lines
+        .push(taking_line(Some(ASHES), TAKING_LINE, 0));
+    let (b, me) = player(&mut h, "one", "Elara");
+    let ashes = hold(&mut h, me, ASHES, 1);
+    at_phase(&mut h, DESCENT, 1);
+    for p in h.server.players.values_mut() {
+        p.play.completed_before = vec![DESCENT];
+    }
+    let (lines, _) = give_ashes(&mut h, b, me, ashes, 1);
+    assert_eq!(lines, vec![PLAIN_REFUSAL], "completed before");
+    assert!(holds(&h, me, ashes.0), "handed back");
+    for p in h.server.players.values_mut() {
+        p.play.completed_before.clear();
+        for q in &mut p.play.quests {
+            if q.quest == DESCENT {
+                q.status = yalain_world::quests::status::COMPLETED;
+                q.phase = 0;
+            }
+        }
+    }
+    let (lines, _) = give_ashes(&mut h, b, me, ashes, 1);
+    assert_eq!(lines, vec![PLAIN_REFUSAL], "completed");
+    assert!(holds(&h, me, ashes.0), "handed back");
+    at_phase(&mut h, DESCENT, 1);
+    let (lines, _) = give_ashes(&mut h, b, me, ashes, 1);
+    assert_eq!(lines, vec![TAKING_LINE], "never completed");
+    assert!(!holds(&h, me, ashes.0));
+}
+
+/// A give that waits on its player having fought a camp's creature takes the item from one who
+/// harmed the camp's last creature to die; from anyone else it is refused and handed back.
+///
+/// Behaviour: server.quests.a-step-waits-on-its-player-having-fought
+#[test]
+fn a_give_waiting_on_a_fight_takes_the_item_only_from_one_who_fought() {
+    use yalain_content::fought::FoughtGates;
+    let mut h = world();
+    let give = taking(Some(ASHES));
+    h.server.quests.gives.push(give.clone());
+    h.server.content.fought_gates = FoughtGates {
+        steps: Vec::new(),
+        gives: vec![(give, vec![0])],
+    };
+    h.server
+        .camps
+        .push(yalain_world::spawn::CampState::default());
+    h.server
+        .talk
+        .lines
+        .push(taking_line(Some(ASHES), TAKING_LINE, 0));
+    let (b, me) = player(&mut h, "one", "Elara");
+    let ashes = hold(&mut h, me, ASHES, 1);
+    h.server.camps[0].fought = vec![me + 1];
+    let (lines, _) = give_ashes(&mut h, b, me, ashes, 1);
+    assert_eq!(lines, vec![PLAIN_REFUSAL], "another fought it");
+    assert!(holds(&h, me, ashes.0), "handed back");
+    h.server.camps[0].fought = vec![me + 1, me];
+    let (lines, _) = give_ashes(&mut h, b, me, ashes, 1);
+    assert_eq!(lines, vec![TAKING_LINE], "fought it");
     assert!(!holds(&h, me, ashes.0));
 }
 
@@ -1907,4 +2220,353 @@ fn a_hand_in_shared_with_the_fellowship_gives_its_items_to_the_giver_alone() {
         "the fellow's quest done"
     );
     assert!(!imbued(&h, you), "the fellow given nothing");
+}
+
+/// A give's step that leads somewhere keeps the item, tells its update and then takes the player
+/// through portal space to its place; so does a take's step, as the item comes into the pack.
+///
+/// Behaviour: server.quests.a-give-or-take-that-leads-on
+#[test]
+fn a_give_or_a_takes_step_that_leads_somewhere_tells_its_update_then_takes_the_player() {
+    const ENTER_PORTAL_SPACE: u32 = 0x8212_0020;
+    let at = |cell: u32| yalain_content::quests::Place {
+        cell,
+        origin: [100.0, 20.0, 50.0],
+        heading: 0,
+    };
+    let (there, then) = (0x6CB9_0029, 0x6CB9_0030);
+    let mut h = world();
+    h.server.quests.steps = vec![
+        Step {
+            takes: vec![ASHES],
+            to: Some(at(there)),
+            ..step(QUEST, 2, Trigger::Give(ASHES, PERSON_T), Update::Advance(3))
+        },
+        Step {
+            to: Some(at(then)),
+            ..step(QUEST, 3, Trigger::Take(SLIVER), Update::Complete)
+        },
+    ];
+    let (b, me) = player(&mut h, "one", "Elara");
+    at_phase(&mut h, QUEST, 2);
+    let (ashes, slot) = hold(&mut h, me, ASHES, 1);
+    let from = h.bots[b].inbox.len();
+    h.bots[b].send(true, queue::WEENIE, &give(me, ashes, slot, PERSON, 1));
+    h.run(steps(HANDED_AFTER) + 8);
+    assert!(!holds(&h, me, ashes), "kept");
+    let calls = h.functions(b, from);
+    let told = calls.iter().position(|f| *f == UPDATE_QUEST);
+    let went = calls.iter().position(|f| *f == ENTER_PORTAL_SPACE);
+    assert!(
+        told.is_some() && went.is_some() && told < went,
+        "the update, then portal space: {calls:08X?}"
+    );
+    h.run(steps(12.0));
+    let p = &h.server.players[&world_of(&h, me)];
+    assert_eq!(p.position.cell, there, "at the give's place");
+    assert!(p.trip.is_none());
+    // The take: the sliver comes into the pack.
+    hold(&mut h, me, SLIVER, 1);
+    let from = h.bots[b].inbox.len();
+    let (world, clock) = (world_of(&h, me), h.clock());
+    yalain_world::quests::took(&mut h.server, &mut h.net, world, SLIVER, clock);
+    h.run(5);
+    let calls = h.functions(b, from);
+    let told = calls.iter().position(|f| *f == UPDATE_QUEST);
+    let went = calls.iter().position(|f| *f == ENTER_PORTAL_SPACE);
+    assert!(
+        told.is_some() && went.is_some() && told < went,
+        "the update, then portal space: {calls:08X?}"
+    );
+    assert_eq!(updates(&h, b, from), vec![(0x3000_0000, QUEST, 0)]);
+    h.run(steps(12.0));
+    assert_eq!(
+        h.server.players[&world_of(&h, me)].position.cell,
+        then,
+        "at the take's place"
+    );
+}
+
+/// A give's step that takes the fellowship along sends every fellow in the world to its place with
+/// the giver, the one beside it and the one far off in another landblock alike, whatever quests they
+/// hold; a fellow who is dead stays, as do one whose scene isn't drawn yet, one already on its way
+/// elsewhere and a player who is no fellow. Without it, the giver goes alone.
+///
+/// Behaviour: server.quests.a-step-takes-the-fellowship-along
+#[test]
+fn a_step_that_takes_the_fellowship_along_sends_every_fellow_wherever_it_is() {
+    const THERE: u32 = 0x04A9_0100;
+    const ELSEWHERE: u32 = 0x7F91_0034;
+    for along in [true, false] {
+        let mut h = world();
+        h.server.quests.steps = vec![Step {
+            takes: vec![ASHES],
+            to: Some(yalain_content::quests::Place {
+                cell: THERE,
+                origin: [10.0, 20.0, 5.0],
+                heading: 0,
+            }),
+            to_fellows: along,
+            ..step(QUEST, 2, Trigger::Give(ASHES, PERSON_T), Update::Advance(3))
+        }];
+        let (b, me) = player(&mut h, "one", "Elara");
+        let (_, near) = player(&mut h, "two", "Bran");
+        let (_, far) = player(&mut h, "three", "Cael");
+        let (_, dead) = player(&mut h, "four", "Dun");
+        let (_, other) = player(&mut h, "five", "Eir");
+        let (_, busy) = player(&mut h, "six", "Fen");
+        // In the world, its scene not yet drawn.
+        let (_, loading) = h.player_in_world("seven", "Gil");
+        fellowship(&mut h, &[me, near, far, dead, busy, loading]);
+        player_at_phase(&mut h, me, QUEST, 2);
+        let w = world_of(&h, far);
+        let p = h.server.players.get_mut(&w).expect("in the world");
+        p.position.cell = ELSEWHERE;
+        p.position.origin = [100.0, 100.0, 40.0];
+        let w = world_of(&h, dead);
+        let p = h.server.players.get_mut(&w).expect("in the world");
+        yalain_world::quals::set_int(&mut p.qualities, yalain_world::player::quality::HEALTH, 0);
+        let w = world_of(&h, busy);
+        let p = h.server.players.get_mut(&w).expect("in the world");
+        let mut away = p.position;
+        away.cell = ELSEWHERE;
+        p.trip = Some(yalain_world::places::Trip {
+            to: away,
+            used: None,
+            step: None,
+            resurrect: false,
+            sent: true,
+            said: None,
+            updates: Vec::new(),
+        });
+        let cell = |h: &Harness, who: u64| h.server.players[&world_of(h, who)].position.cell;
+        let before = [near, dead, other, busy, loading].map(|who| cell(&h, who));
+        let (ashes, slot) = hold(&mut h, me, ASHES, 1);
+        h.bots[b].send(true, queue::WEENIE, &give(me, ashes, slot, PERSON, 1));
+        h.run(steps(HANDED_AFTER) + 8);
+        h.run(steps(12.0));
+        assert_eq!(cell(&h, me), THERE, "the giver went");
+        if along {
+            assert_eq!(cell(&h, near), THERE, "the fellow beside it went");
+            assert_eq!(cell(&h, far), THERE, "the fellow far off went");
+        } else {
+            assert_eq!(cell(&h, near), before[0], "alone: the fellow stays");
+            assert_eq!(cell(&h, far), ELSEWHERE);
+        }
+        assert_eq!(cell(&h, dead), before[1], "a dead fellow stays");
+        assert_eq!(cell(&h, other), before[2], "no fellow stays");
+        assert_eq!(
+            cell(&h, loading),
+            before[4],
+            "a fellow not yet in the scene stays"
+        );
+        let p = &h.server.players[&world_of(&h, busy)];
+        assert_eq!(
+            (p.position.cell, p.trip.as_ref().map(|t| t.to.cell)),
+            (before[3], Some(ELSEWHERE)),
+            "a fellow on its way elsewhere keeps going there"
+        );
+        let holds_quest = |h: &Harness, who: u64| {
+            h.server.players[&world_of(h, who)]
+                .play
+                .quests
+                .iter()
+                .any(|q| q.quest == QUEST)
+        };
+        assert!(!holds_quest(&h, near), "sent, its quests not moved");
+        assert!(h
+            .server
+            .players
+            .values()
+            .all(|p| p.character == busy || p.trip.is_none()));
+    }
+}
+
+/// A step's give of a class runs for an item of any template of the class (its package the class,
+/// or one deriving from it) and hands the item back; an item of no template of the class is refused
+/// and handed back with no quest moved. A give that moves no quest naming a class keeps any item
+/// of it, and takes no other.
+///
+/// Behaviour: server.gives.any-item-of-a-class
+#[test]
+fn a_give_of_a_class_runs_for_any_item_of_it_and_for_no_other() {
+    const WEAPON: u32 = 0x1049;
+    const AXE_PACKAGE: u32 = 0x1058;
+    const AXE: u32 = 0x4700_1601;
+    const BLADE: u32 = 0x4700_1602;
+    let mut h = world();
+    h.server.catalog.insert(yalain_testkit::test_template(
+        AXE,
+        AXE_PACKAGE,
+        Props::default(),
+    ));
+    h.server.catalog.insert(yalain_testkit::test_template(
+        BLADE,
+        WEAPON,
+        Props::default(),
+    ));
+    h.server
+        .item_classes
+        .bases
+        .insert(AXE_PACKAGE, vec![WEAPON]);
+    h.server.quests.steps = vec![step(
+        QUEST,
+        1,
+        Trigger::GiveClass(WEAPON, PERSON_T),
+        Update::Advance(2),
+    )];
+    let (b, me) = player(&mut h, "one", "Elara");
+    at_phase(&mut h, QUEST, 1);
+    let junk = hold(&mut h, me, JUNK, 1);
+    let (_, moved) = give_ashes(&mut h, b, me, junk, 1);
+    assert!(moved.is_empty(), "no weapon: refused");
+    assert!(holds(&h, me, junk.0), "handed back");
+    let axe = hold(&mut h, me, AXE, 1);
+    let (_, moved) = give_ashes(&mut h, b, me, axe, 1);
+    assert_eq!(
+        moved,
+        vec![(0x2000_0002, QUEST, 2)],
+        "a weapon by its class"
+    );
+    assert!(holds(&h, me, axe.0), "handed back");
+    // A give that moves no quest, for any weapon.
+    h.server.quests.steps.clear();
+    let row = Give {
+        gives: vec![IMBUED],
+        ..taking(None)
+    };
+    h.server.quests.gives.push(row);
+    h.server.content.class_gives.insert(0, WEAPON);
+    let blade = hold(&mut h, me, BLADE, 1);
+    give_ashes(&mut h, b, me, blade, 1);
+    assert!(!holds(&h, me, blade.0), "kept");
+    assert!(h.server.players[&world_of(&h, me)]
+        .play
+        .items
+        .iter()
+        .any(|x| x.template == IMBUED));
+    let junk = hold(&mut h, me, JUNK, 1);
+    give_ashes(&mut h, b, me, junk, 1);
+    assert!(holds(&h, me, junk.0), "no weapon: handed back");
+}
+
+/// A give's step that hands its item back puts the effects its row gives it on the item, each for its
+/// own time on the game clock (an imbuer's spell of thirty minutes on the weapon given); another
+/// step of the same quest that names none puts nothing on it, and the effect runs out at its time.
+///
+/// Behaviour: server.quests.a-step-puts-effects-on-the-item-handed-back
+#[test]
+fn a_give_step_puts_its_effects_on_the_item_it_hands_back() {
+    use yalain_world::effect_defs::{EffectDef, Kind, Scale};
+    const WEAPON: u32 = 0x1049;
+    const AXE: u32 = 0x4700_1601;
+    const SPELL: u32 = 0x6F00_7411;
+    const APPLIED: u32 = 0x6F00_7412;
+    let mut h = world();
+    h.server
+        .catalog
+        .insert(yalain_testkit::test_template(AXE, WEAPON, Props::default()));
+    h.server.effect_table.effects.insert(
+        SPELL,
+        EffectDef {
+            state: SPELL,
+            kind: Kind::Applies(APPLIED),
+            duration: Scale(vec![(0.0, 1800.0)]),
+            priority: Scale(vec![(0.0, 1.0)]),
+            fx: 0,
+            external_flags: 0,
+            internal_flags: 0,
+            enum_value: 0,
+            eq_class: 4056,
+            name: None,
+            ends_at_logout: false,
+            ends_at_teleport: false,
+        },
+    );
+    let imbue = Step {
+        key: "imbue".into(),
+        ..step(
+            QUEST,
+            1,
+            Trigger::GiveClass(WEAPON, PERSON_T),
+            Update::Advance(2),
+        )
+    };
+    let plain = Step {
+        key: "plain".into(),
+        ..step(
+            QUEST,
+            2,
+            Trigger::GiveClass(WEAPON, PERSON_T),
+            Update::Advance(3),
+        )
+    };
+    h.server.quests.steps = vec![imbue, plain];
+    h.server
+        .content
+        .given_effects
+        .insert((QUEST, "imbue".into()), vec![SPELL]);
+    let (b, me) = player(&mut h, "one", "Elara");
+    at_phase(&mut h, QUEST, 1);
+    let axe = hold(&mut h, me, AXE, 1);
+    let (_, moved) = give_ashes(&mut h, b, me, axe, 1);
+    assert_eq!(moved, vec![(0x2000_0002, QUEST, 2)], "imbued");
+    assert!(holds(&h, me, axe.0), "handed back");
+    let on = |h: &Harness| {
+        let t = h.server.things.get(axe.0).expect("the axe");
+        yalain_world::effects::running_on_item(&h.server, t)
+    };
+    let held = on(&h);
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!((held[0].state, held[0].spellcraft), (SPELL, 1.0));
+    let left = held[0].until - h.server.game_now;
+    assert!((1795.0..=1800.0).contains(&left), "{left} s left");
+    // The other step puts nothing more on it.
+    let other = hold(&mut h, me, AXE, 1);
+    let (_, moved) = give_ashes(&mut h, b, me, other, 1);
+    assert_eq!(
+        moved.iter().map(|m| (m.1, m.2)).collect::<Vec<_>>(),
+        [(QUEST, 3)]
+    );
+    assert!(h
+        .server
+        .things
+        .get(other.0)
+        .is_some_and(|t| t.timed.is_empty()));
+    h.server.game_now += 1800.0;
+    assert!(on(&h).is_empty(), "run out");
+}
+
+/// Two gives that move no quest, alike but for the class each takes, each take an item of their
+/// own class: one of the second class is kept by the second, not refused for the first's.
+///
+/// Behaviour: server.gives.any-item-of-a-class
+#[test]
+fn two_gives_alike_but_for_their_class_each_take_their_own_class() {
+    const WEAPON: u32 = 0x1049;
+    const ARMOR: u32 = 0x1100;
+    const AXE: u32 = 0x4700_1601;
+    const HELM: u32 = 0x4700_1603;
+    let mut h = world();
+    h.server
+        .catalog
+        .insert(yalain_testkit::test_template(AXE, WEAPON, Props::default()));
+    h.server
+        .catalog
+        .insert(yalain_testkit::test_template(HELM, ARMOR, Props::default()));
+    h.server.quests.steps.clear();
+    for (i, class) in [WEAPON, ARMOR].into_iter().enumerate() {
+        h.server.quests.gives.push(Give {
+            gives: vec![IMBUED],
+            ..taking(None)
+        });
+        h.server.content.class_gives.insert(i, class);
+    }
+    let (b, me) = player(&mut h, "one", "Elara");
+    let helm = hold(&mut h, me, HELM, 1);
+    give_ashes(&mut h, b, me, helm, 1);
+    assert!(!holds(&h, me, helm.0), "kept by the second");
+    let axe = hold(&mut h, me, AXE, 1);
+    give_ashes(&mut h, b, me, axe, 1);
+    assert!(!holds(&h, me, axe.0), "kept by the first");
 }

@@ -62,6 +62,8 @@ pub struct DatAssets<'a> {
         Arc<super::remaster_pack::PackAssets>,
         dereth_remaster::assets::pack::PackSettings,
     )>,
+    /// Where pictures are made ahead of their use, off the frame, when they are.
+    pictures: Option<&'a RefCell<super::remaster_pictures::Pictures>>,
 }
 
 impl std::fmt::Debug for DatAssets<'_> {
@@ -91,7 +93,18 @@ impl<'a> DatAssets<'a> {
             tiles: RefCell::new(HashMap::new()),
             palettised: HashMap::new(),
             pack: None,
+            pictures: None,
         }
+    }
+
+    /// This source with its pictures made ahead in `pictures`, off the frame.
+    #[must_use]
+    pub(crate) fn with_pictures(
+        mut self,
+        pictures: &'a RefCell<super::remaster_pictures::Pictures>,
+    ) -> Self {
+        self.pictures = Some(pictures);
+        self
     }
 
     /// This source with `pack` drawn as `on` says: its models, their surfaces and pictures, and
@@ -407,6 +420,14 @@ impl AssetSource for DatAssets<'_> {
     }
 
     fn texture(&mut self, key: &TextureKey, clip_map: bool) -> Option<TextureData> {
+        if let Some(p) = self
+            .pictures
+            .filter(|_| super::remaster_pictures::made_ahead(key))
+        {
+            if let Some(made) = p.borrow_mut().take(key, clip_map) {
+                return made;
+            }
+        }
         if let (TextureKey::Dat { picture, .. }, Some((p, _))) = (key, self.pack.as_ref()) {
             if dereth_remaster::assets::pack::of_pack_picture(*picture).is_some() {
                 return p.texture(*picture);
@@ -514,7 +535,28 @@ impl AssetSource for DatAssets<'_> {
             let mean = |s: u64| s as f32 / n as f32 / 255.0;
             *color = [mean(sum[0]), mean(sum[1]), mean(sum[2]), 1.0];
         }
+        // Where the pack lays a land ground, its tile's: what grows and lies on that ground (the
+        // grass, the pebbles) and the ground far off take the color drawn there.
+        if let Some((p, _)) = self.pack.as_ref().filter(|(_, on)| on.ground) {
+            for (t, color) in (0u32..).zip(out.iter_mut()) {
+                if dereth_remaster::assets::kind::is_water_type(t) {
+                    continue;
+                }
+                if let Some(c) = p.ground_color(t) {
+                    *color = c;
+                }
+            }
+        }
         Some(out)
+    }
+
+    fn pebble_grounds(&mut self) -> dereth_remaster::assets::terrain::PebbleGrounds {
+        // Where the pack's ground is drawn, its materials say.
+        self.pack
+            .as_ref()
+            .filter(|(_, on)| on.ground)
+            .map(|(p, _)| p.pebble_grounds())
+            .unwrap_or_default()
     }
 
     fn splat(&mut self, key: u32) -> Option<Splat> {
@@ -626,6 +668,18 @@ impl AssetSource for DatAssets<'_> {
         p.model(id, *on)
     }
 
+    fn pack_skin(
+        &mut self,
+        setup: u32,
+        palettes: &[u32],
+        who: dereth_remaster::scene::Who,
+    ) -> Option<std::sync::Arc<dereth_remaster::assets::skin::SkinModel>> {
+        let (p, on) = self.pack.as_ref()?;
+        on.characters
+            .then(|| p.skin_for(setup, palettes, who))
+            .flatten()
+    }
+
     fn sky(&mut self, id: u32) -> Option<Mesh> {
         // A sky object never moves its parts, so each part's place is folded into its vertices,
         // as the scene's sky is built.
@@ -648,6 +702,15 @@ impl AssetSource for DatAssets<'_> {
         Some(mesh_of(&groups, |s| {
             s.map_or(SurfaceRef::Missing, |s| SurfaceRef::Surface(s.0))
         }))
+    }
+
+    fn prepare(&mut self, key: &TextureKey, clip_map: bool) -> bool {
+        match self.pictures {
+            Some(p) if super::remaster_pictures::made_ahead(key) => {
+                p.borrow_mut().prepare(key, clip_map)
+            }
+            _ => true,
+        }
     }
 
     fn terrain_cells(&mut self, block: BlockId, terrain: &Terrain) -> Vec<TerrainCell> {

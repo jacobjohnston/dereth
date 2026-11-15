@@ -33,6 +33,7 @@ pub fn item(l: &Located) -> Option<Item> {
         Row::Keeper(r) => Item::Keeper {
             template: r.template,
         },
+        Row::Store(r) => Item::Store { key: r.key.clone() },
         Row::Sale(r) => Item::Sale {
             store: r.store,
             ordinal: r.ordinal,
@@ -56,8 +57,14 @@ pub fn item(l: &Located) -> Option<Item> {
             name: r.name.clone(),
         },
         Row::Event(r) => Item::Event { key: r.key.clone() },
+        Row::Tally(r) => Item::Tally {
+            key: r.tally.key.clone(),
+        },
         Row::PointsBonus(r) => Item::PointsBonus { effect: r.effect },
-        Row::EffectRule(r) => Item::EffectRule { effect: r.effect },
+        Row::EffectRule(r) => match &r.effect {
+            crate::rows::EffectOf::State(effect) => Item::EffectRule { effect: *effect },
+            crate::rows::EffectOf::Name(name) => Item::EffectRuleNamed { name: name.clone() },
+        },
         Row::Popup(r) => Item::Popup {
             on: r.on.word().to_string(),
         },
@@ -91,6 +98,12 @@ pub fn item(l: &Located) -> Option<Item> {
         },
         Row::Refining(r) => Item::Refining {
             recipe: r.refining.recipe.clone(),
+        },
+        Row::Recipe(r) => Item::Recipe {
+            id: r.recipe.recipe,
+        },
+        Row::Combination(r) => Item::Combination {
+            key: r.combination.key.clone(),
         },
         Row::Plant(r) => Item::Plant {
             template: r.species.plant,
@@ -135,6 +148,17 @@ pub fn item(l: &Located) -> Option<Item> {
         Row::StartItem(r) => Item::StartItem {
             template: r.template,
         },
+        Row::Interaction(r) => Item::Interaction { key: r.key.clone() },
+        Row::ObjectStates(r) => Item::ObjectStates {
+            key: r.states.key.clone(),
+        },
+        Row::Sequence(r) => Item::Sequence {
+            key: r.sequence.key.clone(),
+        },
+        Row::Lever(r) => Item::Lever { key: r.key.clone() },
+        Row::Offering(r) => Item::Offering { key: r.key.clone() },
+        Row::Guarded(r) => Item::Guarded { key: r.key.clone() },
+        Row::Shifting(r) => Item::Shifting { key: r.key.clone() },
         Row::Concealing(r) => Item::Concealing {
             effect: r.effect,
             class: r.class,
@@ -145,6 +169,11 @@ pub fn item(l: &Located) -> Option<Item> {
         Row::FriendTable(r) => Item::FriendTable { table: r.table },
         Row::Creature(r) => Item::Creature {
             template: r.template,
+        },
+        Row::SafePassage(r) => Item::SafePassage { key: r.key.clone() },
+        Row::CreatureEffect(r) => Item::CreatureEffect { key: r.key.clone() },
+        Row::Defense(r) => Item::Defense {
+            device: r.defense.device,
         },
         Row::Remove(_) => return None,
     })
@@ -179,6 +208,7 @@ fn value(row: &Row) -> String {
         Row::TreasurePool(x) => x.prov = crate::rows::Prov::default(),
         Row::EffectName(x) => x.prov = crate::rows::Prov::default(),
         Row::Event(x) => x.prov = crate::rows::Prov::default(),
+        Row::Tally(x) => x.prov = crate::rows::Prov::default(),
         Row::PointsBonus(x) => x.prov = crate::rows::Prov::default(),
         Row::Popup(x) => x.prov = crate::rows::Prov::default(),
         Row::EffectRule(x) => x.prov = crate::rows::Prov::default(),
@@ -194,6 +224,8 @@ fn value(row: &Row) -> String {
         Row::MapRecipes(x) => x.prov = crate::rows::Prov::default(),
         Row::Spellbinding(x) => x.prov = crate::rows::Prov::default(),
         Row::Refining(x) => x.prov = crate::rows::Prov::default(),
+        Row::Recipe(x) => x.prov = crate::rows::Prov::default(),
+        Row::Combination(x) => x.prov = crate::rows::Prov::default(),
         Row::Plant(x) => x.prov = crate::rows::Prov::default(),
         Row::PlantCross(x) => x.prov = crate::rows::Prov::default(),
         Row::Worn(x) => x.prov = crate::rows::Prov::default(),
@@ -205,15 +237,26 @@ fn value(row: &Row) -> String {
         Row::Pet(x) => x.prov = crate::rows::Prov::default(),
         Row::PetLimit(x) => x.prov = crate::rows::Prov::default(),
         Row::Route(x) => x.prov = crate::rows::Prov::default(),
+        Row::Store(x) => x.prov = crate::rows::Prov::default(),
         Row::Area(x) => x.prov = crate::rows::Prov::default(),
         Row::Clearing(x) => x.prov = crate::rows::Prov::default(),
         Row::ItemUse(x) => x.prov = crate::rows::Prov::default(),
         Row::Book(x) => x.prov = crate::rows::Prov::default(),
         Row::StartItem(x) => x.prov = crate::rows::Prov::default(),
+        Row::Interaction(x) => x.prov = crate::rows::Prov::default(),
+        Row::ObjectStates(x) => x.prov = crate::rows::Prov::default(),
+        Row::Sequence(x) => x.prov = crate::rows::Prov::default(),
+        Row::Lever(x) => x.prov = crate::rows::Prov::default(),
+        Row::Offering(x) => x.prov = crate::rows::Prov::default(),
+        Row::Guarded(x) => x.prov = crate::rows::Prov::default(),
+        Row::Shifting(x) => x.prov = crate::rows::Prov::default(),
         Row::Concealing(x) => x.prov = crate::rows::Prov::default(),
         Row::NpcTable(x) => x.prov = crate::rows::Prov::default(),
         Row::FriendTable(x) => x.prov = crate::rows::Prov::default(),
         Row::Creature(x) => x.prov = crate::rows::Prov::default(),
+        Row::SafePassage(x) => x.prov = crate::rows::Prov::default(),
+        Row::CreatureEffect(x) => x.prov = crate::rows::Prov::default(),
+        Row::Defense(x) => x.prov = crate::rows::Prov::default(),
         Row::Remove(_) => {}
     }
     format!("{r:?}")
@@ -227,6 +270,8 @@ pub struct Merged {
     pub warnings: Vec<Problem>,
     /// The items packs set differently that the world settled, each as the report says it.
     pub overridden: Vec<String>,
+    /// The ids the lockfiles give the shops' copies of their store templates, by the shops' keys.
+    pub stores: BTreeMap<String, u32>,
 }
 
 /// Merge a database's packs.
@@ -334,5 +379,6 @@ pub fn merge(db: &Database) -> Result<Merged, Vec<Problem>> {
         rows,
         warnings,
         overridden: settled.overridden.iter().map(ToString::to_string).collect(),
+        stores: db.world.stores.clone(),
     })
 }

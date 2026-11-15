@@ -36,6 +36,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "aes"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b169f7a6d4742236a0a00c541b845991d0ac43e546831af1249753ab4c3aa3a0"
+dependencies = [
+ "cfg-if",
+ "cipher 0.4.4",
+ "cpufeatures 0.2.17",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -223,7 +234,7 @@ dependencies = [
 
 [[package]]
 name = "athenaeum-cli"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "athenaeum-foundry",
  "auberean-assets",
@@ -233,20 +244,28 @@ dependencies = [
 
 [[package]]
 name = "athenaeum-editor"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "athenaeum-foundry",
  "auberean-animation",
  "auberean-assets",
+ "auberean-client",
  "auberean-dat",
  "auberean-draw",
  "auberean-gpu",
+ "auberean-interface",
  "auberean-physics",
+ "auberean-present",
  "auberean-primitives",
  "auberean-protocol",
+ "auberean-scene",
+ "auberean-shell",
  "auberean-world",
  "bytemuck",
+ "dereth-audio",
+ "dereth-audio-out",
  "dereth-builder",
+ "dereth-dat",
  "dereth-pack",
  "dereth-physics",
  "dereth-primitives",
@@ -254,6 +273,7 @@ dependencies = [
  "embed-resource",
  "png",
  "pollster",
+ "self_cell",
  "serde_json",
  "toml",
  "tracing",
@@ -266,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "athenaeum-foundry"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "auberean-assets",
  "auberean-dat",
@@ -324,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "auberean-client"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "auberean-assets",
  "auberean-client-sdk",
@@ -495,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "auberean-headless"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "auberean-client-sdk",
  "auberean-dat",
@@ -692,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "auberean-web"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "auberean-client-sdk",
  "auberean-draw",
@@ -1398,6 +1418,9 @@ dependencies = [
 name = "dereth-art"
 version = "0.0.0"
 dependencies = [
+ "auberean-assets",
+ "auberean-dat",
+ "auberean-world",
  "dereth-assets",
  "dereth-client-runtime",
  "dereth-dat",
@@ -1406,8 +1429,11 @@ dependencies = [
  "dereth-scene",
  "dereth-terrain",
  "dereth-world-data",
+ "glam",
  "png",
+ "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]
@@ -1528,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "dereth-client"
-version = "0.4.17"
+version = "0.4.18"
 dependencies = [
  "dereth-animation",
  "dereth-assets",
@@ -1633,6 +1659,7 @@ dependencies = [
  "dereth-terrain",
  "dereth-transport",
  "dereth-world-data",
+ "serde_json",
  "thiserror 2.0.20",
  "tracing",
  "web-time",
@@ -1732,6 +1759,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "dereth-datfetch"
+version = "0.0.0"
+dependencies = [
+ "aes",
+ "base64 0.23.1",
+ "crc32fast",
+ "flate2",
+ "lzma-rust2",
+ "serde",
+ "serde_json",
+ "sevenz-rust2",
+ "sha2",
+ "zip",
+]
+
+[[package]]
 name = "dereth-decal-host"
 version = "0.1.0"
 dependencies = [
@@ -1796,7 +1839,7 @@ dependencies = [
 
 [[package]]
 name = "dereth-headless"
-version = "0.4.17"
+version = "0.4.18"
 dependencies = [
  "ctrlc",
  "dereth-client-sdk",
@@ -1818,6 +1861,7 @@ dependencies = [
  "dereth-client-runtime",
  "dereth-dat",
  "dereth-input",
+ "dereth-navigation",
  "dereth-plugin-api",
  "dereth-plugin-ui",
  "dereth-presentation",
@@ -1864,6 +1908,7 @@ dependencies = [
  "dereth-client-contract",
  "dereth-client-runtime",
  "dereth-dat",
+ "dereth-datfetch",
  "dereth-input",
  "dereth-network-protocol",
  "dereth-plugin-api",
@@ -1903,7 +1948,7 @@ dependencies = [
 
 [[package]]
 name = "dereth-network-hub"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "base64 0.23.1",
  "ctrlc",
@@ -1982,7 +2027,7 @@ dependencies = [
 
 [[package]]
 name = "dereth-plugin"
-version = "0.4.17"
+version = "0.4.18"
 dependencies = [
  "dereth-plugin-api",
  "dereth-plugin-lua",
@@ -2180,6 +2225,7 @@ dependencies = [
  "dereth-client-contract",
  "dereth-client-runtime",
  "dereth-dat",
+ "dereth-navigation",
  "dereth-physics",
  "dereth-primitives",
  "dereth-protocol",
@@ -2327,7 +2373,7 @@ dependencies = [
 
 [[package]]
 name = "dereth-web"
-version = "0.4.17"
+version = "0.4.18"
 dependencies = [
  "dereth-classic-dat",
  "dereth-classic-fonts",
@@ -2339,6 +2385,7 @@ dependencies = [
  "dereth-dat",
  "dereth-horizon",
  "dereth-input",
+ "dereth-navigation",
  "dereth-primitives",
  "dereth-render",
  "dereth-scene",
@@ -2366,12 +2413,13 @@ dependencies = [
 
 [[package]]
 name = "dereth-web-front"
-version = "0.4.17"
+version = "0.4.18"
 dependencies = [
  "dereth-client-net",
  "dereth-client-runtime",
  "dereth-client-sdk",
  "dereth-dat",
+ "dereth-datfetch",
  "dereth-launch",
  "dereth-primitives",
  "dereth-web-store",
@@ -2631,13 +2679,14 @@ dependencies = [
 
 [[package]]
 name = "empyrean-command"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "crossterm",
  "dereth-dat",
  "dereth-physics",
  "dereth-primitives",
  "dereth-progression",
+ "dereth-rules",
  "empyrean-common",
  "empyrean-content",
  "empyrean-dat",
@@ -2654,7 +2703,7 @@ dependencies = [
 
 [[package]]
 name = "empyrean-common"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "dereth-primitives",
  "dereth-protocol",
@@ -2669,7 +2718,7 @@ dependencies = [
 
 [[package]]
 name = "empyrean-content"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "blake3",
  "empyrean-common",
@@ -2685,7 +2734,7 @@ dependencies = [
 
 [[package]]
 name = "empyrean-dat"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "dereth-assets",
  "dereth-dat",
@@ -2701,7 +2750,7 @@ dependencies = [
 
 [[package]]
 name = "empyrean-entity"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "dereth-animation",
  "dereth-physics",
@@ -2714,7 +2763,7 @@ dependencies = [
 
 [[package]]
 name = "empyrean-import"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "dereth-assets",
  "dereth-dat",
@@ -2731,7 +2780,7 @@ dependencies = [
 
 [[package]]
 name = "empyrean-net"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "dereth-client-net",
  "dereth-network-protocol",
@@ -2747,7 +2796,7 @@ dependencies = [
 
 [[package]]
 name = "empyrean-relay"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "dereth-dat",
  "dereth-primitives",
@@ -2763,10 +2812,11 @@ dependencies = [
 
 [[package]]
 name = "empyrean-server"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "ctrlc",
  "dereth-dat",
+ "dereth-navigation",
  "dereth-network-hub",
  "dereth-network-link",
  "dereth-network-protocol",
@@ -2799,7 +2849,7 @@ dependencies = [
 
 [[package]]
 name = "empyrean-store"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "empyrean-common",
  "empyrean-entity",
@@ -2813,7 +2863,7 @@ dependencies = [
 
 [[package]]
 name = "empyrean-tables"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "empyrean-common",
  "empyrean-entity",
@@ -2822,7 +2872,7 @@ dependencies = [
 
 [[package]]
 name = "empyrean-testkit"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "dereth-assets",
  "dereth-client-net",
@@ -2848,7 +2898,7 @@ dependencies = [
 
 [[package]]
 name = "empyrean-world"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "dereth-animation",
  "dereth-assets",
@@ -3823,7 +3873,7 @@ dependencies = [
 
 [[package]]
 name = "lyceum-cli"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "dereth-dat",
  "lyceum-foundry",
@@ -3831,7 +3881,7 @@ dependencies = [
 
 [[package]]
 name = "lyceum-editor"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "dereth-animation",
  "dereth-assets",
@@ -3872,7 +3922,7 @@ dependencies = [
 
 [[package]]
 name = "lyceum-foundry"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "dereth-assets",
  "dereth-dat",
@@ -7175,7 +7225,7 @@ dependencies = [
 
 [[package]]
 name = "yalain"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "auberean-assets",
  "auberean-client-sdk",
@@ -7218,14 +7268,14 @@ dependencies = [
 
 [[package]]
 name = "yalain-content"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "auberean-assets",
 ]
 
 [[package]]
 name = "yalain-federation"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "dereth-network-protocol",
  "serde_json",
@@ -7235,7 +7285,7 @@ dependencies = [
 
 [[package]]
 name = "yalain-friends"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "auberean-friends",
  "dereth-network-protocol",
@@ -7246,7 +7296,7 @@ dependencies = [
 
 [[package]]
 name = "yalain-net"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "auberean-primitives",
  "dereth-network-protocol",
@@ -7262,7 +7312,7 @@ dependencies = [
 
 [[package]]
 name = "yalain-store"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "auberean-testkit",
  "rusqlite",
@@ -7271,7 +7321,7 @@ dependencies = [
 
 [[package]]
 name = "yalain-testkit"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "auberean-assets",
  "auberean-client-sdk",
@@ -7301,7 +7351,7 @@ dependencies = [
 
 [[package]]
 name = "yalain-world"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "auberean-animation",
  "auberean-assets",
@@ -7328,12 +7378,15 @@ dependencies = [
 
 [[package]]
 name = "yalain-world-db"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "auberean-assets",
+ "auberean-dat",
  "auberean-pack",
  "auberean-primitives",
  "auberean-script",
+ "auberean-world",
+ "dereth-dat",
  "dereth-pack",
  "dereth-primitives",
  "serde_json",

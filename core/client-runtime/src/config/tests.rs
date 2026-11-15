@@ -174,6 +174,17 @@ fn the_classic_dat_dir_switch_names_where_the_older_files_are_and_is_optional() 
     assert_eq!(parse(&[]).expect("parses").classic_dat_dir, None);
     let c = parse(&["--overlay-dat-dir", "worlds/one"]).expect("parses");
     assert_eq!(c.overlay_dat_dir, Some(PathBuf::from("worlds/one")));
+    assert_eq!(c.overlay_address, None);
+    let c = parse(&["--overlay-address", "ac1999.example:9110"]).expect("parses");
+    assert_eq!(c.overlay_address, Some(("ac1999.example".to_owned(), 9110)));
+    for bad in [
+        "ac1999.example",
+        ":9110",
+        "ac1999.example:",
+        "ac1999.example:70000",
+    ] {
+        assert!(parse(&["--overlay-address", bad]).is_err(), "{bad}");
+    }
     let c = parse(&["--world-base", "Modern"]).expect("parses");
     assert_eq!(c.world_base, Some(dereth_primitives::ContainerEra::Modern));
     let c = parse(&["--world-base", "classic"]).expect("parses");
@@ -1130,6 +1141,10 @@ fn travel_switches_take_their_values_even_lines_that_begin_with_a_slash() {
         "store",
         "--nav-published",
         "http://127.0.0.1:19341/portals",
+        "--world-status",
+        "http://127.0.0.1:19341/status",
+        "--world-address",
+        "play.example.org:9050",
     ])
     .expect("parses");
     assert_eq!(c.nav_prep, ["/journey Drudge Hideout", "@heal"]);
@@ -1138,6 +1153,31 @@ fn travel_switches_take_their_values_even_lines_that_begin_with_a_slash() {
         c.nav_published.as_deref(),
         Some("http://127.0.0.1:19341/portals")
     );
+    assert_eq!(
+        c.world_status.as_deref(),
+        Some("http://127.0.0.1:19341/status")
+    );
+    assert_eq!(c.world_address.as_deref(), Some("play.example.org:9050"));
+}
+
+/// Behaviour: none (the client's own key for what it keeps of a world).
+#[test]
+fn a_world_is_kept_under_its_name_and_the_address_its_launcher_lists() {
+    let mut c = parse(&["-a", "x", "-h", "10.0.0.1", "-p", "9010"]).expect("parses");
+    assert_eq!(c.travel_world("Server"), "Server@10.0.0.1:9010");
+    c.host = "10.0.0.1:9020".into();
+    assert_eq!(c.travel_world("Server"), "Server@10.0.0.1:9020");
+    // A browser gives every server one address; the launcher's tells them apart.
+    let c = parse(&[
+        "-a",
+        "x",
+        "-h",
+        "127.0.0.1:9000",
+        "--world-address",
+        "play.example.org:9050",
+    ])
+    .expect("parses");
+    assert_eq!(c.travel_world("Server"), "Server@play.example.org:9050");
 }
 
 /// Behaviour: presentation.window.the-window-opens-at-the-size-it-closed-at
@@ -1174,4 +1214,108 @@ fn a_saved_size_is_cut_to_the_monitor_it_opens_on_and_never_under_the_login_size
     assert_eq!(fit((3000, 800), Some((1512, 950))), (1512, 800));
     assert_eq!(fit((1437, 902), None), (1437, 902));
     assert_eq!(fit((1437, 902), Some((640, 480))), (800, 600));
+}
+
+/// Behaviour: none (tooling: `--explore`, a camera flown through the world with no server).
+#[test]
+fn explore_never_connects_leaves_the_body_out_and_starts_where_its_location_says() {
+    // A location as `/loc` writes it, unquoted, its negative numbers no switches; then another
+    // switch.
+    let cfg = parse(&[
+        "--explore",
+        "0xB2AA003E",
+        "[178.5",
+        "137.3",
+        "52.0]",
+        "-0.991022",
+        "0",
+        "0",
+        "-0.133696",
+        "-a",
+        "acct",
+        "-h",
+        "127.0.0.1",
+        "--no-sound",
+    ])
+    .expect("parses");
+    assert!(cfg.explore);
+    assert!(!cfg.will_connect(), "explore never connects");
+    assert!(!cfg.character && !cfg.plugins);
+    assert!(!cfg.sound, "the switch after the location is still read");
+    assert_eq!(cfg.landblock, 0xB2AA);
+    let start = cfg.explore_start.expect("a start");
+    assert_eq!((start.origin.x, start.origin.y), (178.5, 137.3));
+    // A camera flown fast is not held up for the landscape.
+    assert!(cfg.scene_config().stream_budget.is_some());
+
+    // The same location as one word.
+    let quoted = parse(&["--explore", "0xB2AA003E [178.5 137.3 52.0]"]).expect("parses");
+    assert_eq!(quoted.explore_start.map(|s| s.origin), Some(start.origin));
+
+    // None given: over Holtburg, as an offline run starts.
+    let bare = parse(&["--explore", "--no-sound"]).expect("parses");
+    assert!(bare.explore && bare.explore_start.is_none());
+    assert_eq!(
+        bare.landblock,
+        dereth_world_data::landblock::DEFAULT_LANDBLOCK
+    );
+
+    let bad = parse(&["--explore", "Holtburg"]).expect_err("no location");
+    assert!(bad.detail.contains("--explore"), "{}", bad.detail);
+    // It says why in one short line, where every retail switch's failure says only to use the
+    // launcher.
+    assert_eq!(
+        bad.to_string(),
+        "Explore: can't read the location \"Holtburg\"."
+    );
+    let retail = parse(&["-port"]).expect_err("needs a value");
+    assert_eq!(
+        retail.to_string(),
+        crate::corestrings::display_string(crate::corestrings::ID_LAUNCHER_ONLY, &[])
+    );
+}
+
+/// The client meshes its landscape at full detail out to the scenery radius, so its objects stand
+/// that far, as far as the window reaches; at a radius of 1 its window is retail's. A bench's
+/// scene keeps retail's rings whatever radius it names, so its objects stop at the first ring
+/// while the guard holds.
+///
+/// Behaviour: none (a scenery radius past retail's is a setting of this client)
+#[test]
+fn the_client_meshes_full_detail_out_to_its_scenery_radius() {
+    let shipped = Config::default().scene_config();
+    assert_eq!(shipped.window_spec(), dereth_landscape::WindowSpec::DEFAULT);
+    assert_eq!(shipped.object_rings(), 1);
+
+    let cfg = Config {
+        land_radius: 8,
+        scenery_radius: 3,
+        ..Config::default()
+    };
+    let scene = cfg.scene_config();
+    assert_eq!(scene.full_detail_rings(), 3);
+    assert_eq!(scene.window_spec(), dereth_landscape::WindowSpec::rings(3));
+    assert_eq!(scene.object_rings(), 3);
+    let narrow = crate::scene::SceneConfig {
+        land_radius: 2,
+        ..scene
+    };
+    assert_eq!(narrow.object_rings(), 2, "no farther than the window");
+
+    let bench = crate::scene::SceneConfig {
+        land_radius: 8,
+        scenery_radius: 3,
+        ..crate::scene::SceneConfig::default()
+    };
+    assert_eq!(bench.window_spec(), dereth_landscape::WindowSpec::DEFAULT);
+    assert_eq!(bench.object_rings(), 1);
+    let unguarded = crate::scene::SceneConfig {
+        lod_object_guard: false,
+        ..bench
+    };
+    assert_eq!(
+        unguarded.object_rings(),
+        3,
+        "the guard off, every ring asked"
+    );
 }

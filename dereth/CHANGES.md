@@ -14,6 +14,43 @@ pre-release leaves it for the final release, and its notes show it as it is);
 
 ## Unreleased
 
+## 0.4.18 (2026-11-14)
+- Remaster: faster with lots of plants in view.
+- Remaster: smoother haze at dawn, with no hard-edged shadows in it.
+- Remaster: switching the art pack no longer leaves trees missing or the lamps off.
+- Remaster: new Scenery distance option.
+- Remaster: the camera no longer stutters walking over uneven ground.
+- Remaster: cliff feet blend into the ground instead of banding.
+- Remaster: distant trees are sharper and no longer pop to full detail as you walk.
+- Remaster: an art pack's trees keep their own colors, and far forests show them.
+- Remaster: pebbles and grass take the color of an art pack's ground.
+- Remaster: art packs can give the ground a detail texture.
+- Explore mode: fly a camera anywhere in the world with no server.
+- Remaster: art packs can replace creatures with animated bodies of their own.
+- Remaster: rock shelves on cliffs are now off unless you tick Cliff shelves.
+- Remaster: the view no longer bobs up and down as it turns with smoothing or an upscaler on.
+- Remaster: no more hitch when crossing into a new area.
+- Remaster: no more dry-looking strips at the water's edge.
+- Remaster: shallow water near the shore is see-through, and things in it stand on its bed.
+- Remaster: no more gray band in the water along the shore.
+- Remaster: no more bright bars at the water's screen edges.
+- Fixed AC1999's patch downloading again on every launch.
+- Remaster: trees sway in the wind.
+- Remaster: art packs can grow ground cover.
+- Remaster: dense art packs no longer cost the processor.
+- Remaster: wading leaves a wake of crossing ripples.
+- Remaster: no more ring of water around the foot of a tree on a lake's bank.
+- Remaster: far mountains no longer flicker, with or without ray-traced shadows.
+- Remaster: rain no longer leaves a gray haze over trees.
+- Fixed Play Again failing to start after its data files were removed and added again.
+- Launcher: a new first run, and the Library downloads the data files for you.
+- The map shows the lifestones, portals, shops and houses you have found, and those Empyrean worlds publish.
+- Remaster: wet ground in the rain no longer turns nearly black.
+- Fixed a world refusing your data after you switched its game files.
+- Horizon: a new zoomable world map, with its towns and houses.
+- Remaster: doorways in Launch-era dungeons no longer draw black.
+- Each world remembers the interface you chose there; the Library's Settings set the default.
+
 ## 0.4.17 (2026-11-10)
 - New Admin plugin: an administrator's commands in a window.
 - Plugins: a hotkey's key can be changed with /plugin key.

@@ -1189,7 +1189,7 @@ const CLIENT: [Heading; 6] = {
 
 /// The remaster's box, off by default and on the Horizon page alone.
 #[cfg(feature = "fidelity")]
-const REMASTER_ROWS: [Row; 25] = [
+const REMASTER_ROWS: [Row; 28] = [
     only(
         Shown::Only(Interface::Horizon),
         noted(
@@ -1218,11 +1218,13 @@ const REMASTER_ROWS: [Row; 25] = [
     remaster_box(14),
     remaster_box(15),
     remaster_box(16),
-    remaster_box_not_over_metal(17),
+    remaster_box(17),
     remaster_box_not_over_metal(18),
-    remaster_box(19),
-    remaster_box_not_over_metal(20),
-    remaster_box(21),
+    remaster_box_not_over_metal(19),
+    remaster_box(20),
+    remaster_box_not_over_metal(21),
+    remaster_box(22),
+    remaster_box(23),
     only(
         Shown::Only(Interface::Horizon),
         noted(
@@ -1242,6 +1244,17 @@ const REMASTER_ROWS: [Row; 25] = [
                 super::remaster::GOD_RAYS_CAPTION,
                 Value::Menu(super::names::fidelity::REMASTER_GOD_RAYS),
                 Int(super::remaster::GOD_RAYS_DEFAULT as i32),
+            ),
+        ),
+    ),
+    only(
+        Shown::Only(Interface::Horizon),
+        noted(
+            super::remaster::SCENERY_NOTE,
+            pref(
+                super::remaster::SCENERY_CAPTION,
+                Value::Menu(super::names::fidelity::REMASTER_SCENERY),
+                Int(super::remaster::SCENERY_DEFAULT as i32),
             ),
         ),
     ),
@@ -1634,11 +1647,15 @@ mod tests {
                 .iter()
                 .filter(|f| !crate::options::remaster::drawn_nothing_here(f.name))
                 .collect();
-            // The box, its own boxes, the render scale and God Rays.
-            assert_eq!(remaster.len(), 3 + boxes.len());
+            // The box, its own boxes, the render scale, God Rays and the scenery distance.
+            assert_eq!(remaster.len(), 4 + boxes.len());
+            assert_eq!(
+                remaster[remaster.len() - 2].value,
+                Value::Menu(crate::options::names::fidelity::REMASTER_GOD_RAYS)
+            );
             assert_eq!(
                 remaster[remaster.len() - 1].value,
-                Value::Menu(crate::options::names::fidelity::REMASTER_GOD_RAYS)
+                Value::Menu(crate::options::names::fidelity::REMASTER_SCENERY)
             );
             for (row, f) in remaster[1..].iter().zip(boxes) {
                 assert_eq!(row.value, Value::Check(f.name));

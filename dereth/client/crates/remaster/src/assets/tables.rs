@@ -19,6 +19,9 @@ enum User {
     Sky,
     /// One particle card's graphics object, held from the first frame that draws it.
     Particle(u32),
+    /// One graphics object pictures are made of from round it, held from the first frame that
+    /// asks for them.
+    Impostor(u32),
 }
 
 /// A material as one subset draws it: the material, and whether the subset is two-sided and
@@ -109,6 +112,8 @@ pub struct AssetTables {
     object_materials: BTreeMap<ObjectKey, Vec<Vec<Vec<MaterialKey>>>>,
     /// Each particle card's materials, per subset of its graphics object.
     particle_materials: BTreeMap<u32, Vec<MaterialKey>>,
+    /// Each graphics object's materials pictures are made of, per subset.
+    impostor_materials: BTreeMap<u32, Vec<MaterialKey>>,
     /// Entries made since the last upload, in the order they were made.
     made: Vec<AssetKey>,
     /// Entries let go since the last upload.
@@ -116,6 +121,10 @@ pub struct AssetTables {
     /// Entries a sink has been handed and not yet told to release.
     uploaded: BTreeSet<AssetKey>,
     uploads: UploadCounts,
+    /// Meshes read ahead of the change that holds them (see [`Self::pictures_wanted`]).
+    staged_meshes: BTreeMap<MeshKey, Option<Mesh>>,
+    /// Materials read ahead, and the use each was first read for.
+    staged_materials: BTreeMap<MaterialKey, (Use, Material)>,
 }
 
 impl AssetTables {
@@ -139,12 +148,224 @@ impl AssetTables {
         }
     }
 
+    /// The pictures `delta` would have these tables hold that they do not hold yet, each once,
+    /// with the clip map its first material names: what a change waits for while its pictures are
+    /// made ahead of it ([`AssetSource::prepare`]). The meshes and materials it is found from are
+    /// read now and kept for the change. The ground's own pictures are not among them.
+    pub fn pictures_wanted(
+        &mut self,
+        delta: &SceneDelta,
+        src: &mut dyn AssetSource,
+    ) -> Vec<(TextureKey, bool)> {
+        let mut out: Vec<(TextureKey, bool)> = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut materials: Vec<(MaterialKey, Use)> = Vec::new();
+        match delta {
+            SceneDelta::BlockIn(block) | SceneDelta::BlockChanged(block) => {
+                // Each mesh once: a block's ground cover is thousands of placements of a few
+                // models, and a mesh asks for the same materials every time.
+                let mut asked = BTreeSet::new();
+                let mut placement =
+                    |t: &mut Self,
+                     p: &Placement,
+                     src: &mut dyn AssetSource,
+                     materials: &mut Vec<(MaterialKey, Use)>| {
+                        for part in &p.parts {
+                            let levels = part
+                                .degrade
+                                .and_then(|d| block.degrades.get(usize::try_from(d).ok()?));
+                            let ids = levels.map_or(std::slice::from_ref(&part.gfxobj), |d| {
+                                d.levels.as_slice()
+                            });
+                            for &id in ids {
+                                if id != 0 && asked.insert(id) {
+                                    t.wanted_gfxobj(id, None, Use::Static, src, materials);
+                                }
+                            }
+                        }
+                    };
+                for p in &block.placements {
+                    placement(self, p, src, &mut materials);
+                }
+                for cell in &block.rooms {
+                    let key = MeshKey::CellPiece(CellPieceKey {
+                        environment: cell.environment,
+                        structure: cell.structure,
+                    });
+                    self.stage_mesh(key, src);
+                    for (surface, _, _) in self.staged_subsets(key) {
+                        let m = match surface {
+                            SurfaceRef::Slot(s) => cell
+                                .surfaces
+                                .get(usize::from(s))
+                                .map_or_else(|| MaterialKey::plain(0), |&s| MaterialKey::plain(s)),
+                            SurfaceRef::Surface(s) => MaterialKey::plain(s),
+                            SurfaceRef::Missing => MaterialKey::plain(0),
+                        };
+                        materials.push((m, Use::Cell));
+                    }
+                    for p in &cell.placements {
+                        placement(self, p, src, &mut materials);
+                    }
+                }
+            }
+            SceneDelta::ObjectBuilt(object) | SceneDelta::ObjectChanged(object) => {
+                for part in &object.parts {
+                    for &id in part.levels.iter().filter(|id| **id != 0) {
+                        self.wanted_gfxobj(
+                            id,
+                            part.look.as_ref(),
+                            Use::Object,
+                            src,
+                            &mut materials,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.textures_wanted(materials, src, &mut seen, &mut out);
+        out
+    }
+
+    /// The pictures `materials` draw with that these tables do not hold yet, onto `out`, each
+    /// once (`seen`), with the clip map its first material names. The materials not held are read
+    /// now and kept for the change that holds them.
+    fn textures_wanted(
+        &mut self,
+        materials: Vec<(MaterialKey, Use)>,
+        src: &mut dyn AssetSource,
+        seen: &mut BTreeSet<TextureKey>,
+        out: &mut Vec<(TextureKey, bool)>,
+    ) {
+        for (key, used) in materials {
+            let (texture, clip_map, maps) = match self.materials.get(&key) {
+                Some(e) => (
+                    e.value.texture.clone(),
+                    e.value.clip_map,
+                    e.value.maps.clone(),
+                ),
+                None => {
+                    // The first use of a key is the one it is held under, as holding it goes.
+                    let (_, m) = self
+                        .staged_materials
+                        .entry(key.clone())
+                        .or_insert_with(|| (used, src.material(&key, used)));
+                    (m.texture.clone(), m.clip_map, m.maps.clone())
+                }
+            };
+            let maps = maps
+                .iter()
+                .flat_map(|m| m.normal.iter().chain(m.orm.iter()))
+                .map(|t| (t.clone(), false))
+                .collect::<Vec<_>>();
+            for (t, clip) in texture.map(|t| (t, clip_map)).into_iter().chain(maps) {
+                if !self.textures.contains_key(&t) && seen.insert(t.clone()) {
+                    out.push((t, clip));
+                }
+            }
+        }
+    }
+
+    /// The pictures holding the GfxObj `id` for the pictures made of it ([`Self::impostor_in`])
+    /// would have these tables hold that they do not hold yet, as [`Self::pictures_wanted`]
+    /// finds a change's.
+    pub fn impostor_pictures_wanted(
+        &mut self,
+        id: u32,
+        src: &mut dyn AssetSource,
+    ) -> Vec<(TextureKey, bool)> {
+        let mut materials = Vec::new();
+        self.wanted_gfxobj(id, None, Use::Static, src, &mut materials);
+        let mut out = Vec::new();
+        self.textures_wanted(materials, src, &mut BTreeSet::new(), &mut out);
+        out
+    }
+
+    /// Hold the GfxObj `id`, with its materials as a block's placements draw it, for the pictures
+    /// made of it from round it: the far trees' and the impostors'. It is kept as long as the
+    /// tables are, as those pictures are.
+    pub fn impostor_in(&mut self, id: u32, src: &mut dyn AssetSource) {
+        if id == 0 || self.impostor_materials.contains_key(&id) {
+            return;
+        }
+        let mut h = Holdings::default();
+        let materials = self.hold_gfxobj(&mut h, id, None, Use::Static, src);
+        self.impostor_materials.insert(id, materials);
+        self.users.insert(User::Impostor(id), h);
+    }
+
+    /// A GfxObj held for the pictures made of it: its materials, per subset.
+    #[must_use]
+    pub fn impostor_materials(&self, id: u32) -> Option<&[MaterialKey]> {
+        self.impostor_materials.get(&id).map(Vec::as_slice)
+    }
+
+    /// Let go of the meshes and materials read ahead for changes that will not come.
+    pub fn forget_staged(&mut self) {
+        self.staged_meshes.clear();
+        self.staged_materials.clear();
+    }
+
+    /// A GfxObj's mesh read ahead where it is not held, and the materials its subsets draw with
+    /// under `look`, onto `materials`.
+    fn wanted_gfxobj(
+        &mut self,
+        id: u32,
+        look: Option<&crate::scene::PartLook>,
+        used: Use,
+        src: &mut dyn AssetSource,
+        materials: &mut Vec<(MaterialKey, Use)>,
+    ) {
+        let key = MeshKey::GfxObj(id);
+        self.stage_mesh(key, src);
+        for (surface, _, _) in self.staged_subsets(key) {
+            let m = match surface {
+                SurfaceRef::Surface(s) => MaterialKey {
+                    surface: s,
+                    appearance: src.appearance(s, look),
+                },
+                SurfaceRef::Slot(_) | SurfaceRef::Missing => MaterialKey::plain(0),
+            };
+            materials.push((m, used));
+        }
+    }
+
+    /// Read `key`'s mesh ahead, where it is neither held nor read already.
+    fn stage_mesh(&mut self, key: MeshKey, src: &mut dyn AssetSource) {
+        if !self.meshes.contains_key(&key) && !self.staged_meshes.contains_key(&key) {
+            let value = read_mesh(key, src);
+            self.staged_meshes.insert(key, value);
+        }
+    }
+
+    /// The subsets of a mesh held or read ahead.
+    fn staged_subsets(&self, key: MeshKey) -> Vec<(SurfaceRef, bool, bool)> {
+        if self.meshes.contains_key(&key) {
+            return self.subsets_of(key);
+        }
+        self.staged_meshes
+            .get(&key)
+            .and_then(Option::as_ref)
+            .map(|m| {
+                m.subsets
+                    .iter()
+                    .map(|s| (s.surface, s.two_sided, s.tiled))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Hold everything one block uses: its ground, its placements' meshes at every degrade level,
     /// its cells' pieces and statics, and their materials and textures. A block held already is
     /// replaced.
     pub fn block_in(&mut self, block: &Block, src: &mut dyn AssetSource) {
         let user = User::Block(block.block);
-        self.release(user);
+        // What the block held before is let go only once what it holds now is held, so an entry
+        // both hold is kept rather than made again.
+        let before = self.users.remove(&user);
+        self.cell_materials
+            .retain(|cell, _| (cell >> 16) != u32::from(block.block));
         let mut h = Holdings::default();
         let normals = terrain::normals(&block.terrain);
         let cells = src.terrain_cells(block.block, &block.terrain);
@@ -188,6 +409,9 @@ impl AssetTables {
             }
         }
         self.users.insert(user, h);
+        if let Some(before) = before {
+            self.let_go_of(before);
+        }
     }
 
     /// Replace a held block's ground, alone: the cells' pictures it now draws are held, the ones it
@@ -246,11 +470,13 @@ impl AssetTables {
             let levels = part
                 .degrade
                 .and_then(|d| block.degrades.get(usize::try_from(d).ok()?));
-            let ids = match levels {
-                Some(d) => d.levels.clone(),
-                None => vec![part.gfxobj],
-            };
-            for id in ids.into_iter().filter(|id| *id != 0) {
+            let ids = levels.map_or(std::slice::from_ref(&part.gfxobj), |d| d.levels.as_slice());
+            for &id in ids {
+                // A mesh the block holds already is held with its materials: a block's ground
+                // cover is thousands of placements of a few models.
+                if id == 0 || h.meshes.contains(&MeshKey::GfxObj(id)) {
+                    continue;
+                }
                 self.hold_gfxobj(h, id, None, Use::Static, src);
             }
         }
@@ -288,7 +514,8 @@ impl AssetTables {
     /// the part's look. An object held already is replaced.
     pub fn object_in(&mut self, object: &Object, src: &mut dyn AssetSource) {
         let user = User::Object(object.key);
-        self.release(user);
+        // As a block's: what both builds hold is kept.
+        let before = self.users.remove(&user);
         let mut h = Holdings::default();
         let mut parts = Vec::with_capacity(object.parts.len());
         for part in &object.parts {
@@ -304,6 +531,9 @@ impl AssetTables {
         }
         self.object_materials.insert(object.key, parts);
         self.users.insert(user, h);
+        if let Some(before) = before {
+            self.let_go_of(before);
+        }
     }
 
     /// Hold the particle cards `ids` names that are not held yet: each one's graphics object and
@@ -368,10 +598,9 @@ impl AssetTables {
             e.users += 1;
             return;
         }
-        let value = match key {
-            MeshKey::GfxObj(id) => src.gfxobj(id),
-            MeshKey::CellPiece(piece) => src.cell_piece(piece),
-            MeshKey::Sky(id) => src.sky(id),
+        let value = match self.staged_meshes.remove(&key) {
+            Some(staged) => staged,
+            None => read_mesh(key, src),
         };
         if value.is_some() {
             self.made.push(AssetKey::Mesh(key));
@@ -399,7 +628,10 @@ impl AssetTables {
                 )
             }
             None => {
-                let value = src.material(key, used);
+                let value = match self.staged_materials.remove(key) {
+                    Some((u, staged)) if u == used => staged,
+                    _ => src.material(key, used),
+                };
                 let t = (value.texture.clone(), value.clip_map, value.maps.clone());
                 self.made.push(AssetKey::Material(key.clone()));
                 self.materials.insert(key.clone(), Held { value, users: 1 });
@@ -452,7 +684,7 @@ impl AssetTables {
         if let Some(s) = value {
             let maps = |m: &Option<terrain::GroundMaps>| {
                 m.iter()
-                    .flat_map(|m| m.normal.iter().chain(m.surface.iter()))
+                    .flat_map(|m| m.normal.iter().chain(&m.surface).chain(&m.detail))
                     .cloned()
                     .collect::<Vec<_>>()
             };
@@ -564,6 +796,18 @@ impl AssetTables {
         let Some(h) = self.users.remove(&user) else {
             return;
         };
+        if let User::Block(b) = user {
+            if h.terrain && self.terrain.remove(&b).is_some() {
+                self.let_go.push(AssetKey::Terrain(b));
+            }
+            self.cell_materials
+                .retain(|cell, _| (cell >> 16) != u32::from(b));
+        }
+        self.let_go_of(h);
+    }
+
+    /// Let go of one hold on each entry `h` names; an entry no one holds any more goes.
+    fn let_go_of(&mut self, h: Holdings) {
         for k in h.meshes {
             if drop_one(&mut self.meshes, &k) {
                 self.let_go.push(AssetKey::Mesh(k));
@@ -583,13 +827,6 @@ impl AssetTables {
             if drop_one(&mut self.splats, &k) {
                 self.let_go.push(AssetKey::Splat(k));
             }
-        }
-        if let User::Block(b) = user {
-            if h.terrain && self.terrain.remove(&b).is_some() {
-                self.let_go.push(AssetKey::Terrain(b));
-            }
-            self.cell_materials
-                .retain(|cell, _| (cell >> 16) != u32::from(b));
         }
     }
 
@@ -686,6 +923,12 @@ impl AssetTables {
     #[must_use]
     pub fn material(&self, key: &MaterialKey) -> Option<&Material> {
         self.materials.get(key).map(|e| &e.value)
+    }
+
+    /// Whether a texture is held, its picture decoded or not.
+    #[must_use]
+    pub fn holds_texture(&self, key: &TextureKey) -> bool {
+        self.textures.contains_key(key)
     }
 
     /// A texture, when it is held and its picture decoded.
@@ -789,7 +1032,7 @@ impl AssetTables {
             match u {
                 User::Block(_) => c.blocks += 1,
                 User::Object(_) => c.objects += 1,
-                User::Sky | User::Particle(_) => {}
+                User::Sky | User::Particle(_) | User::Impostor(_) => {}
             }
         }
         c
@@ -803,6 +1046,15 @@ impl AssetTables {
 }
 
 /// One user fewer for `key`; `true` when that was the last and the entry went.
+/// The mesh `key` names, from `src`.
+fn read_mesh(key: MeshKey, src: &mut dyn AssetSource) -> Option<Mesh> {
+    match key {
+        MeshKey::GfxObj(id) => src.gfxobj(id),
+        MeshKey::CellPiece(piece) => src.cell_piece(piece),
+        MeshKey::Sky(id) => src.sky(id),
+    }
+}
+
 fn drop_one<K: Ord, T>(map: &mut BTreeMap<K, Held<T>>, key: &K) -> bool {
     let Some(e) = map.get_mut(key) else {
         return false;

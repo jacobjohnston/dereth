@@ -1,8 +1,11 @@
 //! What the world database says of creatures' behavior: whom a concealing effect spares or makes
 //! hated, which behavior tables heal their kin, which friend tables never attack a player first,
-//! and a shooter's rhythm by its template.
+//! which friend tables fight which, a shooter's rhythm by its template, the creatures that mark the
+//! players they see, those that take on only the players they hate, those players may not harm, the
+//! camps and kinds that let pass a player holding an item or bearing an effect, and the effects
+//! creatures hold from their first moment.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// What a concealing effect makes creatures of a class make of its holder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +45,79 @@ pub struct Rhythm {
     pub windup: f32,
 }
 
+/// A line said of a player marked: the race it is for (none: any other) and the string reference
+/// (string id, table).
+pub type MarkLine = (Option<u32>, (u32, u32));
+
+/// What a kind of creature does to a player that comes within its perception: the effect it puts on
+/// the player (its saved state), and the line it says of the player as it does, by the player's race.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Mark {
+    pub effect: u32,
+    /// The lines, each for one race (1 human, 2 Lugian, 4 Tumerok, 8 Drudge, 16 Empyrean) or, with
+    /// none, for any race no other line is for: a string reference (string id, table).
+    pub lines: Vec<MarkLine>,
+}
+
+impl Mark {
+    /// The line said of a player of a race: its race's, else the one for any race.
+    #[must_use]
+    pub fn line_for(&self, race: u32) -> Option<(u32, u32)> {
+        self.lines
+            .iter()
+            .find(|(r, _)| *r == Some(race))
+            .or_else(|| self.lines.iter().find(|(r, _)| r.is_none()))
+            .map(|(_, line)| *line)
+    }
+}
+
+/// The creatures a safe passage is for: a camp's, by its row in the spawn table, or every creature
+/// of a template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Guards {
+    Camp(u32),
+    Template(u32),
+}
+
+/// What lets a player pass: an item of a template it holds (in its pack or worn), or an effect it
+/// bears, by its saved state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pass {
+    Item(u32),
+    Effect(u32),
+}
+
+/// Creatures that leave alone a player who holds an item or bears an effect, as a concealing
+/// effect's spared class does: they don't take it on, come to their kin's fight with it, or turn to
+/// it, until it hurts them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SafePassage {
+    pub guards: Guards,
+    pub pass: Pass,
+}
+
+impl SafePassage {
+    /// Is it for a creature of this camp (by its row in the spawn table) and template?
+    #[must_use]
+    pub fn is_for(&self, camp: Option<u32>, template: u32) -> bool {
+        match self.guards {
+            Guards::Camp(c) => camp == Some(c),
+            Guards::Template(t) => t == template,
+        }
+    }
+}
+
+/// An effect creatures of these templates hold from their first moment, for as long as they stand:
+/// the effect (its saved state), at a spellcraft by the creature's level, read along the line
+/// between the points (level, spellcraft) and held at the ends; one point is the same at every
+/// level.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreatureEffect {
+    pub templates: Vec<u32>,
+    pub effect: u32,
+    pub spellcraft: Vec<(f32, f32)>,
+}
+
 /// The world's creature rows.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CreatureRows {
@@ -54,6 +130,19 @@ pub struct CreatureRows {
     pub attacks_first: BTreeMap<u32, bool>,
     /// The shooting rhythms of creatures' templates.
     pub rhythms: BTreeMap<u32, Rhythm>,
+    /// What creatures of a template do to the players that come within their perception.
+    pub marks: BTreeMap<u32, Mark>,
+    /// The templates whose creatures take on only a player a concealing effect makes them hate.
+    pub only_hated: BTreeSet<u32>,
+    /// The friend tables whose creatures the creatures of a friend table take on, by the table.
+    pub fights: BTreeMap<u32, BTreeSet<u32>>,
+    /// The templates whose creatures players may not harm, with the line a player's attack on one
+    /// is told (a string reference: string id, table), if any.
+    pub kept_out: BTreeMap<u32, Option<(u32, u32)>>,
+    /// The camps and kinds of creature that let pass a player holding an item or bearing an effect.
+    pub safe_passage: Vec<SafePassage>,
+    /// The effects creatures of some templates hold from their first moment.
+    pub effects: Vec<CreatureEffect>,
 }
 
 impl CreatureRows {
@@ -81,6 +170,46 @@ impl CreatureRows {
         found
     }
 
+    /// Does a creature of this camp (by its row in the spawn table) and template let pass a player
+    /// holding these items (by template) and bearing these effects (saved states)?
+    #[must_use]
+    pub fn lets_pass(
+        &self,
+        camp: Option<u32>,
+        template: u32,
+        holds: impl Fn(u32) -> bool,
+        bears: impl Fn(u32) -> bool,
+    ) -> bool {
+        self.safe_passage
+            .iter()
+            .filter(|r| r.is_for(camp, template))
+            .any(|r| match r.pass {
+                Pass::Item(t) => holds(t),
+                Pass::Effect(e) => bears(e),
+            })
+    }
+
+    /// Whether a row makes creatures regard a player by this effect (a saved state): a concealing
+    /// effect's, or a safe passage's.
+    #[must_use]
+    pub fn reads_effect(&self, state: u32) -> bool {
+        self.concealing
+            .range((state, None)..=(state, Some(u32::MAX)))
+            .next()
+            .is_some()
+            || self
+                .safe_passage
+                .iter()
+                .any(|r| r.pass == Pass::Effect(state))
+    }
+
+    /// The effects a creature of this template holds from its first moment, in the rows' order.
+    pub fn effects_of(&self, template: u32) -> impl Iterator<Item = &CreatureEffect> {
+        self.effects
+            .iter()
+            .filter(move |e| e.templates.contains(&template))
+    }
+
     /// Whether creatures of a behavior table heal their kin.
     #[must_use]
     pub fn heals_kin(&self, table: Option<&str>) -> bool {
@@ -91,5 +220,20 @@ impl CreatureRows {
     #[must_use]
     pub fn may_attack_first(&self, table: Option<u32>) -> bool {
         table.is_none_or(|t| self.attacks_first.get(&t) != Some(&false))
+    }
+
+    /// Whether creatures of one friend table take on creatures of another.
+    #[must_use]
+    pub fn fights(&self, table: Option<u32>, other: Option<u32>) -> bool {
+        match (table, other) {
+            (Some(t), Some(o)) => self.fights.get(&t).is_some_and(|f| f.contains(&o)),
+            _ => false,
+        }
+    }
+
+    /// Whether creatures of a friend table take on creatures of any other.
+    #[must_use]
+    pub fn fights_any(&self, table: Option<u32>) -> bool {
+        table.is_some_and(|t| self.fights.get(&t).is_some_and(|f| !f.is_empty()))
     }
 }

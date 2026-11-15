@@ -1,7 +1,7 @@
 [package]
 name = "athenaeum-editor"
 description = "Athenaeum, the Asheron's Call 2 world builder: a world's rows drawn where they stand in the world as the client draws it, selected, placed, moved, turned, changed and removed, saved into the world's pack, and played on Yalain."
-version = "0.1.6" # Athenaeum's own version, shared by its three crates (not the workspace's)
+version = "0.1.7" # Athenaeum's own version, shared by its three crates (not the workspace's)
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -30,6 +30,8 @@ athenaeum-foundry.workspace = true
 yalain-world-db.workspace = true
 yalain-content.workspace = true
 dereth-pack.workspace = true
+# The world's own copy of the retail client's install, which it plays from when it patches it.
+dereth-dat.workspace = true
 # The world as the client draws it: its records and region, the frame at the camera, bodies posed
 # and skinned, and the device that draws a frame; the ground under a point.
 auberean-world.workspace = true
@@ -42,6 +44,17 @@ dereth-physics.workspace = true
 auberean-primitives.workspace = true
 auberean-draw.workspace = true
 auberean-gpu.workspace = true
+# The game played in the world view: the client's shell, its world and its interface over our
+# own platform, the composing of its frame on the editor's device, the window system's keys as the
+# shell's, and the sound device it plays through; the game kept with the world it reads.
+auberean-shell.workspace = true
+auberean-scene.workspace = true
+auberean-interface.workspace = true
+auberean-present.workspace = true
+auberean-client.workspace = true
+dereth-audio.workspace = true
+dereth-audio-out.workspace = true
+self_cell.workspace = true
 # The free camera the world builders share, and the transcendental functions.
 dereth-builder.workspace = true
 dereth-primitives.workspace = true

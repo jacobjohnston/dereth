@@ -37,6 +37,7 @@ fn every_item_form_reads_and_is_written_one_way() {
         ("loot 0x19B", "loot 0x19b"),
         ("loot 411", "loot 0x19b"),
         ("keeper 0x470033D0", "keeper 0x470033d0"),
+        ("store bobs-shop", "store bobs-shop"),
         ("sale 0x6F0016F6 3", "sale 0x6f0016f6 3"),
         ("quest 0x40000088", "quest 0x40000088"),
         ("step 0x40000088 s1", "step 0x40000088 s1"),
@@ -69,6 +70,7 @@ fn every_item_form_reads_and_is_written_one_way() {
         "sale 0x6F0016F6",
         "talk",
         "route Guards",
+        "store Bobs",
         "area 41A",
         "weenie 1234",
     ] {
@@ -103,5 +105,42 @@ fn an_override_and_a_removal_name_items_in_the_game_s_words() {
             .unwrap()
             .name,
         "b"
+    );
+}
+
+#[test]
+fn a_shops_copy_is_kept_in_the_lockfile_by_its_key_numbered_above_the_games_own_states() {
+    use dereth_pack::{Lock, Numbering, SymbolKind};
+    let text = "[store]\n\"bobs-shop\" = 0x6F100000\n";
+    let lock = Lock::<Ac2>::parse(Path::new("world.lock"), text).unwrap();
+    assert_eq!(
+        lock.get(auberean_pack::Kind::Store, "bobs-shop"),
+        Some(0x6F10_0000)
+    );
+    assert!(lock
+        .render()
+        .contains("[store]\n\"bobs-shop\" = 0x6F100000\n"));
+    let (first, last) = auberean_pack::WORLD_STATES;
+    assert_eq!(
+        auberean_pack::Kind::Store.numbering(),
+        Numbering::Counted {
+            start: auberean_pack::SHOP_COPIES.0,
+            world_sets: false
+        }
+    );
+    // Above every saved state of the final retail client's files and the end of retail's.
+    assert!(first > 0x6F00_5D78 && last < 0x7000_0000);
+}
+
+#[test]
+fn a_worlds_shop_copies_and_its_recipes_take_ranges_of_its_own_states_that_share_no_id() {
+    use auberean_pack::{SHOP_COPIES, WORLD_RECIPES, WORLD_STATES};
+    assert_eq!(SHOP_COPIES, (0x6F10_0000, 0x6F7D_FFFF));
+    assert_eq!(WORLD_RECIPES, (0x6F7E_0000, 0x6F7E_FFFF));
+    let within = |(a, b): (u32, u32)| WORLD_STATES.0 <= a && a <= b && b <= WORLD_STATES.1;
+    assert!(within(SHOP_COPIES) && within(WORLD_RECIPES));
+    assert!(
+        SHOP_COPIES.1 < WORLD_RECIPES.0,
+        "the shops' copies end below the recipes"
     );
 }

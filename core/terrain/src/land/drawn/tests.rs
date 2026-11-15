@@ -240,7 +240,10 @@ fn rock_bands_leave_the_brink_at_retails_surface_and_keep_within_their_cap() {
             let (x, y) = (10.0 * 192.0 + i as f32, 10.0 * 192.0 + j as f32);
             let p = Point::at(&src, x, y);
             let v = f.offset[j * SIDE + i];
-            assert!(v.abs() <= cap + 1e-3, "{i} {j}: {v}");
+            assert!(
+                v <= cap + 1e-3 && v >= -cap - k.get(Knob::CliffFoot) - 1e-3,
+                "{i} {j}: {v}"
+            );
             if !p.walkable {
                 on_faces += 1;
                 largest = largest.max(v.abs());
@@ -253,7 +256,8 @@ fn rock_bands_leave_the_brink_at_retails_surface_and_keep_within_their_cap() {
     // (block-local x = 144) the offset is no more than the walkable rounding's.
     let rim = f.at(144.5, 96.0).0;
     assert!(rim.abs() <= k.get(Knob::WalkCap) + 1e-3, "{rim}");
-    // Without the bands, unwalkable ground is rounded and capped as walkable ground is.
+    // Without the bands, unwalkable ground is rounded as walkable ground is: above retail's
+    // surface within the walkable cap, below it within the foot's.
     let plain = block_field(
         &src,
         (10, 10),
@@ -263,8 +267,142 @@ fn rock_bands_leave_the_brink_at_retails_surface_and_keep_within_their_cap() {
             k.set(Knob::WalkLowpass, 0.0);
         }),
     );
-    let most = plain.offset.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    let most = plain.offset.iter().fold(0.0f32, |m, v| m.max(*v));
     assert!(most <= k.get(Knob::WalkCap) + 1e-4, "{most}");
+    let least = plain.offset.iter().fold(0.0f32, |m, v| m.min(*v));
+    assert!(least >= -k.get(Knob::CliffFoot) - 1e-4, "{least}");
+}
+
+#[test]
+fn the_eased_surface_is_the_smooth_surface_where_no_step_is_steep() {
+    let src = rolling();
+    let mut apart = 0.0f32;
+    for j in 0..96 {
+        for i in 0..96 {
+            // LINT-OK: a few thousand points.
+            #[allow(clippy::cast_precision_loss)]
+            let (x, y) = (
+                10.0 * 192.0 + i as f32 * 2.03,
+                7.0 * 192.0 + j as f32 * 1.97,
+            );
+            let p = Point::at(&src, x, y);
+            apart = apart.max((p.eased - p.smooth).abs());
+        }
+    }
+    assert!(apart < 1e-3, "{apart}");
+}
+
+/// The mesa's east foot along its middle: block (11, 10), the foot's vertex at block-local
+/// `(48, 96)`, the face rising west of it 40 meters over the cell and the land level east of it:
+/// retail's height and the drawn one without the rock bands, `d` meters east of the foot.
+fn across_the_foot(k: &Knobs) -> impl Fn(f32) -> (f32, f32) {
+    let src = mesa();
+    let f = block_field(&src, (11, 10), &[], k);
+    move |d: f32| {
+        let (x, y) = (48.0 + d, 96.0);
+        let retail = retail_height(&src, 11.0 * 192.0 + x, 10.0 * 192.0 + y);
+        (retail, retail + f.offset_at(x, y, 0.0))
+    }
+}
+
+#[test]
+fn a_face_bends_down_to_meet_the_level_ground_at_its_foot() {
+    let k = knobs(|k| {
+        k.set(Knob::WalkLowpass, 0.0);
+    });
+    let at = across_the_foot(&k);
+    // The ground in front of the face is drawn at retail's height, no dip before the foot.
+    for d in [2.0, 5.0, 8.0, 12.0, 16.0, 20.0] {
+        let (retail, drawn) = at(d);
+        assert!((drawn - retail).abs() < 0.05, "{d} m out: {retail} {drawn}");
+    }
+    // Up the face from the foot the drawn ground leaves the ground level and steepens: over the
+    // first two meters it rises less than half of retail's rise, and it lies below retail's
+    // surface by more than walkable ground may leave it, but within the foot's cap.
+    let (foot, _) = at(0.0);
+    let (retail, drawn) = at(-2.0);
+    assert!(
+        drawn - foot < (retail - foot) / 2.0,
+        "{foot} {retail} {drawn}"
+    );
+    let deepest = (1..24)
+        .map(|m| {
+            // LINT-OK: meters up the face.
+            #[allow(clippy::cast_precision_loss)]
+            let (r, d) = at(-(m as f32));
+            d - r
+        })
+        .fold(0.0f32, f32::min);
+    assert!(deepest < -k.get(Knob::WalkCap) - 0.5, "{deepest}");
+    assert!(deepest > -k.get(Knob::CliffFoot), "{deepest}");
+    // Neither eased nor bent further, the plain smooth surface dips in front of the face, and the
+    // face keeps within the walkable cap.
+    let plain = across_the_foot(&knobs(|k| {
+        k.set(Knob::WalkLowpass, 0.0);
+        k.set(Knob::Ease, 0.0);
+        k.set(Knob::CliffFoot, 0.0);
+    }));
+    let dip = [2.0, 5.0, 8.0, 12.0]
+        .map(|d| {
+            let (r, d) = plain(d);
+            d - r
+        })
+        .into_iter()
+        .fold(0.0f32, f32::min);
+    assert!(dip < -0.5, "{dip}");
+    for m in 1..24 {
+        // LINT-OK: meters up the face.
+        #[allow(clippy::cast_precision_loss)]
+        let (r, d) = plain(-(m as f32));
+        assert!(d - r >= -k.get(Knob::WalkCap) - 1e-3, "{m}: {}", d - r);
+    }
+}
+
+#[test]
+fn the_rock_bands_kept_apart_take_the_face_to_the_ground_without_them_near_the_eye() {
+    let src = mesa();
+    let pins = [Pin::round(10.0 * 192.0 + 130.0, 10.0 * 192.0 + 96.0, 3.0)];
+    let k = Knobs::default();
+    let f = block_field(&src, (10, 10), &pins, &k);
+    let plain = block_field(
+        &src,
+        (10, 10),
+        &pins,
+        &knobs(|k| {
+            k.set(Knob::Cliffs, 0.0);
+        }),
+    );
+    // The offset less its bands is the ground worked out without them, sample for sample, the
+    // pins' weight taken alike; on walkable ground the bands are nothing.
+    let mut banded = 0usize;
+    for (k, ((o, b), p)) in f.offset.iter().zip(&f.bands).zip(&plain.offset).enumerate() {
+        assert!(
+            (o - b - p).abs() < 1e-4,
+            "sample {k}: {o} less {b} is not {p}"
+        );
+        if b.abs() > 0.5 {
+            banded += 1;
+        }
+    }
+    assert!(banded > 500, "the faces are banded: {banded}");
+    // Everywhere, the bands are whole at any distance; far off only, gone near the eye and whole
+    // past the far knob; off, gone at any distance.
+    let (near, far) = (k.get(Knob::CliffNear), k.get(Knob::CliffFar));
+    let on = CliffShelves::On.fade(&k);
+    let far_only = CliffShelves::FarOnly.fade(&k);
+    let off = CliffShelves::Off.fade(&k);
+    for d in [0.0, near, far, 5000.0] {
+        assert!((bands_kept(d, on) - 1.0).abs() < 1e-6, "on, at {d}");
+        assert!(bands_kept(d, off).abs() < 1e-6, "off, at {d}");
+    }
+    assert!(bands_kept(near * 0.5, far_only).abs() < 1e-6);
+    let mid = bands_kept(0.5 * (near + far), far_only);
+    assert!((mid - 0.5).abs() < 1e-4, "{mid}");
+    assert!((bands_kept(far + 1.0, far_only) - 1.0).abs() < 1e-6);
+    // Read between the samples, none of the bands is the plain ground and all of them the field.
+    let (x, y) = (146.3, 96.7);
+    assert!((f.offset_at(x, y, 0.0) - sample(&plain.offset, x, y)).abs() < 1e-4);
+    assert!((f.offset_at(x, y, 1.0) - f.at(x, y).0).abs() < 1e-6);
 }
 
 #[test]
@@ -327,4 +465,28 @@ fn a_footprint_is_pinned_along_its_own_turned_sides_and_its_margin_round_them() 
     let out = (corner.0 + 0.6, corner.1 + 0.6);
     assert!((wall.distance(out.0, out.1) - (0.72f32.sqrt() - 1.0)).abs() < 1e-4);
     assert!((wall.reach() - (37.0f32.sqrt() + 1.0)).abs() < 1e-5);
+}
+
+#[test]
+fn a_body_in_the_water_is_drawn_as_deep_as_retail_sinks_it_and_out_of_it_moves_with_the_offset() {
+    // Retail's ground at the water's level, the bed drawn half a meter under it: physics sinks a
+    // body wading there by 0.45 m, and it is drawn where physics puts it, not lifted onto a bed
+    // that eases or slopes shallower, nor moved down onto one deeper.
+    let retail = 28.0;
+    for bed in [0.45, 0.3, 0.6] {
+        let ground = Drawn {
+            offset: 0.0,
+            height: retail - bed,
+        };
+        let z = retail - 0.45;
+        let s = shift(held_from(z, retail), ground, 1.0);
+        assert!(s.abs() < 1e-6, "over a bed {bed} m down: {s}");
+    }
+    // Out of the water it stands on retail's ground, and the offset moves it.
+    let raised = Drawn {
+        offset: 0.3,
+        height: retail + 0.35,
+    };
+    let s = shift(held_from(retail + 0.01, retail), raised, 1.0);
+    assert!((s - 0.34).abs() < 1e-5, "{s}");
 }

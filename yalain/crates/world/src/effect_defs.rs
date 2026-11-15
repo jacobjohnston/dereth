@@ -8,22 +8,25 @@
 //!
 //! **Kinds**, by the package an effect derives from: an instant change to vitals (health, vigor or
 //! focus, by its flags); a change to vitals every second it runs; a change to qualities (added to
-//! them, or multiplying them, by its flags); a chain of such changes; a quest moved on; a recipe
-//! learned or forgotten; a combination that adds one effect or another as the target has an
-//! effect of some type or not; an aura, held by its user, that puts its pulsed effects on the
-//! players around it every so often; a pet summoned, of a class, for a lifetime or for good; a
-//! teleport, which sends its target to its place when its time is up; a recall, which is its
-//! skill's ([`crate::skill_use`]): to a place its user keeps (a link), to one of a list of named
-//! places, or to its allegiance's hall; a taunt, which changes a creature's mind about its caster
-//! once ([`crate::ai`]), by the low end of the range its data gives over spellcraft; a resurrection,
-//! which offers a dead player a return ([`crate::resurrections`]).
+//! them, or multiplying them, by its flags); a chain of such changes; a chain of other effects,
+//! each put on at once in its turn as it does itself (one an item's use, a quest or a recipe puts
+//! on); a quest moved on; a recipe learned or forgotten; a combination that adds one effect or
+//! another as the target has an effect of some type or not; an aura, held by its user, that puts
+//! its pulsed effects on the players around it every so often; a pet summoned, of a class, for a
+//! lifetime or for good; a teleport, which sends its target to its place when its time is up; a
+//! recall, which is its skill's ([`crate::skill_use`]): to a place its user keeps (a link), to one
+//! of a list of named places, or to its allegiance's hall; a taunt, which changes a creature's mind
+//! about its caster once ([`crate::ai`]), by the share its data gives at the cast's spellcraft;
+//! a resurrection, which offers a dead player a return ([`crate::resurrections`]).
+//! Where a world's rules say what an effect does that its own data doesn't, the rule's kind: among
+//! them a skill trained for good ([`crate::skills::trained_for_good`]).
 //!
 //! **A combination** looks for the target's effects of its types (or classes): found, it adds its
 //! effect for that case at the cast's spellcraft adjusted by its own amount, gives its user the
 //! effect it gives back, and takes off the oldest of the effects found or all of them, as its
 //! flags say; not found, the other effect and adjustment.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use auberean_script::graph::{Graph, PackedObject};
 use auberean_script::library::Library;
@@ -122,6 +125,27 @@ pub const CATEGORY_FLAGS: [(u32, u32); 5] = [
     (0x1000, 0x10),
 ];
 
+/// An effect's internal flags: it watches its holder's vitals change (one of [`CATEGORY_FLAGS`]).
+pub const WATCHES_VITALS: u32 = 0x1000_0000;
+
+/// A force: a lasting effect held at a price. Each attack that reaches its holder costs so much of
+/// a vital (a quality) at its spellcraft, and when the holder can't pay, it ends; a holder keeps
+/// one force of a class at a time. Its data gives the price as a change, below nothing.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Force {
+    pub change: Scale,
+    pub vital: u32,
+}
+
+impl Force {
+    /// What one attack costs at a spellcraft, to the nearest whole point, never below nothing.
+    #[must_use]
+    pub fn cost(&self, spellcraft: f32) -> i32 {
+        let change = self.change.at(spellcraft).unwrap_or(0.0);
+        dereth_primitives::num::to_i32((-change).max(0.0).round())
+    }
+}
+
 /// What a counter's external flags say of its chance: the same at any spellcraft, or along a line.
 mod counter_flag {
     pub const CONSTANT: u32 = 0x40;
@@ -144,7 +168,8 @@ mod reply_flag {
 
 /// What the external flags of an effect that watches vitals change say: how much it absorbs and
 /// how much it sends back (the same at any spellcraft, or along a line), that it watches health,
-/// that those are shares of the harm rather than amounts, that attacks are what it watches.
+/// that those are shares of the harm rather than amounts, that attacks are what it watches, and that
+/// effects' harm is too.
 mod watcher_flag {
     pub const ABSORB_CONSTANT: u32 = 0x1;
     pub const ABSORB_VARIABLE: u32 = 0x2;
@@ -153,24 +178,11 @@ mod watcher_flag {
     pub const HEALTH: u32 = 0x100;
     pub const SHARES: u32 = 0x2000;
     pub const ATTACKS: u32 = 0x4000;
+    pub const EFFECTS: u32 = 0x8000;
 }
 
 /// What a ward keeps off, where its own data names nothing: the world's `[[effect_rule]]` rows.
-pub use yalain_content::effect_rules::{EffectRules, VitaeRestore, Ward};
-
-/// The effects that take a share of their player's vitae, for a world whose rules name none: Aun
-/// Aulatah's tap of a tenth (2017: 81 to 72.9, 1 of 1).
-const VITAE_TAPS_2017: [(u32, f32); 1] = [(0x6F00_1C64, 0.1)];
-
-/// A world whose rules name no share of vitae taps 2017's; one that names any has its rows' alone.
-/// Returns whether the world named none.
-pub fn vitae_taps_or_2017(rules: &mut EffectRules) -> bool {
-    if !rules.vitae_taps.is_empty() {
-        return false;
-    }
-    rules.vitae_taps.extend(VITAE_TAPS_2017);
-    true
-}
+pub use yalain_content::effect_rules::{EffectRules, Grant, Placing, Reset, VitaeRestore, Ward};
 
 /// The kind of an effect a world's row makes a ward: its chance the same at any spellcraft.
 #[must_use]
@@ -180,42 +192,6 @@ pub fn ward_kind(w: &Ward) -> Kind {
         effects: w.effects.clone(),
         chance: Scale(vec![(0.0, w.chance)]),
     }
-}
-
-/// The crowd control immunities, for a world whose rules name none: each the short effect a use
-/// puts on along with it, the long one its end leaves, and the classes the long one keeps off for
-/// certain. Their own data names neither the second nor the classes.
-const IMMUNITIES_2017: [(u32, u32, &[u32]); 12] = [
-    (0x7000_0718, 0x7000_0719, &[52, 5015, 98]),
-    (0x7000_071A, 0x7000_071B, &[51, 5017, 99]),
-    (0x7000_071C, 0x7000_071D, &[77, 101]),
-    (0x7000_071E, 0x7000_071F, &[52, 5015, 51, 5017, 97]),
-    (0x7000_0720, 0x7000_0721, &[55, 100]),
-    (0x7000_1EDF, 0x7000_1EE0, &[1124]),
-    (0x6F00_2103, 0x6F00_2104, &[52, 5015, 98]),
-    (0x6F00_2105, 0x6F00_2106, &[51, 5017, 99]),
-    (0x6F00_2107, 0x6F00_2108, &[1124]),
-    (0x6F00_2109, 0x6F00_210A, &[77, 101]),
-    (0x6F00_210B, 0x6F00_210C, &[52, 5015, 51, 5017, 97]),
-    (0x6F00_210D, 0x6F00_210E, &[55, 100]),
-];
-
-/// A world whose rules name no immunity has the server's own twelve, each the short one leaving
-/// the long one and the long one's ward; one that names any has its rows' alone. Returns whether
-/// the world named none.
-pub fn immunities_or_2017(rules: &mut EffectRules) -> bool {
-    if !rules.immunities.is_empty() {
-        return false;
-    }
-    for (short, long, classes) in IMMUNITIES_2017 {
-        rules.immunities.insert(short, long);
-        rules.wards.entry(long).or_insert_with(|| Ward {
-            classes: classes.to_vec(),
-            effects: Vec::new(),
-            chance: 1.0,
-        });
-    }
-    true
 }
 
 /// What a reflective effect's external flags say of keeping effects off: its chance the same at
@@ -291,6 +267,9 @@ pub struct Watcher {
     pub shares: bool,
     /// It watches health, and attacks (its data may have it watch neither).
     pub watches: bool,
+    /// It watches health, and the harm effects do: it takes from that harm as from an attack's,
+    /// and sends none of it back.
+    pub effects: bool,
 }
 
 /// What an effect does.
@@ -317,6 +296,8 @@ pub enum Kind {
     },
     /// Several changes to qualities at once.
     Chained(Vec<EffectDef>),
+    /// Other effects, by their saved states, each put on at once in this order, as it does itself.
+    Instants(Vec<u32>),
     /// A weapon's: its hits harm creatures of these superclasses by its spellcraft times the number
     /// with each.
     Slayer(Vec<(u32, f32)>),
@@ -352,6 +333,12 @@ pub enum Kind {
     },
     /// Held by its wearer, it takes from an attack's harm and sends some back.
     Watcher(Box<Watcher>),
+    /// On a weapon, it puts this effect (by its saved state) on what each of the weapon's blows lands
+    /// on, whether or not the blow does it any harm.
+    Applies(u32),
+    /// Takes its target's records of these effects (by their saved states) off, once: what the world's
+    /// rows say it dispels (its own data names nothing).
+    Dispel(Vec<u32>),
     /// Held by its wearer, it may keep off effects of these classes and these effects (by their
     /// saved states; none of either named: of any), by a chance at its spellcraft.
     Ward {
@@ -359,9 +346,9 @@ pub enum Kind {
         effects: Vec<u32>,
         chance: Scale,
     },
-    /// A creature's mind changed about its caster, once, by this share of the creature's whole
-    /// health: more inclined to it, or less (below 0).
-    Taunt(f32),
+    /// A creature's mind changed about its caster, once, by a share of the creature's whole health
+    /// at a spellcraft: more inclined to it, or less (below 0).
+    Taunt(Scale),
     /// An immunity under way: hidden from its holder, it comes on with what it follows, and as it
     /// ends leaves this effect, which keeps that kind off.
     Immunity { then: u32 },
@@ -370,6 +357,18 @@ pub enum Kind {
     /// Gives back these points of vitae, once, never above full: to its player and, where it
     /// reaches them, the player's fellows in the world.
     VitaeRestore(VitaeRestore),
+    /// Grants its player one complete reset of this kind of its skills, once.
+    Reset(Reset),
+    /// Finishes its player's untraining under way at once, once.
+    Untrains,
+    /// Trains its player this skill for good (by its number), once.
+    GrantSkill(u32),
+    /// Gives its player so many items of a template, made in its pack, once.
+    GrantItem(Grant),
+    /// Places an object in the world at its player, once ([`crate::placing`]).
+    Places(Placing),
+    /// Gives its player so many points of craft experience to spend, at its spellcraft, once.
+    CraftExperience(Scale),
     /// Anything else (kept as a record only).
     Other,
 }
@@ -408,6 +407,9 @@ pub struct EffectDef {
     pub name: Option<(u32, u32)>,
     /// Does it end when its holder leaves the world (its records gone at logout)?
     pub ends_at_logout: bool,
+    /// Does it end when its holder is taken somewhere (its records gone as it goes into portal
+    /// space)?
+    pub ends_at_teleport: bool,
 }
 
 impl EffectDef {
@@ -421,6 +423,14 @@ impl EffectDef {
                     | Kind::VitalTransfer { .. }
                     | Kind::VitaeTap(_)
                     | Kind::VitaeRestore(_)
+                    | Kind::Reset(_)
+                    | Kind::Untrains
+                    | Kind::GrantSkill(_)
+                    | Kind::GrantItem(_)
+                    | Kind::Places(_)
+                    | Kind::Dispel(_)
+                    | Kind::CraftExperience(_)
+                    | Kind::Instants(_)
             )
     }
 
@@ -439,7 +449,8 @@ impl EffectDef {
             .collect(),
             Kind::Aura(a) => a.pulsed.clone(),
             Kind::Counter { effect, .. } | Kind::Reply { effect, .. } => vec![*effect],
-            Kind::Immunity { then } => vec![*then],
+            Kind::Immunity { then } | Kind::Applies(then) => vec![*then],
+            Kind::Instants(list) => list.clone(),
             _ => Vec::new(),
         }
     }
@@ -522,6 +533,7 @@ impl EffectDef {
             eq_class: 0,
             name: None,
             ends_at_logout: false,
+            ends_at_teleport: false,
         }
     }
 
@@ -557,6 +569,50 @@ impl EffectDef {
             NativeObject::TextInfo(t) if t.string_id != 0 => Some((t.string_id, t.table)),
             _ => None,
         }
+    }
+
+    /// The chance a saved state's effect gives itself of going on what a blow naming it lands on,
+    /// by spellcraft (none where it gives none).
+    #[must_use]
+    pub fn chance_of(lib: &Library, g: &Graph) -> Scale {
+        let nav = Nav::new(lib, g);
+        let Some(root) = g.root().and_then(|r| nav.object(r).ok()) else {
+            return Scale::default();
+        };
+        Scale(
+            nav.list(root, "m_probData")
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|p| {
+                    Some((
+                        nav.number(p, "m_level").ok()?,
+                        nav.number(p, "m_value").ok()?,
+                    ))
+                })
+                .collect(),
+        )
+    }
+
+    /// The force a saved state's effect is, when its data gives it a price: its change to a vital
+    /// by spellcraft and which vital.
+    #[must_use]
+    pub fn force_of(lib: &Library, g: &Graph) -> Option<Force> {
+        let nav = Nav::new(lib, g);
+        let root = nav.object(g.root()?).ok()?;
+        let change = Scale(
+            nav.list(root, "m_forceData")
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|p| {
+                    Some((
+                        nav.number(p, "m_level").ok()?,
+                        nav.number(p, "m_value").ok()?,
+                    ))
+                })
+                .collect(),
+        );
+        let vital = nav.field(root, "m_forceModifyVital").ok()?;
+        (!change.is_empty() && vital != 0).then_some(Force { change, vital })
     }
 
     /// The effect enumeration's value a saved state's graph holds, when it holds one.
@@ -611,15 +667,34 @@ impl EffectDef {
         };
         let flags = word("m_uiExternalFlags")?;
         let number = |name: &str| nav.number(o, name).unwrap_or(0.0);
-        let kind = if is("ResurrectEffect") {
+        // A craft experience reward is a numeric effect's kind, told by its own package first.
+        let kind = if is("CraftExperienceEffect") {
+            Kind::CraftExperience(scale("m_magData"))
+        } else if is("ResurrectEffect") {
             Kind::Resurrect {
                 focus: scale("m_magData"),
                 fx: word("m_rezFX").unwrap_or(0),
             }
         } else if is("AITauntDetauntEffect") {
+            // The data gives a taunt's share at its lowest and highest spellcraft; between them it
+            // is read along the straight line, held at the ends, as the effects whose numbers are
+            // set at points are. Inferred, and of low confidence: nothing says how the share runs
+            // between the two, and the one taunter recorded at length had no rating recorded.
+            let line = |sign: f32| {
+                Kind::Taunt(Scale(vec![
+                    (
+                        number("m_nMinSpellcraft"),
+                        sign * number("m_fMinFractionalMod"),
+                    ),
+                    (
+                        number("m_nMaxSpellcraft"),
+                        sign * number("m_fMaxFractionalMod"),
+                    ),
+                ]))
+            };
             match word("m_flags").unwrap_or(0) & TAUNT_KIND {
-                taunt_kind::TAUNT => Kind::Taunt(number("m_fMinFractionalMod")),
-                taunt_kind::DETAUNT => Kind::Taunt(-number("m_fMinFractionalMod")),
+                taunt_kind::TAUNT => line(1.0),
+                taunt_kind::DETAUNT => line(-1.0),
                 _ => Kind::Other,
             }
         } else if let Some(effect) = state_of("m_effGenerate").filter(|_| {
@@ -703,6 +778,7 @@ impl EffectDef {
                 against_a_player: number("m_fReflectPKMod"),
                 shares: flags & watcher_flag::SHARES != 0,
                 watches: flags & watcher_flag::HEALTH != 0 && flags & watcher_flag::ATTACKS != 0,
+                effects: flags & watcher_flag::HEALTH != 0 && flags & watcher_flag::EFFECTS != 0,
             }))
         } else if is("ReflectiveEffect")
             && flags & (keeps_off_flag::CONSTANT | keeps_off_flag::VARIABLE) != 0
@@ -753,6 +829,8 @@ impl EffectDef {
                 });
             }
             Kind::Chained(held)
+        } else if is("ChainedInstantEffect") {
+            Kind::Instants(nav.states(o, "m_listEffect").unwrap_or_default())
         } else if is("SlayerEffect") {
             let classes = nav
                 .field(o, "m_SlayerHash")
@@ -847,6 +925,8 @@ impl EffectDef {
                 adjust_if_present: adjust("m_iSpellcraftAdjustmentIfPresent"),
                 adjust_if_not_present: adjust("m_iSpellcraftAdjustmentIfNotPresent"),
             }))
+        } else if let Some(effect) = state_of("m_effect").filter(|_| is("ApplyEffect")) {
+            Kind::Applies(effect)
         } else if is("AuraEffect") {
             let range_sq = nav.number(o, "m_fMaxRangeSqr").unwrap_or(0.0);
             Kind::Aura(Aura {
@@ -876,8 +956,27 @@ impl EffectDef {
                     _ => None,
                 }),
             ends_at_logout: word("m_removeOnLogout").unwrap_or(0) != 0,
+            ends_at_teleport: word("m_removeOnTeleport").unwrap_or(0) != 0,
         })
     }
+}
+
+/// The effects whose chains a start keeps ([`EffectTable::keep_chains_of`]): what items' uses (the
+/// install's and the world's rows'), quests and recipes' outcomes put on.
+#[must_use]
+pub fn chain_roots(
+    uses: &crate::item_use::ItemUses,
+    rows: &yalain_content::item_rows::ItemRows,
+    quests: &yalain_content::quests::QuestTable,
+    craft: &crate::craft::Crafting,
+) -> Vec<u32> {
+    uses.values()
+        .flatten()
+        .map(|e| e.state)
+        .chain(rows.states())
+        .chain(quests.effect_states())
+        .chain(craft.outcome_effects())
+        .collect()
 }
 
 /// The effects the world puts on players, by saved state.
@@ -886,13 +985,25 @@ pub struct EffectTable {
     pub effects: HashMap<u32, EffectDef>,
     /// What an effect's description says (string id, table), by saved state, where it has one.
     pub descriptions: HashMap<u32, (u32, u32)>,
+    /// The line an effect's application tells (string id, table), by saved state: the line of
+    /// its own name's table, where that table holds one ([`EffectTable::read_lines`]).
+    pub lines: HashMap<u32, (u32, u32)>,
+    /// What effects the install names but holds no saved state of place in the world, by name.
+    pub placings: HashMap<String, Placing>,
+    /// The chance a weapon's blow that names an effect puts it on what it lands on, at a
+    /// spellcraft, by saved state, where its data gives one ([`EffectTable::chance`]).
+    pub chances: HashMap<u32, Scale>,
+    /// The forces among its effects, by saved state ([`EffectDef::force_of`]).
+    pub forces: HashMap<u32, Force>,
 }
 
 impl EffectTable {
     /// The definitions of these saved states and of the effects they add in turn (a state that
     /// does not read is left out), each the world's `rules` name (by saved state) an immunity
     /// leaving the effect they name, a ward keeping off what it names, a tap of its share of vitae,
-    /// or vitae given back.
+    /// vitae given back, a complete reset of skills granted, an untraining finished, a skill trained,
+    /// items given, an object placed, or effects dispelled; and what the effects the rules name by name
+    /// alone place.
     #[must_use]
     pub fn read(
         lib: &Library,
@@ -900,7 +1011,14 @@ impl EffectTable {
         graph: &dyn Fn(u32) -> Option<Graph>,
         rules: &EffectRules,
     ) -> Self {
-        let mut t = Self::default();
+        let mut t = Self {
+            placings: rules
+                .places_named
+                .iter()
+                .map(|(n, p)| (n.clone(), p.clone()))
+                .collect(),
+            ..Self::default()
+        };
         let mut todo: Vec<u32> = states.to_vec();
         while let Some(s) = todo.pop() {
             if s == 0 || t.effects.contains_key(&s) {
@@ -920,8 +1038,33 @@ impl EffectTable {
                 if let Some(restore) = rules.vitae_restores.get(&s) {
                     d.kind = Kind::VitaeRestore(*restore);
                 }
+                if let Some(reset) = rules.resets.get(&s) {
+                    d.kind = Kind::Reset(*reset);
+                }
+                if rules.untrains.contains(&s) {
+                    d.kind = Kind::Untrains;
+                }
+                if let Some(skill) = rules.skills.get(&s) {
+                    d.kind = Kind::GrantSkill(*skill);
+                }
+                if let Some(grant) = rules.grants.get(&s) {
+                    d.kind = Kind::GrantItem(*grant);
+                }
+                if let Some(p) = rules.places.get(&s) {
+                    d.kind = Kind::Places(p.clone());
+                }
+                if let Some(list) = rules.dispels.get(&s) {
+                    d.kind = Kind::Dispel(list.clone());
+                }
                 if let Some(text) = EffectDef::description_of(lib, &g) {
                     t.descriptions.insert(s, text);
+                }
+                let chance = EffectDef::chance_of(lib, &g);
+                if !chance.is_empty() {
+                    t.chances.insert(s, chance);
+                }
+                if let Some(force) = EffectDef::force_of(lib, &g) {
+                    t.forces.insert(s, force);
                 }
                 todo.extend(d.adds());
                 todo.extend(d.chained_states());
@@ -945,6 +1088,75 @@ impl EffectTable {
     #[must_use]
     pub fn get(&self, state: u32) -> Option<&EffectDef> {
         self.effects.get(&state)
+    }
+
+    /// The chance a blow that names an effect puts it on what it lands on, at a spellcraft: its
+    /// data's, else always.
+    #[must_use]
+    pub fn chance(&self, state: u32, spellcraft: f32) -> f32 {
+        self.chances
+            .get(&state)
+            .and_then(|c| c.at(spellcraft))
+            .unwrap_or(1.0)
+    }
+
+    /// The force an effect is, if it is one.
+    #[must_use]
+    pub fn force(&self, state: u32) -> Option<&Force> {
+        self.forces.get(&state)
+    }
+
+    /// The recipes its effects teach or take away.
+    #[must_use]
+    pub fn recipes(&self) -> Vec<u32> {
+        self.effects
+            .values()
+            .filter_map(|d| match d.kind {
+                Kind::GrantRecipe(r) | Kind::RemoveRecipe(r) => Some(r),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Keep the chains of other effects that these effects are or lead to (what they add in turn,
+    /// the chains they hold); every other chain reads as an effect that does nothing. A start keeps
+    /// those items' uses, quests and recipes' outcomes put on: the finishing chains skills'
+    /// combinations add stay as they were, since no recording shows one applying.
+    pub fn keep_chains_of(&mut self, roots: impl IntoIterator<Item = u32>) {
+        let mut kept = HashSet::new();
+        let mut todo: Vec<u32> = roots.into_iter().collect();
+        while let Some(s) = todo.pop() {
+            if !kept.insert(s) {
+                continue;
+            }
+            if let Some(d) = self.effects.get(&s) {
+                todo.extend(d.adds());
+            }
+        }
+        for (s, d) in &mut self.effects {
+            if matches!(d.kind, Kind::Instants(_)) && !kept.contains(s) {
+                d.kind = Kind::Other;
+            }
+        }
+    }
+
+    /// Each named effect's line, where `holds(string, table)` says the table of its name holds the
+    /// application's line (each table asked once).
+    pub fn read_lines(&mut self, holds: &mut dyn FnMut(u32, u32) -> bool) {
+        let mut asked: HashMap<u32, bool> = HashMap::new();
+        for (state, d) in &self.effects {
+            let Some((_, table)) = d.name else { continue };
+            let line = (crate::effects::learned::LINE, table);
+            if *asked.entry(table).or_insert_with(|| holds(line.0, line.1)) {
+                self.lines.insert(*state, line);
+            }
+        }
+    }
+
+    /// The line an effect's application tells, of its own table, if the install holds one.
+    #[must_use]
+    pub fn line(&self, state: u32) -> Option<(u32, u32)> {
+        self.lines.get(&state).copied()
     }
 }
 

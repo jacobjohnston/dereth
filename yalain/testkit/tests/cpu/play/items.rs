@@ -5,7 +5,8 @@
 //! or on a mount, far from the item's place, without its quest, a hidden one's as mysterious,
 //! below its level), before any quest step its use moves; a reward quest done with the quest it
 //! rewards; an item only looked at; a gem that sends its user to a named place, spent as it comes
-//! out; a stone whose use only gives a quest, kept when the quest can't be given.
+//! out; a stone whose use only gives a quest, kept when the quest can't be given; a ward that
+//! only changes what creatures make of its bearer, on for its time where a world's row reads it.
 //! Fixture: the test world with made-up potion, charm, egg, rod, token, trophy, gem and stone
 //! templates and their effects as the data defines them.
 
@@ -67,6 +68,7 @@ fn def(state: u32, kind: Kind, seconds: Option<f32>) -> EffectDef {
         external_flags: 0,
         internal_flags: 0,
         ends_at_logout: false,
+        ends_at_teleport: false,
         enum_value: 0,
         eq_class: 0,
         name: None,
@@ -128,7 +130,7 @@ fn world() -> Harness {
     h.server.quests = QuestTable {
         quests: vec![QuestDef {
             id: TOKEN_QUEST,
-            name: (0xA860_7CEC, 0x2500_17EE),
+            name: yalain_content::Words::Ref(0xA860_7CEC, 0x2500_17EE),
             description: (0x6C45_9364, 0x2500_17EE),
             icon: 0,
             play_fx: false,
@@ -145,9 +147,11 @@ fn world() -> Harness {
             subquests: Vec::new(),
             min_level: 0,
             fails_on_death: false,
+            fails_on_logout: false,
+            fails_on_teleport: false,
             once: false,
             fellows: yalain_content::quests::Fellows::default(),
-            last_waits: false,
+            ranges: Vec::new(),
             hero_only: false,
             pay: yalain_content::quests::CompletionPay::default(),
             required: None,
@@ -456,6 +460,55 @@ fn a_potion_is_drunk_and_at_the_drinks_end_takes_effect_and_is_spent() {
     assert!(held(&h, world, POTION).is_none(), "the potion is gone");
 }
 
+/// An item's effect that only changes what creatures make of its bearer, which the server makes
+/// nothing else of, goes on for its time where a world's row reads it (a safe passage's, a
+/// concealing effect's), and is not made where none does.
+/// Behaviour: server.creatures.a-used-items-ward-goes-on-where-a-row-reads-it
+#[test]
+fn an_items_ward_goes_on_for_its_time_where_a_creature_row_reads_it() {
+    use yalain_content::creature_rows::{CreatureRows, Guards, Pass, Regard, SafePassage};
+    const WARD: u32 = 0x6F00_1DEA;
+    const WISP: u32 = 0x4700_2DE7;
+    let used = |rows: fn(&mut CreatureRows)| {
+        let mut h = world();
+        h.server.item_uses.insert(
+            CHARM,
+            vec![UsageEffect {
+                state: WARD,
+                spellcraft: 1.0,
+            }],
+        );
+        h.server
+            .effect_table
+            .effects
+            .insert(WARD, def(WARD, Kind::Other, Some(1800.0)));
+        rows(&mut h.server.creature_rows);
+        let (b, me, world) = in_world(&mut h);
+        let charm = give(&mut h, world, CHARM, 2);
+        send_use(&mut h, b, me, charm, 0.2);
+        records_from(&h, world, charm)
+            .iter()
+            .map(|e| (e.state, e.timeout))
+            .collect::<Vec<_>>()
+    };
+    assert!(used(|_| {}).is_empty(), "no row reads it: not made");
+    assert_eq!(
+        used(|r| r.safe_passage.push(SafePassage {
+            guards: Guards::Template(WISP),
+            pass: Pass::Effect(WARD),
+        })),
+        vec![(WARD, 1800.0)],
+        "a safe passage's: on for its half hour"
+    );
+    assert_eq!(
+        used(|r| {
+            r.concealing.insert((WARD, Some(0x49)), Regard::Spares);
+        }),
+        vec![(WARD, 1800.0)],
+        "a concealing effect's"
+    );
+}
+
 /// A charm with no use behavior acts in the request's instant: its luck put on, one off its stack,
 /// the answer keeping the request's message with the flags of a use at once that spent it.
 /// Behaviour: server.items.an-item-without-a-use-behavior-acts-at-once
@@ -483,6 +536,42 @@ fn a_charm_without_a_use_behavior_acts_at_once_and_goes_one_off_its_stack() {
         Some((charm, 1)),
         "one off the stack"
     );
+}
+
+/// An item whose use grants a reset of skills gives its user one more reset held, told so; nothing
+/// is kept as a record.
+/// Behaviour: server.skills.an-effect-grants-a-reset
+#[test]
+fn an_item_whose_effect_grants_a_reset_gives_its_user_one() {
+    use yalain_world::effect_defs::Reset;
+    use yalain_world::skills::reset;
+    const GRANTER: u32 = 0x4700_7E50;
+    const GRANT: u32 = 0x6F00_7E51;
+    let mut h = world();
+    let mut granter = Props::default();
+    granter.set("Item_UsageAction", Prop::Word(0x1F));
+    template(&mut h, GRANTER, granter);
+    let d = def(GRANT, Kind::Reset(Reset::Skills), None);
+    h.server.effect_table.effects.insert(d.state, d);
+    h.server.item_uses.insert(
+        GRANTER,
+        vec![UsageEffect {
+            state: GRANT,
+            spellcraft: 1.0,
+        }],
+    );
+    let (b, me, world) = in_world(&mut h);
+    let item = give(&mut h, world, GRANTER, 1);
+    let from = send_use(&mut h, b, me, item, 0.5);
+    assert_eq!(
+        h.texts(b, from),
+        [(reset::SHOWN_AS, reset::SKILLS_GRANTED.0)]
+    );
+    assert_eq!(
+        yalain_world::quals::int(&h.server.players[&world].qualities, reset::SKILLS_HELD),
+        Some(1)
+    );
+    assert!(records_from(&h, world, item).is_empty());
 }
 
 /// An egg (an item not destroyed on use) is kept; its mount, an effect of no duration, is a record
@@ -695,6 +784,7 @@ fn a_rod_whose_use_moves_a_quest_is_refused_away_from_its_place_and_moves_it_the
     use yalain_content::quests::{Step, Trigger, Update};
     let mut h = world();
     h.server.quests.steps.push(Step {
+        key: String::new(),
         quest: TOKEN_QUEST,
         needs: 0,
         trigger: Trigger::Use(ROD),
@@ -705,17 +795,21 @@ fn a_rod_whose_use_moves_a_quest_is_refused_away_from_its_place_and_moves_it_the
         counts: Vec::new(),
         effects: Vec::new(),
         text: None,
+        recipes: Vec::new(),
         placed: "authored for a test".into(),
         requires: Vec::new(),
         takes: Vec::new(),
         races: Vec::new(),
         effects_last: false,
+        effects_quiet: false,
         wants: None,
         fellows: false,
         levels: None,
         xp_share: 0.0,
         to: None,
         transforms: None,
+        chance: None,
+        to_fellows: false,
     });
     let (b, me, world) = in_world(&mut h);
     let rod = give(&mut h, world, ROD, 1);
@@ -850,6 +944,7 @@ fn a_reward_quest_is_completed_with_the_quest_it_rewards() {
             },
         ],
         steps: vec![Step {
+            key: String::new(),
             quest: REWARD,
             needs: 0,
             trigger: Trigger::Done(REWARDED),
@@ -860,17 +955,21 @@ fn a_reward_quest_is_completed_with_the_quest_it_rewards() {
             counts: Vec::new(),
             effects: Vec::new(),
             text: None,
+            recipes: Vec::new(),
             placed: "authored for a test".into(),
             requires: Vec::new(),
             takes: Vec::new(),
             to: None,
             races: Vec::new(),
             effects_last: false,
+            effects_quiet: false,
             wants: None,
             fellows: false,
             levels: None,
             xp_share: 0.0,
             transforms: None,
+            chance: None,
+            to_fellows: false,
         }],
         gives: Vec::new(),
         rooms: Vec::new(),
@@ -976,6 +1075,49 @@ fn an_item_for_monarchs_alone_is_refused_to_anyone_else() {
         "a monarch is not refused"
     );
     assert!(!records_from(&h, world, crown).is_empty(), "and it works");
+}
+
+/// An item for heroes alone used by anyone else is refused (10049) and does nothing; a hero's use
+/// works.
+/// Behaviour: server.items.hero-only
+#[test]
+fn an_item_for_heroes_alone_is_refused_to_anyone_else() {
+    const TROPHY: u32 = 0x4700_14CC;
+    let mut h = world();
+    let mut props = Props::default();
+    props
+        .set("Item_UsageAction", Prop::Word(0x1F))
+        .set("Usage_HeroOnly", Prop::Bool(true));
+    template(&mut h, TROPHY, props);
+    h.server.item_uses.insert(
+        TROPHY,
+        vec![item_use::UsageEffect {
+            state: LUCK,
+            spellcraft: 1.0,
+        }],
+    );
+    let (b, me, world) = in_world(&mut h);
+    let trophy = give(&mut h, world, TROPHY, 1);
+    let from = send_use(&mut h, b, me, trophy, 0.2);
+    assert_eq!(
+        answers(&h, b, from)
+            .iter()
+            .map(|a| a.status)
+            .collect::<Vec<_>>(),
+        vec![refusal::HERO_ONLY]
+    );
+    assert_eq!(refusal::HERO_ONLY, 10_049);
+    assert!(records_from(&h, world, trophy).is_empty());
+    let p = h.server.players.get_mut(&world).expect("in the world");
+    yalain_world::focus::set_hero_kept(&mut p.qualities, true);
+    let from = send_use(&mut h, b, me, trophy, 0.2);
+    assert!(
+        answers(&h, b, from)
+            .iter()
+            .all(|a| a.status != refusal::HERO_ONLY),
+        "a hero is not refused"
+    );
+    assert!(!records_from(&h, world, trophy).is_empty(), "and it works");
 }
 
 /// An item used below its least level is refused (10009) and does nothing.
@@ -1286,16 +1428,19 @@ fn an_item_use_row_gives_a_template_naming_nothing_its_effect_behavior_and_wear(
     );
 }
 
-/// A world with no item use, book or first gift rows has the server's own of each (the test world's
-/// rows, entry for entry); one with rows of a kind has its rows alone of that kind, never the two
-/// merged, and the server's own of the others.
+/// A world with no item use, book or first gift rows has none of each, and names the kinds it
+/// lacks; one with rows of a kind has its rows alone of that kind and names the others: its food
+/// then heals nothing beyond what its template names.
 /// Behaviour: server.items.item-rows-without-rows
 #[test]
-fn a_world_without_item_rows_has_the_servers_own_and_with_some_its_rows_alone() {
+fn a_world_without_item_rows_has_none_and_names_the_kinds_it_lacks() {
     use yalain_content::item_rows::{ItemRows, ItemUse};
-    let (own, fell_back) = item_use::world_item_rows(ItemRows::default());
-    assert_eq!(fell_back, ["item_use", "book", "start_item"]);
-    assert_eq!(own, yalain_testkit::test_item_rows());
+    use yalain_testkit::FOOD;
+    assert_eq!(
+        item_use::kinds_missing(&ItemRows::default()),
+        ["item_use", "book", "start_item"]
+    );
+    assert!(item_use::kinds_missing(&yalain_testkit::test_item_rows()).is_empty());
     let one = ItemUse {
         template: 0x4700_7A10,
         effects: vec![(TENACITY, 1.0)],
@@ -1306,12 +1451,20 @@ fn a_world_without_item_rows_has_the_servers_own_and_with_some_its_rows_alone() 
         uses: [(one.template, one.clone())].into_iter().collect(),
         ..ItemRows::default()
     };
-    let (got, fell_back) = item_use::world_item_rows(rows);
-    assert_eq!(fell_back, ["book", "start_item"]);
-    assert_eq!(got.uses.len(), 1, "its row alone");
-    assert_eq!(got.uses.get(&one.template), Some(&one));
-    assert_eq!(got.books, own.books);
-    assert_eq!(got.start_items, own.start_items);
+    assert_eq!(item_use::kinds_missing(&rows), ["book", "start_item"]);
+    let mut h = world();
+    h.server.item_rows = rows;
+    assert_eq!(
+        item_use::own_effects(&h.server.item_rows, one.template),
+        [UsageEffect {
+            state: TENACITY,
+            spellcraft: 1.0
+        }]
+    );
+    assert!(
+        item_use::own_effects(&h.server.item_rows, FOOD).is_empty(),
+        "no row of the food's"
+    );
 }
 
 /// A treasure potion's own effect: dropped by a level 46 creature it is given one of the nine kinds
@@ -1486,7 +1639,7 @@ fn with_stone_quest(h: &mut Harness) {
     let mut q = h.server.quests.quests[0].clone();
     q.id = STONE_QUEST;
     q.hidden = true;
-    q.effects = vec![(yalain_world::quests::update::BESTOW, LUCK)];
+    q.effects = vec![(yalain_world::quests::update::BESTOW, LUCK, 1.0)];
     h.server.quests.quests.push(q);
 }
 

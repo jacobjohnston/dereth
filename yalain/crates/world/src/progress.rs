@@ -86,14 +86,25 @@ pub const CREDITS_PER_LEVEL: i32 = 1;
 pub enum Award {
     /// A damager's part of a kill, paid to it (or to its pet's owner).
     Part,
-    /// A quest completed, by its name (its text sent even when it pays nothing).
-    Quest((u32, u32)),
+    /// A quest completed, by its id: its text, naming it, is sent even when it pays nothing.
+    Quest(u32),
     /// A step of a quest that pays on its way (no text: 2017 sent the totals alone).
     Step,
     /// A fellow's share of a part of a kill (no text).
     Share,
     /// What vassals earned for their patron (its text is the allegiance's).
     Allegiance,
+    /// An admin's award, told as a part of a kill is.
+    Given,
+}
+
+impl Award {
+    /// Is it earned in play, and so at the operator's experience rate ([`crate::rates`])? What
+    /// vassals pass up follows from what they earned, and an admin gives the number given.
+    #[must_use]
+    pub fn is_earned(self) -> bool {
+        !matches!(self, Self::Allegiance | Self::Given)
+    }
 }
 
 /// A string reference.
@@ -221,7 +232,9 @@ pub fn award<S: Store>(
 /// Award a player experience and focus (a part of a kill, or a fellow's share of one). A part's
 /// text names both: to a hero, "You have gained %1 experience points and %2 Focus points!" (or
 /// "You have gained %2 Focus points!" for a part worth no experience), its new focus sent next; to
-/// anyone else the plain text, the focus named in it and not gained.
+/// anyone else the plain text, the focus named in it and not gained. A character that is no hero
+/// and is at the level it rises no further than gains no experience: what the award was worth
+/// still pays its vitae back, and nothing is told, counted or passed up to its patron.
 pub fn award_with_focus<S: Store>(
     s: &mut Server<S>,
     net: &mut ServerNet,
@@ -230,11 +243,20 @@ pub fn award_with_focus<S: Store>(
     focus: i32,
     why: Award,
 ) {
+    let amount = if why.is_earned() {
+        crate::rates::experience(s.cfg.rates.experience, amount)
+    } else {
+        amount
+    };
     let Some(p) = s.players.get_mut(&world) else {
         return;
     };
+    let worth = amount;
+    let topped = !crate::focus::is_hero(&p.qualities)
+        && crate::examine::level_of(&p.qualities) >= crate::levels::NOT_A_HEROS_TOP;
+    let amount = if topped { 0 } else { amount };
     let gains_focus = focus > 0 && crate::focus::is_hero(&p.qualities);
-    if why == Award::Part && (amount > 0 || gains_focus) {
+    if matches!(why, Award::Part | Award::Given) && (amount > 0 || gains_focus) {
         let t = match (gains_focus, amount > 0) {
             (false, _) => text::GAINED,
             (true, true) => text::GAINED_FOCUS,
@@ -259,7 +281,7 @@ pub fn award_with_focus<S: Store>(
         return;
     };
     let character = p.character;
-    pay_vitae(s.vitae_costs.as_slice(), p, net, world, amount);
+    pay_vitae(s.vitae_costs.as_slice(), p, net, world, worth);
     let Some(p) = s.players.get_mut(&world) else {
         return;
     };
@@ -286,22 +308,29 @@ pub fn award_with_focus<S: Store>(
     if now > was {
         level_up(s, net, world, was, now);
     }
-    if amount > 0 && matches!(why, Award::Part | Award::Share) {
+    if amount > 0 && matches!(why, Award::Part | Award::Share | Award::Given) {
         crate::allegiance::earned(s, net, character, amount);
     }
     if now > was {
         crate::allegiance::level_reached(s, net, character);
     }
     match why {
-        Award::Part | Award::Step | Award::Share | Award::Allegiance => {}
-        Award::Quest(name) => say(
-            net,
-            world,
-            text_with(
-                text::QUEST_XP,
-                vec![long(var::XP, 12, amount), nested(var::QUEST, text(name))],
-            ),
-        ),
+        Award::Part | Award::Step | Award::Share | Award::Allegiance | Award::Given => {}
+        Award::Quest(_) if topped => {}
+        Award::Quest(quest) => {
+            let name = s
+                .quests
+                .quest(quest)
+                .map_or_else(TextInfo::default, |d| crate::quests::name_text(&d.name));
+            say(
+                net,
+                world,
+                text_with(
+                    text::QUEST_XP,
+                    vec![long(var::XP, 12, amount), nested(var::QUEST, name)],
+                ),
+            );
+        }
     }
 }
 

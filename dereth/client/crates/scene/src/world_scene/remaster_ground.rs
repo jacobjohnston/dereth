@@ -33,6 +33,44 @@ const CAMERA_PIVOT: f32 = 1.6;
 const BOOM_STEP: f32 = 0.25;
 /// The most blocks whose offset is worked out in one frame.
 const FIELDS_A_FRAME: usize = 6;
+
+/// Where the ground's shift for `object` is taken (render space): where it stands, or for an
+/// object held by another, where the body holding it stands (through holders held in turn), so
+/// what is held is drawn raised or sunk with the body holding it and stays in its hand, however
+/// high the hand holds it.
+pub(crate) fn stance(
+    ws: &dereth_client_runtime::world_state::WorldState,
+    object: &dereth_client_runtime::world_state::WorldObject,
+) -> Vec3 {
+    let mut o = object;
+    // A holder chain no longer than the objects there are: a malformed cycle ends.
+    for _ in 0..=ws.objects.len() {
+        let Some((holder, _)) = o.sim.parent else {
+            return o.frame.origin;
+        };
+        if ws.player_object == Some(holder) {
+            if let Some(c) = ws.character.as_ref() {
+                return drawn_feet(c);
+            }
+        }
+        match ws.objects.get(&holder) {
+            Some(h) => o = h,
+            None => return o.frame.origin,
+        }
+    }
+    object.frame.origin
+}
+
+/// Where the player's body is drawn this frame (render space): where physics has its feet, moved
+/// along its way between its ticks. The ground the body is lifted onto, and the camera's rise with
+/// it, are taken here, so both ride the drawn ground every frame: taken where physics has the
+/// feet, they would hold still between ticks and step with each one.
+pub(crate) fn drawn_feet(c: &dereth_client_runtime::character::Character) -> Vec3 {
+    let o = c.render_frame().origin;
+    let off = c.drawn_offset();
+    Vec3::new(o.x + off.x, o.y + off.y, o.z + off.z)
+}
+
 /// The most bodies the fine relief is leveled under.
 pub(crate) const LEVELED_BODIES: usize = 32;
 /// How far from the eye a body's ground is leveled, meters: past it the fine relief is too small
@@ -118,12 +156,8 @@ fn read_world(store: &RetailDatStore, table: &[f32; 256]) -> World {
 /// A model's footprint in its own space: the box, east and north, of its vertices within
 /// [`FOOT`] of its base; `None` for a model with none there.
 fn footprint(store: &RetailDatStore, id: DataId) -> Option<[f32; 4]> {
-    let gfxobj = |id: DataId| -> Option<dereth_assets::GfxObj> {
-        let bytes = store.read_typed(DbType::GfxObj, id).ok()?;
-        dereth_assets::GfxObj::decode_payload_in(store.era_of(id), id, &bytes).ok()
-    };
     let mut boxed: Option<[f32; 4]> = None;
-    let mut take = |p: Vec3| {
+    model_points(store, id, |p| {
         if p.z > FOOT {
             return;
         }
@@ -132,6 +166,16 @@ fn footprint(store: &RetailDatStore, id: DataId) -> Option<[f32; 4]> {
         b[1] = b[1].min(p.y);
         b[2] = b[2].max(p.x);
         b[3] = b[3].max(p.y);
+    })?;
+    boxed
+}
+
+/// Each vertex of a model in its own space, its parts at rest, handed to `take`; `None` for a
+/// model that does not read.
+fn model_points(store: &RetailDatStore, id: DataId, mut take: impl FnMut(Vec3)) -> Option<()> {
+    let gfxobj = |id: DataId| -> Option<dereth_assets::GfxObj> {
+        let bytes = store.read_typed(DbType::GfxObj, id).ok()?;
+        dereth_assets::GfxObj::decode_payload_in(store.era_of(id), id, &bytes).ok()
     };
     match id.0 >> 24 {
         0x01 => {
@@ -161,7 +205,7 @@ fn footprint(store: &RetailDatStore, id: DataId) -> Option<[f32; 4]> {
         }
         _ => return None,
     }
-    boxed
+    Some(())
 }
 
 /// The footprint `fp` of an object placed at `frame` in block `(bx, by)`, with `margin` round it,
@@ -191,6 +235,154 @@ fn pin_of(fp: [f32; 4], frame: &Frame, (bx, by): (i32, i32), margin: f32) -> Pin
     }
 }
 
+/// What works blocks' offsets out: the pins standing near each block, read once, and each
+/// model's footprint.
+#[derive(Debug, Default)]
+struct FieldMaker {
+    pins: HashMap<(i32, i32), Arc<Vec<Pin>>>,
+    footprints: HashMap<DataId, Option<[f32; 4]>>,
+}
+
+impl FieldMaker {
+    /// The pins standing on block `block` or near enough to reach it, worked out once.
+    fn pins_for(
+        &mut self,
+        store: Option<&RetailDatStore>,
+        block: (i32, i32),
+        knobs: &Knobs,
+    ) -> Arc<Vec<Pin>> {
+        if let Some(p) = self.pins.get(&block) {
+            return Arc::clone(p);
+        }
+        let reach = knobs.get(Knob::PinFade) + 48.0;
+        // LINT-OK: block coordinates, far inside f32's exact range.
+        #[allow(clippy::cast_precision_loss)]
+        let (lo, hi) = (
+            (
+                block.0 as f32 * BLOCK_METERS - reach,
+                block.1 as f32 * BLOCK_METERS - reach,
+            ),
+            (
+                (block.0 + 1) as f32 * BLOCK_METERS + reach,
+                (block.1 + 1) as f32 * BLOCK_METERS + reach,
+            ),
+        );
+        let mut pins = Vec::new();
+        for nx in block.0 - 1..=block.0 + 1 {
+            for ny in block.1 - 1..=block.1 + 1 {
+                let Some(store) = store else {
+                    continue;
+                };
+                let Some(info) = dereth_client_runtime::world_build::read_lbi(store, nx, ny) else {
+                    continue;
+                };
+                let objects = info
+                    .buildings
+                    .iter()
+                    .map(|b| (b.id, b.frame, knobs.get(Knob::PinBuildingMargin)))
+                    .chain(
+                        info.objects
+                            .iter()
+                            .map(|o| (o.id, o.frame, knobs.get(Knob::PinStaticMargin))),
+                    )
+                    .collect::<Vec<_>>();
+                for (id, frame, margin) in objects {
+                    let fp = *self
+                        .footprints
+                        .entry(id)
+                        .or_insert_with(|| footprint(store, id));
+                    let Some(fp) = fp else {
+                        continue;
+                    };
+                    let pin = pin_of(fp, &frame, (nx, ny), margin);
+                    let r = pin.reach();
+                    if pin.x + r >= lo.0
+                        && pin.x - r <= hi.0
+                        && pin.y + r >= lo.1
+                        && pin.y - r <= hi.1
+                    {
+                        pins.push(pin);
+                    }
+                }
+            }
+        }
+        let pins = Arc::new(pins);
+        self.pins.insert(block, Arc::clone(&pins));
+        pins
+    }
+
+    /// Block `block`'s offset over `world` under `knobs`, its pins read from `store`.
+    fn make(
+        &mut self,
+        store: Option<&RetailDatStore>,
+        world: &World,
+        block: (i32, i32),
+        knobs: &Knobs,
+    ) -> drawn::BlockField {
+        let pins = self.pins_for(store, block, knobs);
+        drawn::block_field(world, block, &pins, knobs)
+    }
+}
+
+/// A block's offset asked of the thread, and the knobs it is worked out under, with their
+/// generation: one worked out under knobs since thrown away is not held.
+struct FieldJob {
+    generation: u64,
+    block: (i32, i32),
+    world: Arc<World>,
+    knobs: Knobs,
+}
+
+/// A block's offset the thread worked out.
+struct FieldDone {
+    generation: u64,
+    block: (i32, i32),
+    field: drawn::BlockField,
+}
+
+/// The thread blocks' offsets are worked out on, in the order they are asked for.
+#[derive(Debug)]
+struct FieldWorker {
+    jobs: mpsc::Sender<FieldJob>,
+    done: mpsc::Receiver<FieldDone>,
+    /// The blocks asked for and not yet taken.
+    asked: std::collections::HashSet<(i32, i32)>,
+}
+
+impl FieldWorker {
+    /// The thread, its pins read from `store`; `None` where no thread starts.
+    fn start(store: Option<Arc<RetailDatStore>>) -> Option<Self> {
+        let (jobs, asked) = mpsc::channel::<FieldJob>();
+        let (send, done) = mpsc::channel();
+        crate::workers::spawn("drawn ground offsets", move || {
+            let mut maker = FieldMaker::default();
+            let mut generation = None;
+            for job in asked {
+                // The pins are read under the knobs, so new knobs read them again.
+                if generation != Some(job.generation) {
+                    maker.pins.clear();
+                    generation = Some(job.generation);
+                }
+                let field = maker.make(store.as_deref(), &job.world, job.block, &job.knobs);
+                let worked = FieldDone {
+                    generation: job.generation,
+                    block: job.block,
+                    field,
+                };
+                if send.send(worked).is_err() {
+                    return;
+                }
+            }
+        })
+        .ok()?;
+        Some(Self {
+            jobs,
+            done,
+            asked: std::collections::HashSet::new(),
+        })
+    }
+}
+
 /// One block's near offset.
 #[derive(Debug, Clone)]
 pub(crate) struct Tile {
@@ -200,6 +392,8 @@ pub(crate) struct Tile {
     pub(crate) offset: Arc<Vec<f32>>,
     /// How much of it the pins leave.
     pub(crate) weight: Arc<Vec<f32>>,
+    /// The part of it the rock bands make.
+    pub(crate) bands: Arc<Vec<f32>>,
 }
 
 /// The remaster's ground in the scene.
@@ -212,10 +406,17 @@ pub(crate) struct RemasterGround {
     fields: HashMap<(i32, i32), Tile>,
     /// The number the next tile takes.
     next_tile: u64,
-    pins: HashMap<(i32, i32), Arc<Vec<Pin>>>,
-    footprints: HashMap<DataId, Option<[f32; 4]>>,
+    /// What works the offsets out here, on the frame's thread.
+    maker: FieldMaker,
+    /// What works them out on a thread of its own, ahead of need, once one is started; `None`
+    /// where there are no threads.
+    worker: Option<FieldWorker>,
+    /// Whether a worker was asked for.
+    worker_tried: bool,
     /// Bumped whenever the offsets are thrown away for new knobs.
     field_generation: u64,
+    /// Bumped whenever any knob changes.
+    knobs_serial: u64,
     /// Whether the offset is drawn this frame.
     pub(crate) active: bool,
     /// Where render space's origin lies in the world, meters east and north.
@@ -224,6 +425,8 @@ pub(crate) struct RemasterGround {
     pub(crate) viewer: (i32, i32),
     /// The eye, render space.
     pub(crate) eye: Vec3,
+    /// Where the rock bands on unwalkable ground are drawn.
+    pub(crate) cliff_shelves: drawn::CliffShelves,
 }
 
 impl RemasterGround {
@@ -236,9 +439,15 @@ impl RemasterGround {
     pub(crate) fn set_knobs(&mut self, knobs: Knobs) {
         let changed = knobs.changed_from(&self.knobs);
         self.knobs = knobs;
+        if !changed.is_empty() {
+            self.knobs_serial += 1;
+        }
         if changed.iter().any(|k| FIELD_KNOBS.contains(k)) {
             self.fields.clear();
-            self.pins.clear();
+            self.maker.pins.clear();
+            if let Some(w) = self.worker.as_mut() {
+                w.asked.clear();
+            }
             self.field_generation += 1;
         }
     }
@@ -291,82 +500,28 @@ impl RemasterGround {
         self.world.as_ref().map(|w| (w, self.world_serial))
     }
 
-    /// The pins standing on block `block` or near enough to reach it, worked out once.
-    fn pins_for(&mut self, store: &RetailDatStore, block: (i32, i32)) -> Arc<Vec<Pin>> {
-        if let Some(p) = self.pins.get(&block) {
-            return Arc::clone(p);
-        }
-        let reach = self.knobs.get(Knob::PinFade) + 48.0;
-        // LINT-OK: block coordinates, far inside f32's exact range.
-        #[allow(clippy::cast_precision_loss)]
-        let (lo, hi) = (
-            (
-                block.0 as f32 * BLOCK_METERS - reach,
-                block.1 as f32 * BLOCK_METERS - reach,
-            ),
-            (
-                (block.0 + 1) as f32 * BLOCK_METERS + reach,
-                (block.1 + 1) as f32 * BLOCK_METERS + reach,
-            ),
-        );
-        let mut pins = Vec::new();
-        for nx in block.0 - 1..=block.0 + 1 {
-            for ny in block.1 - 1..=block.1 + 1 {
-                let Some(info) = dereth_client_runtime::world_build::read_lbi(store, nx, ny) else {
-                    continue;
-                };
-                let objects = info
-                    .buildings
-                    .iter()
-                    .map(|b| (b.id, b.frame, self.knobs.get(Knob::PinBuildingMargin)))
-                    .chain(
-                        info.objects
-                            .iter()
-                            .map(|o| (o.id, o.frame, self.knobs.get(Knob::PinStaticMargin))),
-                    )
-                    .collect::<Vec<_>>();
-                for (id, frame, margin) in objects {
-                    let fp = *self
-                        .footprints
-                        .entry(id)
-                        .or_insert_with(|| footprint(store, id));
-                    let Some(fp) = fp else {
-                        continue;
-                    };
-                    let pin = pin_of(fp, &frame, (nx, ny), margin);
-                    let r = pin.reach();
-                    if pin.x + r >= lo.0
-                        && pin.x - r <= hi.0
-                        && pin.y + r >= lo.1
-                        && pin.y - r <= hi.1
-                    {
-                        pins.push(pin);
-                    }
-                }
-            }
-        }
-        let pins = Arc::new(pins);
-        self.pins.insert(block, Arc::clone(&pins));
-        pins
-    }
-
     /// Block `block`'s offset, worked out now if it has not been; `None` before the world's
     /// vertices are read.
-    fn field(&mut self, store: &RetailDatStore, block: (i32, i32)) -> Option<Tile> {
+    fn field(&mut self, store: Option<&RetailDatStore>, block: (i32, i32)) -> Option<Tile> {
         if let Some(t) = self.fields.get(&block) {
             return Some(t.clone());
         }
         let world = Arc::clone(self.world.as_ref()?);
-        let pins = self.pins_for(store, block);
-        let field = drawn::block_field(world.as_ref(), block, &pins, &self.knobs);
+        let field = self.maker.make(store, &world, block, &self.knobs);
+        Some(self.hold_field(block, field))
+    }
+
+    /// Hold `field` as block `block`'s offset.
+    fn hold_field(&mut self, block: (i32, i32), field: drawn::BlockField) -> Tile {
         self.next_tile += 1;
         let tile = Tile {
             generation: self.next_tile,
             offset: Arc::new(field.offset),
             weight: Arc::new(field.weight),
+            bands: Arc::new(field.bands),
         };
         self.fields.insert(block, tile.clone());
-        Some(tile)
+        tile
     }
 
     /// How many blocks the near offset reaches from the viewer's, each way.
@@ -378,8 +533,16 @@ impl RemasterGround {
     }
 
     /// Work out the offsets of the blocks round the viewer's that lack one, a few a frame, and
-    /// forget those far from it.
-    pub(crate) fn keep_fields(&mut self, store: &RetailDatStore) {
+    /// forget those far from it. The ring of blocks just past the near ones is worked out too,
+    /// on a thread of its own where there is one, so a block the viewer comes near has its
+    /// offset already; the near blocks lacking one get theirs this frame, a few at most, as
+    /// they always have.
+    pub(crate) fn keep_fields(&mut self, store: &Arc<RetailDatStore>) {
+        self.keep_fields_from(Some(store));
+    }
+
+    /// [`Self::keep_fields`], with the pins read from `store` where there is one.
+    fn keep_fields_from(&mut self, store: Option<&Arc<RetailDatStore>>) {
         if !self.active {
             return;
         }
@@ -387,17 +550,102 @@ impl RemasterGround {
         let (vx, vy) = self.viewer;
         self.fields
             .retain(|(x, y), _| (x - vx).abs() <= reach + 1 && (y - vy).abs() <= reach + 1);
-        self.pins
+        self.maker
+            .pins
             .retain(|(x, y), _| (x - vx).abs() <= reach + 2 && (y - vy).abs() <= reach + 2);
-        let mut wanted: Vec<(i32, i32)> = (vx - reach..=vx + reach)
-            .flat_map(|x| (vy - reach..=vy + reach).map(move |y| (x, y)))
-            .filter(|b| (0..255).contains(&b.0) && (0..255).contains(&b.1))
+        self.take_worked_fields(false);
+        let ring = |d: i32| {
+            (vx - d..=vx + d)
+                .flat_map(move |x| (vy - d..=vy + d).map(move |y| (x, y)))
+                .filter(|b| (0..255).contains(&b.0) && (0..255).contains(&b.1))
+        };
+        let distance = |(x, y): &(i32, i32)| (x - vx).abs().max((y - vy).abs());
+        let mut near: Vec<(i32, i32)> = ring(reach)
             .filter(|b| !self.fields.contains_key(b))
             .collect();
-        wanted.sort_by_key(|(x, y)| (x - vx).abs().max((y - vy).abs()));
-        for b in wanted.into_iter().take(FIELDS_A_FRAME) {
-            let _ = self.field(store, b);
+        near.sort_by_key(distance);
+        let mut ahead: Vec<(i32, i32)> = ring(reach + 1)
+            .filter(|b| distance(b) > reach && !self.fields.contains_key(b))
+            .collect();
+        ahead.sort_by_key(distance);
+        if !self.worker_tried {
+            self.worker_tried = true;
+            self.worker = FieldWorker::start(store.cloned());
         }
+        let (Some(world), true) = (self.world.clone(), self.worker.is_some()) else {
+            // No thread: the near blocks now, and one block ahead on a frame that needed none.
+            let one_ahead = near.is_empty().then(|| ahead.first().copied()).flatten();
+            near.truncate(FIELDS_A_FRAME);
+            for b in near.into_iter().chain(one_ahead) {
+                let _ = self.field(store.map(AsRef::as_ref), b);
+            }
+            return;
+        };
+        if let Some(w) = self.worker.as_mut() {
+            for &b in near.iter().chain(&ahead) {
+                if w.asked.insert(b) {
+                    let job = FieldJob {
+                        generation: self.field_generation,
+                        block: b,
+                        world: Arc::clone(&world),
+                        knobs: self.knobs.clone(),
+                    };
+                    if w.jobs.send(job).is_err() {
+                        w.asked.remove(&b);
+                    }
+                }
+            }
+        }
+        // The near blocks lacking an offset are waited for, as many as the frame works out.
+        for b in near.into_iter().take(FIELDS_A_FRAME) {
+            while !self.fields.contains_key(&b) && self.take_worked_fields(true) {}
+            if !self.fields.contains_key(&b) {
+                // The thread is gone: worked out here instead.
+                self.worker = None;
+                let _ = self.field(store.map(AsRef::as_ref), b);
+            }
+        }
+    }
+
+    /// Hold the offsets the thread has worked out: those it has now, or when `wait`, the next
+    /// one too, waiting for it. Whether the thread is still there to ask.
+    fn take_worked_fields(&mut self, wait: bool) -> bool {
+        let Some(w) = self.worker.as_mut() else {
+            return false;
+        };
+        let mut done = Vec::new();
+        let mut alive = true;
+        if wait {
+            match w.done.recv() {
+                Ok(d) => done.push(d),
+                Err(_) => alive = false,
+            }
+        }
+        loop {
+            match w.done.try_recv() {
+                Ok(d) => done.push(d),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    alive = false;
+                    break;
+                }
+            }
+        }
+        let reach = i32::from(self.reach()) + 1;
+        let (vx, vy) = self.viewer;
+        for d in done {
+            if d.generation != self.field_generation {
+                continue;
+            }
+            if let Some(w) = self.worker.as_mut() {
+                w.asked.remove(&d.block);
+            }
+            let kept = (d.block.0 - vx).abs() <= reach && (d.block.1 - vy).abs() <= reach;
+            if kept && !self.fields.contains_key(&d.block) {
+                self.hold_field(d.block, d.field);
+            }
+        }
+        alive
     }
 
     /// The offset of block `b`, when it is one the remaster draws: one within the near reach of
@@ -420,6 +668,7 @@ impl RemasterGround {
                     generation: t.generation,
                     offset: Arc::clone(&t.offset),
                     weight: Arc::clone(&t.weight),
+                    bands: Arc::clone(&t.bands),
                 })
             })
             .collect()
@@ -430,6 +679,7 @@ impl RemasterGround {
         let k = &self.knobs;
         rm::DrawnKnobs {
             detail: k.get(Knob::Detail),
+            cliff_fade: self.cliff_shelves.fade(k),
             micro: (k.get(Knob::Micro), k.get(Knob::MicroScale)),
             level: k
                 .on(Knob::Level)
@@ -458,9 +708,7 @@ impl RemasterGround {
                 scale: k.get(Knob::CloudScale),
                 shadows: k.get(Knob::CloudShadows),
             }),
-            water: k
-                .on(Knob::Water)
-                .then(|| (k.get(Knob::WaterDepth), k.get(Knob::WaterShelf))),
+            water: k.on(Knob::Water).then(|| k.get(Knob::BedSlope)),
             slope: k.on(Knob::Slope).then(|| rm::DrawnSlope {
                 scree: (k.get(Knob::ScreeFrom), k.get(Knob::ScreeBlend)),
                 rock: (k.get(Knob::RockFrom), k.get(Knob::RockBlend)),
@@ -477,9 +725,9 @@ impl RemasterGround {
         (self.active && self.knobs.on(Knob::Far)).then(|| self.knobs.get(Knob::Horizon))
     }
 
-    /// The near offset at global `(x, y)`, from the block's offset where the remaster draws one;
-    /// nought elsewhere.
-    fn near_at(&self, x: f32, y: f32) -> f32 {
+    /// The near offset at global `(x, y)`, with `kept` of its rock bands ([`drawn::bands_kept`]),
+    /// from the block's offset where the remaster draws one; nought elsewhere.
+    fn near_at(&self, x: f32, y: f32, kept: f32) -> f32 {
         let (bx, by) = (
             dereth_primitives::num::floor_to_i32(x / BLOCK_METERS),
             dereth_primitives::num::floor_to_i32(y / BLOCK_METERS),
@@ -487,12 +735,31 @@ impl RemasterGround {
         // LINT-OK: block coordinates, far inside f32's exact range.
         #[allow(clippy::cast_precision_loss)]
         self.near_tile((bx, by)).map_or(0.0, |t| {
-            drawn::sample(
+            drawn::with_bands(
                 &t.offset,
+                &t.bands,
                 x - bx as f32 * BLOCK_METERS,
                 y - by as f32 * BLOCK_METERS,
+                kept,
             )
         })
+    }
+
+    /// How much of the rock bands is drawn `dist` meters from the eye.
+    fn bands_kept(&self, dist: f32) -> f32 {
+        drawn::bands_kept(dist, self.cliff_shelves.fade(&self.knobs))
+    }
+
+    /// How much of the rock bands what stands still on the ground (scenery and its lamps) is
+    /// lifted onto: all of them while they are drawn everywhere, none otherwise. Its lift is
+    /// worked out once, not as the eye moves, so with the bands far off only it stands on the face
+    /// as the face is drawn near the eye.
+    fn bands_kept_still(&self) -> f32 {
+        if self.cliff_shelves == drawn::CliffShelves::On {
+            1.0
+        } else {
+            0.0
+        }
     }
 
     /// The water as the ground lays it, while it is drawn as water.
@@ -504,8 +771,7 @@ impl RemasterGround {
                 heights: &world.heights,
                 field: &world.water,
             },
-            depth: self.knobs.get(Knob::WaterDepth),
-            shelf: self.knobs.get(Knob::WaterShelf),
+            slope: self.knobs.get(Knob::BedSlope),
         })
     }
 
@@ -523,25 +789,95 @@ impl RemasterGround {
 
     /// How far a thing standing at global `(x, y)` and height `z` is drawn above where physics
     /// puts it, `far` of the way given way to the far ground: the offset averaged over its
-    /// stance, faded out as it stands higher over retail's ground; and never under the drawn
-    /// ground there, the water's bed and the floor of its banks included.
-    fn shift(&self, world: &World, (x, y, z): (f32, f32, f32), far: f32) -> f32 {
+    /// stance, `kept` of the rock bands in it, faded out as it stands higher over retail's ground,
+    /// and never under the drawn ground there, the floor of the water's banks included. A thing
+    /// retail sinks into its water stays as deep as retail sinks it, where the water's bed is drawn.
+    fn shift(&self, world: &World, (x, y, z): (f32, f32, f32), (far, kept): (f32, f32)) -> f32 {
+        self.shift_with(world, (x, y, z), (far, kept), &mut |x, y, kept| {
+            drawn::body_offset(|x, y| self.near_at(x, y, kept), x, y, &self.knobs)
+        })
+    }
+
+    /// [`Self::shift`], the near ground's offset averaged over the stance at `(x, y)` with `kept`
+    /// of the rock bands given by `near`.
+    fn shift_with(
+        &self,
+        world: &World,
+        (x, y, z): (f32, f32, f32),
+        (far, kept): (f32, f32),
+        near: &mut dyn FnMut(f32, f32, f32) -> f32,
+    ) -> f32 {
         let p = Point::at(world, x, y);
         let keep = self.keep(z - p.retail);
         if keep <= 0.0 {
             return 0.0;
         }
-        let near = if far < 1.0 {
-            drawn::body_offset(|x, y| self.near_at(x, y), x, y, &self.knobs)
-        } else {
-            0.0
-        };
+        let near = if far < 1.0 { near(x, y, kept) } else { 0.0 };
         let ground = drawn::drawn_at(&p, x, y, near, far, self.water().as_ref(), &self.knobs);
-        drawn::shift(z, ground, keep)
+        drawn::shift(drawn::held_from(z, p.retail), ground, keep)
+    }
+
+    /// A number for what the near ground's offset round render-space `at` is worked out from:
+    /// the offsets of its block and the blocks round it, the knobs, and where render space lies.
+    /// It changes whenever any of them does.
+    pub(crate) fn near_key(&self, at: Vec3) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let (x, y) = (at.x + self.global.0, at.y + self.global.1);
+        let block = (
+            dereth_primitives::num::floor_to_i32(x / BLOCK_METERS),
+            dereth_primitives::num::floor_to_i32(y / BLOCK_METERS),
+        );
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.field_generation.hash(&mut h);
+        self.knobs_serial.hash(&mut h);
+        self.global.0.to_bits().hash(&mut h);
+        self.global.1.to_bits().hash(&mut h);
+        for x in block.0 - 1..=block.0 + 1 {
+            for y in block.1 - 1..=block.1 + 1 {
+                self.near_tile((x, y)).map(|t| t.generation).hash(&mut h);
+            }
+        }
+        h.finish()
+    }
+
+    /// [`Self::shift_at`] for a thing that stays where it stands: the near ground's offset under
+    /// it, the slow part, is kept in `kept` with what it was worked out from (`near`, its
+    /// [`Self::near_key`], and how much of the rock bands it holds), and worked out again only
+    /// once that changes. The rest follows the eye frame by frame, as it does for anything.
+    pub(crate) fn still_shift_at(
+        &self,
+        at: Vec3,
+        near: u64,
+        kept: &mut Option<(u64, u32, f32)>,
+    ) -> f32 {
+        if !self.active || !self.knobs.on(Knob::BodyShift) {
+            return 0.0;
+        }
+        let Some(world) = self.world.as_ref() else {
+            return 0.0;
+        };
+        let (x, y) = (at.x + self.global.0, at.y + self.global.1);
+        let retail = Point::at(world.as_ref(), x, y).retail;
+        let eye = self.eye;
+        let dist =
+            ((at.x - eye.x).powi(2) + (at.y - eye.y).powi(2) + (retail - eye.z).powi(2)).sqrt();
+        let far = drawn::morph(dist, &self.knobs);
+        let bands = self.bands_kept(dist);
+        self.shift_with(world, (x, y, at.z), (far, bands), &mut |x, y, bands| {
+            if let Some((key, held, offset)) = *kept {
+                if key == near && held == bands.to_bits() {
+                    return offset;
+                }
+            }
+            let offset = drawn::body_offset(|x, y| self.near_at(x, y, bands), x, y, &self.knobs);
+            *kept = Some((near, bands.to_bits(), offset));
+            offset
+        })
     }
 
     /// How far a thing standing at render-space `at` is drawn above where physics puts it, given
-    /// way to the far ground with its distance from the eye. Nought while the offset is not drawn.
+    /// way to the far ground with its distance from the eye. Nought while the offset is not
+    /// drawn.
     pub(crate) fn shift_at(&self, at: Vec3) -> f32 {
         if !self.active || !self.knobs.on(Knob::BodyShift) {
             return 0.0;
@@ -555,7 +891,25 @@ impl RemasterGround {
         let dist =
             ((at.x - eye.x).powi(2) + (at.y - eye.y).powi(2) + (retail - eye.z).powi(2)).sqrt();
         let far = drawn::morph(dist, &self.knobs);
-        self.shift(world, (x, y, at.z), far)
+        let kept = self.bands_kept(dist);
+        self.shift(world, (x, y, at.z), (far, kept))
+    }
+
+    /// How far server object `o` is drawn above where physics puts it: outdoors, as a body
+    /// standing where it stands ([`stance`]) is; nought indoors.
+    pub(crate) fn object_lift(
+        &self,
+        ws: &dereth_client_runtime::world_state::WorldState,
+        o: &dereth_client_runtime::world_state::WorldObject,
+    ) -> f32 {
+        if ws
+            .object_draw_cell(o)
+            .is_some_and(dereth_physics::landdefs::is_outdoors)
+        {
+            self.shift_at(stance(ws, o))
+        } else {
+            0.0
+        }
     }
 
     /// How far a piece of scenery standing at global `(x, y)` and height `z` is drawn above where
@@ -569,9 +923,10 @@ impl RemasterGround {
         let Some(world) = self.world.as_ref() else {
             return [0.0; 2];
         };
-        let near = self.shift(world, (x, y, z), 0.0);
+        let kept = self.bands_kept_still();
+        let near = self.shift(world, (x, y, z), (0.0, kept));
         let far = if self.knobs.on(Knob::Far) {
-            self.shift(world, (x, y, z), 1.0)
+            self.shift(world, (x, y, z), (1.0, kept))
         } else {
             near
         };
@@ -588,6 +943,10 @@ impl RemasterGround {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.field_generation.hash(&mut h);
         self.knobs.on(Knob::Far).hash(&mut h);
+        self.bands_kept_still().to_bits().hash(&mut h);
+        for k in [Knob::Water, Knob::BedSlope] {
+            self.knobs.get(k).to_bits().hash(&mut h);
+        }
         for x in block.0 - 1..=block.0 + 1 {
             for y in block.1 - 1..=block.1 + 1 {
                 self.near_tile((x, y)).map(|t| t.generation).hash(&mut h);
@@ -596,10 +955,37 @@ impl RemasterGround {
         h.finish() | 1
     }
 
+    /// How far the player's body `c` is drawn above where it is drawn between its ticks: outdoors,
+    /// by the ground under it where it is drawn ([`drawn_feet`]); nought indoors.
+    pub(crate) fn body_lift(&self, c: &dereth_client_runtime::character::Character) -> f32 {
+        if dereth_physics::landdefs::is_outdoors(c.position().cell) {
+            self.shift_at(drawn_feet(c))
+        } else {
+            0.0
+        }
+    }
+
+    /// Where the frame is drawn from for the camera at `eye` following the player's body `body`,
+    /// if any: moved by [`Self::camera_offset`] from the feet where the body is drawn
+    /// ([`drawn_feet`]).
+    pub(crate) fn eye_over(
+        &self,
+        mut eye: Frame,
+        body: Option<&dereth_client_runtime::character::Character>,
+    ) -> Frame {
+        let offset = self.camera_offset(eye.origin, body.map(drawn_feet));
+        eye.origin = Vec3::new(
+            eye.origin.x + offset.x,
+            eye.origin.y + offset.y,
+            eye.origin.z + offset.z,
+        );
+        eye
+    }
+
     /// How far the camera at render-space `eye` is drawn from where it stands, `body` the feet
-    /// (render space, where physics puts them) of the body it follows, if any: it rises as the
-    /// body does, is drawn in front of the drawn ground where the ground rises between it and
-    /// the body, and never closer to the ground than the camera's clearance.
+    /// (render space, where the body is drawn: [`drawn_feet`]) of the body it follows, if any: it
+    /// rises as the body does, is drawn in front of the drawn ground where the ground rises
+    /// between it and the body, and never closer to the ground than the camera's clearance.
     pub(crate) fn camera_offset(&self, eye: Vec3, body: Option<Vec3>) -> Vec3 {
         if !self.active || !self.knobs.on(Knob::BodyShift) || self.world.is_none() {
             return Vec3::ZERO;
@@ -609,7 +995,8 @@ impl RemasterGround {
             Some(b) => self.shift_at(b),
             None => {
                 let (x, y) = (eye.x + self.global.0, eye.y + self.global.1);
-                drawn::body_offset(|x, y| self.near_at(x, y), x, y, &self.knobs)
+                let kept = self.bands_kept(0.0);
+                drawn::body_offset(|x, y| self.near_at(x, y, kept), x, y, &self.knobs)
             }
         };
         let mut at = Vec3::new(eye.x, eye.y, eye.z + rise);
@@ -679,7 +1066,7 @@ impl RemasterGround {
             ((x - self.eye.x).powi(2) + (y - self.eye.y).powi(2) + (p.retail - self.eye.z).powi(2))
                 .sqrt();
         let far = drawn::morph(dist, &self.knobs);
-        let near = self.near_at(gx, gy);
+        let near = self.near_at(gx, gy, self.bands_kept(dist));
         Some(drawn::drawn_at(&p, gx, gy, near, far, self.water().as_ref(), &self.knobs).height)
     }
 }
@@ -693,6 +1080,18 @@ fn smoothstep(lo: f32, hi: f32, x: f32) -> f32 {
 }
 
 impl super::SceneDraw {
+    /// Where the remaster draws the rock bands on unwalkable ground, from its next frame on:
+    /// nowhere, far from the eye only, or everywhere the near ground is drawn.
+    pub fn set_remaster_cliff_shelves(&mut self, shelves: drawn::CliffShelves) {
+        self.remaster_ground.cliff_shelves = shelves;
+    }
+
+    /// Where the remaster draws the rock bands on unwalkable ground.
+    #[must_use]
+    pub fn remaster_cliff_shelves(&self) -> drawn::CliffShelves {
+        self.remaster_ground.cliff_shelves
+    }
+
     /// The remaster's ground's upkeep for this frame: the world's vertices, whether the offset
     /// is drawn, and the near blocks' offsets.
     ///
@@ -793,9 +1192,9 @@ impl super::SceneDraw {
 
 impl super::WorldScene {
     /// Wait for the far trees and forest cover the remaster draws to be worked out where they are
-    /// being worked out, and for the far pictures of retail's trees asked for so far to be drawn:
-    /// for a capture that has to draw them from its first frames. The frame after this draws
-    /// them.
+    /// being worked out, and for which of retail's objects are trees: for a capture that has to
+    /// draw them from its first frames. Their pictures are made on the device over the frames
+    /// after this.
     pub fn wait_for_remaster_far_trees(&mut self) {
         self.draw.remaster_ground.wait_for_world();
         if let Some(r) = self.draw.remaster_retail_far.as_ref() {
@@ -837,12 +1236,29 @@ impl super::WorldScene {
         self.draw.remaster_ground.shift_at(at)
     }
 
-    /// How far a piece of scenery standing at render-space `at` is drawn above it on the
-    /// remaster's ground, near and far (see [`RemasterGround::lifts`]).
+    /// How far a placement standing at render-space `at` is drawn above it on the remaster's
+    /// ground, near and far (see [`RemasterGround::lifts`]).
     #[must_use]
     pub fn remaster_lifts_at(&self, at: Vec3) -> [f32; 2] {
         let g = &self.draw.remaster_ground;
         g.lifts(at.x + g.global.0, at.y + g.global.1, at.z)
+    }
+
+    /// How far the player's body is drawn above where it is drawn between its ticks on the
+    /// remaster's ground, as the remaster is handed it; `None` without a body.
+    #[must_use]
+    pub fn remaster_body_lift(&self) -> Option<f32> {
+        let c = self.world.character.as_ref()?;
+        Some(self.draw.remaster_ground.body_lift(c))
+    }
+
+    /// How far server object `id` is drawn above where physics puts it on the remaster's
+    /// ground, as the remaster is handed it; `None` for an object not in the world.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn remaster_object_lift(&self, id: dereth_primitives::ObjectId) -> Option<f32> {
+        let o = self.world.objects.get(&id)?;
+        Some(self.draw.remaster_ground.object_lift(&self.world, o))
     }
 
     /// The remaster's ground's knobs.
@@ -854,5 +1270,341 @@ impl super::WorldScene {
     /// Draw the remaster's ground with `knobs` from the next frame.
     pub fn set_remaster_ground_knobs(&mut self, knobs: Knobs) {
         self.draw.remaster_ground.set_knobs(knobs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Behaviour: none (experimental: the remaster's drawn ground)
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    impl RemasterGround {
+        /// Wait for every offset asked of the thread.
+        fn wait_for_asked(&mut self) {
+            while self.worker.as_ref().is_some_and(|w| !w.asked.is_empty()) {
+                if !self.take_worked_fields(true) {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// A world of rolling grassland, no water, and the ground drawn about block `(100, 100)`.
+    fn ground() -> RemasterGround {
+        let mut heights = vec![0.0f32; WORLD_SIDE * WORLD_SIDE];
+        for (k, h) in heights.iter_mut().enumerate() {
+            // LINT-OK: vertex indices, far inside f32's exact range.
+            #[allow(clippy::cast_precision_loss)]
+            let (x, y) = ((k % WORLD_SIDE) as f32, (k / WORLD_SIDE) as f32);
+            use dereth_primitives::num::math::{cosf, sinf};
+            *h = 40.0 + 9.0 * sinf(x * 0.37) * cosf(y * 0.23) + 3.0 * sinf(x * 1.7 + y);
+        }
+        // Grassland everywhere.
+        let words = vec![1u16 << 2; WORLD_SIDE * WORLD_SIDE];
+        let water = drawn::shore::held(&drawn::shore::water_field(WORLD_SIDE, &heights, &words));
+        RemasterGround {
+            world: Some(Arc::new(World {
+                heights: Arc::new(heights),
+                words: Arc::new(words),
+                water: Arc::new(water),
+            })),
+            active: true,
+            viewer: (100, 100),
+            ..RemasterGround::default()
+        }
+    }
+
+    /// The offsets held, by block.
+    fn offsets(g: &RemasterGround) -> BTreeMap<(i32, i32), (Vec<f32>, Vec<f32>)> {
+        g.fields
+            .iter()
+            .map(|(b, t)| (*b, ((*t.offset).clone(), (*t.weight).clone())))
+            .collect()
+    }
+
+    /// **The drawn ground's offsets worked out on their own thread are the frame's own**: the
+    /// near blocks have theirs from the frame that first wants them, as the frame would work
+    /// them out, and the ring past them, worked out ahead, matches too.
+    #[test]
+    fn offsets_worked_out_ahead_on_a_thread_are_those_the_frame_works_out() {
+        let mut threaded = ground();
+        let mut here = ground();
+        // Never started: the frame works every offset out itself.
+        here.worker_tried = true;
+        let reach = i32::from(threaded.reach());
+        let near = |g: &RemasterGround| {
+            (100 - reach..=100 + reach)
+                .flat_map(|x| (100 - reach..=100 + reach).map(move |y| (x, y)))
+                .filter(|b| g.fields.contains_key(b))
+                .count()
+        };
+        threaded.keep_fields_from(None);
+        here.keep_fields_from(None);
+        assert!(threaded.worker.is_some(), "a thread started");
+        // The thread may have finished more of them while the frame waited for its own.
+        assert!(
+            near(&threaded) >= near(&here),
+            "the frame that wants them has at least as many near offsets as it works out"
+        );
+        // Every block out to the ring past the near ones, for both.
+        threaded.wait_for_asked();
+        for _ in 0..200 {
+            here.keep_fields_from(None);
+        }
+        let (a, b) = (offsets(&threaded), offsets(&here));
+        assert_eq!(
+            a.len(),
+            (2 * reach as usize + 3).pow(2),
+            "the near blocks and the ring past them"
+        );
+        assert_eq!(a.keys().collect::<Vec<_>>(), b.keys().collect::<Vec<_>>());
+        assert!(a == b, "every offset the thread worked out is the frame's");
+        assert!(
+            a.values().any(|(o, _)| o.iter().any(|v| v.abs() > 1e-3)),
+            "the ground is drawn off retail's somewhere"
+        );
+    }
+
+    /// **Offsets worked out under knobs since thrown away are not held**: new knobs that change
+    /// the offsets drop what the thread was still working out under the old ones.
+    #[test]
+    fn offsets_worked_out_under_old_knobs_are_dropped() {
+        let mut g = ground();
+        g.keep_fields_from(None);
+        let mut knobs = g.knobs.clone();
+        knobs.set(Knob::WalkCap, g.knobs.get(Knob::WalkCap) * 0.5 + 0.01);
+        g.set_knobs(knobs);
+        assert!(g.fields.is_empty());
+        g.keep_fields_from(None);
+        g.wait_for_asked();
+        let mut fresh = ground();
+        fresh.worker_tried = true;
+        fresh.set_knobs(g.knobs.clone());
+        for _ in 0..200 {
+            fresh.keep_fields_from(None);
+        }
+        assert!(offsets(&g) == offsets(&fresh));
+    }
+
+    /// **Something standing still keeps the ground under it**: an animated static's lift, its
+    /// near ground's offset kept from the frame before, is the lift worked out afresh, wherever
+    /// the eye goes; the kept offset is used as it stands while what it was worked out from
+    /// stands (a stand-in kept for it comes back), and worked out again once the offsets round it
+    /// change.
+    #[test]
+    fn something_standing_still_keeps_the_ground_under_it_until_the_ground_changes() {
+        let mut g = ground();
+        g.keep_fields_from(None);
+        g.wait_for_asked();
+        for _ in 0..200 {
+            g.keep_fields_from(None);
+        }
+        let (x, y) = (100.0 * 192.0 + 37.0, 100.0 * 192.0 + 61.0);
+        // Standing on retail's ground, as a placed static does.
+        let z = Point::at(g.world.as_deref().expect("a world"), x, y).retail;
+        let at = Vec3::new(x, y, z);
+        let near = g.near_key(at);
+        let mut kept = None;
+        let mut moved_any = false;
+        for eye in [
+            Vec3::new(at.x - 4.0, at.y, 46.0),
+            Vec3::new(at.x - 40.0, at.y + 30.0, 60.0),
+            Vec3::new(at.x + 500.0, at.y, 80.0),
+            Vec3::new(at.x + 3000.0, at.y, 80.0),
+        ] {
+            g.eye = eye;
+            let afresh = g.shift_at(at);
+            let still = g.still_shift_at(at, near, &mut kept);
+            assert_eq!(
+                still.to_bits(),
+                afresh.to_bits(),
+                "the same lift with the eye at {eye:?}"
+            );
+            moved_any |= afresh.abs() > 1e-4;
+        }
+        assert!(moved_any, "the ground lifts it somewhere");
+        // Kept, and used as it stands: a stand-in for the offset comes back in the lift.
+        g.eye = Vec3::new(at.x - 4.0, at.y, 46.0);
+        let (key, bands, offset) = kept.expect("the offset was kept");
+        assert_eq!(key, near);
+        let mut stand_in = Some((key, bands, offset + 7.5));
+        let with = g.still_shift_at(at, near, &mut stand_in);
+        assert!(
+            (with - g.shift_at(at)).abs() > 1.0,
+            "the kept offset was used, not worked out"
+        );
+        // Another key (the offsets round it changed): worked out again.
+        let mut stale = Some((near ^ 1, bands, offset + 7.5));
+        let again = g.still_shift_at(at, near, &mut stale);
+        assert_eq!(again.to_bits(), g.shift_at(at).to_bits());
+        assert_eq!(stale, Some((near, bands, offset)));
+        // New knobs change the key.
+        let mut knobs = g.knobs.clone();
+        knobs.set(Knob::WalkLowpass, g.knobs.get(Knob::WalkLowpass) + 0.5);
+        g.set_knobs(knobs);
+        assert_ne!(g.near_key(at), near);
+    }
+
+    /// **A body in the water is drawn where physics puts it, on the bed drawn there**: out in a
+    /// lake, where physics sinks a body 0.9 m, the bed is drawn that far under the water's level
+    /// and the body is not moved; in its shallows a body sunk less is drawn as deep, and scenery
+    /// standing in the water is drawn where retail places it.
+    #[test]
+    fn a_body_in_the_water_is_drawn_where_physics_puts_it_on_the_bed_drawn_there() {
+        let heights = vec![28.0f32; WORLD_SIDE * WORLD_SIDE];
+        // A lake forty vertices across, fresh standing water, in grassland.
+        let words: Vec<u16> = (0..WORLD_SIDE * WORLD_SIDE)
+            .map(|k| {
+                if (780..820).contains(&(k % WORLD_SIDE)) {
+                    17 << 2
+                } else {
+                    1 << 2
+                }
+            })
+            .collect();
+        let water = drawn::shore::held(&drawn::shore::water_field(WORLD_SIDE, &heights, &words));
+        let mut g = RemasterGround {
+            world: Some(Arc::new(World {
+                heights: Arc::new(heights),
+                words: Arc::new(words),
+                water: Arc::new(water),
+            })),
+            active: true,
+            viewer: (100, 100),
+            ..RemasterGround::default()
+        };
+        let (x, y) = (800.0 * 24.0 + 5.0, 800.0 * 24.0 + 7.0);
+        g.eye = Vec3::new(x, y - 10.0, 32.0);
+        let deep = Vec3::new(x, y, 28.0 - 0.9);
+        assert!(g.shift_at(deep).abs() < 1e-5, "{}", g.shift_at(deep));
+        let bed = g.ground_at(x, y).expect("the world is read");
+        assert!((bed - deep.z).abs() < 1e-4, "the bed under the body: {bed}");
+        // In the cell on the lake's west edge, by its water corner: physics sinks a body 0.45 m.
+        let (sx, sy) = (779.0 * 24.0 + 19.0, 800.0 * 24.0 + 7.0);
+        let shallow = Vec3::new(sx, sy, 28.0 - 0.45);
+        assert!(g.shift_at(shallow).abs() < 1e-5, "{}", g.shift_at(shallow));
+        let bed = g.ground_at(sx, sy).expect("the world is read");
+        assert!(
+            (bed - shallow.z).abs() < 1e-4,
+            "the bed in the shallows: {bed}"
+        );
+        assert_eq!(g.lifts(x, y, 28.0), [0.0; 2]);
+        assert_eq!(g.lifts(sx, sy, 28.0), [0.0; 2]);
+    }
+
+    /// The root mean square and the worst of `v`'s second difference.
+    fn second_difference(v: &[f32]) -> (f32, f32) {
+        let d: Vec<f32> = v.windows(3).map(|w| w[2] - 2.0 * w[1] + w[0]).collect();
+        // LINT-OK: a few hundred frames.
+        #[allow(clippy::cast_precision_loss)]
+        let rms = (d.iter().map(|x| x * x).sum::<f32>() / d.len().max(1) as f32).sqrt();
+        (rms, d.iter().fold(0.0f32, |m, x| m.max(x.abs())))
+    }
+
+    /// One frame of a body running under the orbit camera at `fps`: the height its feet are
+    /// drawn at, on the ground, and the height of the eye the frame is drawn from; and how far
+    /// the body is lifted.
+    fn running_frame(
+        c: &mut dereth_client_runtime::character::Character,
+        g: &mut RemasterGround,
+        t: &mut f64,
+        fps: f64,
+    ) -> (f32, f32, f32) {
+        use dereth_client_runtime::camera::CameraInput;
+        *t += 1.0 / fps;
+        c.update(dereth_primitives::LocalTime(*t));
+        c.update_camera(
+            CameraInput::default(),
+            dereth_primitives::LocalTime(*t),
+            1.0 / fps,
+        );
+        let eye = c.camera_render_frame().expect("the eye is placed");
+        g.eye = eye.origin;
+        let lift = g.body_lift(c);
+        (
+            drawn_feet(c).z + lift,
+            g.eye_over(eye, Some(c)).origin.z,
+            lift,
+        )
+    }
+
+    /// **A body running over uneven drawn ground under the orbit camera, and the eye following
+    /// it, ride the ground every frame**: where retail's ground is level and the drawn ground
+    /// rises most of a meter off it, a body running at 120 frames a second, drawn between its
+    /// 30 Hz physics ticks, is lifted onto the ground where it is drawn, and the eye rises with
+    /// it. The height of each moves on evenly frame to frame, rather than holding still between
+    /// ticks and stepping at each one.
+    #[test]
+    #[cfg_attr(
+        not(feature = "retail-dats"),
+        ignore = "reads the retail dats: --features retail-dats"
+    )]
+    fn a_running_body_and_the_eye_following_it_ride_the_drawn_ground_every_frame() {
+        let store = Arc::new(dereth_dat::testing::open_store_or_fail());
+        let region = dereth_world_data::landblock::load_region(&store).expect("the region");
+        let block: u16 = 0x8A8C;
+        let (bx, by) = (i32::from(block >> 8), i32::from(block & 0xFF));
+        let mut c = dereth_client_runtime::character::Character::new(
+            &store,
+            &region,
+            block,
+            (122.75, 45.15),
+        )
+        .expect("a body");
+        let _ = c.set_viewer_block((bx, by));
+        // Facing north-west, over the rise.
+        c.face_heading(316.0);
+        c.camera.orbit_active = true;
+        c.drawn_between_ticks = true;
+        let table = dereth_terrain::land::mesh::height_table(&region);
+        // LINT-OK: block coordinates, far inside f32's exact range.
+        #[allow(clippy::cast_precision_loss)]
+        let global = (bx as f32 * BLOCK_METERS, by as f32 * BLOCK_METERS);
+        let mut g = RemasterGround {
+            world: Some(Arc::new(read_world(&store, &table))),
+            active: true,
+            viewer: (bx, by),
+            global,
+            // The offsets worked out on the frame's thread.
+            worker_tried: true,
+            ..RemasterGround::default()
+        };
+        for _ in 0..64 {
+            g.keep_fields_from(Some(&store));
+        }
+        let fps = 120.0;
+        let mut t = 10.0;
+        for _ in 0..60 {
+            running_frame(&mut c, &mut g, &mut t, fps);
+        }
+        c.input.forward = true;
+        c.input.run = true;
+        // Up to speed.
+        for _ in 0..60 {
+            running_frame(&mut c, &mut g, &mut t, fps);
+        }
+        let run: Vec<(f32, f32, f32)> = (0..240)
+            .map(|_| running_frame(&mut c, &mut g, &mut t, fps))
+            .collect();
+        let (low, high) = run
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(l, h), f| (l.min(f.2), h.max(f.2)));
+        assert!(
+            high - low > 0.5,
+            "the drawn ground leaves retail's along the way: lifted {low} to {high}"
+        );
+        for (what, heights) in [
+            ("the feet", run.iter().map(|f| f.0).collect::<Vec<_>>()),
+            ("the eye", run.iter().map(|f| f.1).collect::<Vec<_>>()),
+        ] {
+            let (rms, worst) = second_difference(&heights);
+            assert!(
+                rms < 0.002 && worst < 0.01,
+                "{what}: the height's second difference frame to frame is {rms} m on average, \
+                 {worst} m at worst"
+            );
+        }
     }
 }

@@ -48,7 +48,11 @@
 //! above and never pushed out of a full corpse. Only a creature a camp keeps leaves one, so they
 //! come no faster than the camps make the creatures again; a creature made by a death or an item's
 //! use, a pet, or one its camp let go leaves none. A corpse is given an item once, however many
-//! rows name it.
+//! rows name it. One that names a quest is rolled instead once for each player who may claim the
+//! corpse (its killer, and the killer's fellows in the world) holding that quest where it needs it
+//! as the corpse is made: so a quest's item lies on the corpse for each of its holders, and for no
+//! one else (players' guides of 2003 and 2004: each fellow of the player who destroyed an outpost's
+//! beacon loots one key of its own from the beacon, and only one).
 //!
 //! **What a treasure item is worth**: its own value is one of the values its world gives treasure
 //! of its dropper's level ([`yalain_content::LootTable::values`]), drawn evenly, the nearest level's
@@ -99,6 +103,11 @@ use crate::{quals, session, Clock, Server, Timer};
 /// The corpse's template and script package.
 pub const CORPSE_TEMPLATE: u32 = 0x4700_0539;
 pub const CORPSE_PACKAGE: u32 = 0x182;
+
+/// The property naming the corpse a creature's template leaves in place of the common one, and the
+/// one naming what a container's template is filled from.
+pub const CORPSE_OVERRIDE: &str = "NPC_CorpseOverrideEntity";
+pub const GENERATOR_PROFILE: &str = "GeneratorProfile";
 
 /// The corpse's name ("Corpse of %1") and its variable.
 pub const CORPSE_NAME: (u32, u32) = (0x509A_8FF6, 0x2500_0011);
@@ -220,6 +229,7 @@ pub fn creature_dies<S: Store>(
     let Some(t) = s.things.get_mut(id) else {
         return;
     };
+    let fell_at = t.at;
     let Some(c) = t.creature.as_mut() else { return };
     if c.mode == Mode::Dead {
         return;
@@ -241,6 +251,9 @@ pub fn creature_dies<S: Store>(
         t.facts.group,
     );
     let death_xp = worth_with_effects(s, id, death_xp);
+    if let Some(i) = camp {
+        crate::fought::record(s, i, &parts);
+    }
     paid_in_parts(
         s,
         net,
@@ -261,6 +274,9 @@ pub fn creature_dies<S: Store>(
             crate::quests::killed(s, net, world, kill, &death_effects, clock);
             crate::death_spawn::killed(s, net, world, id, template, &death_effects, clock);
         }
+    }
+    if let Some(at) = fell_at {
+        crate::quests::died_near(s, net, (id, template), &at, clock);
     }
     if let Some(w) = blow_fellow {
         let victim = name.map_or_else(Default::default, progress::text);
@@ -623,11 +639,14 @@ pub fn dead_create(t: &Thing) -> CreateObject {
 }
 
 /// Whether a treasure item of a template is worth its template's value, with none of its own: a
-/// rare, or a trump of the tarot.
+/// rare, a trump of the tarot, or a gem.
 #[must_use]
 pub fn keeps_template_value<S: Store>(s: &Server<S>, template: u32) -> bool {
     s.catalog.get(template).is_some_and(|t| {
-        t.props.flag(crate::treasure::RARE) || s.treasure.trumps.contains(&t.description.package)
+        let package = t.description.package;
+        t.props.flag(crate::treasure::RARE)
+            || s.treasure.trumps.contains(&package)
+            || s.treasure.gems.contains(&package)
     })
 }
 
@@ -667,22 +686,41 @@ fn treasure_value<S: Store>(s: &mut Server<S>, level: i32, template: u32) -> Opt
     })
 }
 
+/// A creature's item from outside its profile's draw (a fixed drop, an extra or a death
+/// treasure): none of its own, except that a treasure potion is treasure however it comes, with its
+/// own value ([`treasure_value`]) and so, once made, its own effect.
+fn fixed<S: Store>(s: &mut Server<S>, level: i32, template: u32) -> (u32, Option<u32>) {
+    let potion = s
+        .catalog
+        .get(template)
+        .is_some_and(|t| s.treasure.potions.contains(&t.description.package));
+    let value = if potion {
+        treasure_value(s, level, template)
+    } else {
+        None
+    };
+    (template, value)
+}
+
 /// What a dead creature leaves: its fixed drops, its profile's extras, the profile's draw (from its
-/// items, or its pools for its killer: [`crate::treasure_pools`]), and its death treasures. Each
-/// item is its template and, for treasure (those drawn from the profile), its own value
+/// items, or its pools for its killer: [`crate::treasure_pools`]), its death treasures, and what its
+/// own corpse holds ([`corpse_profile`]). Each item is its template and, for treasure (those drawn
+/// from the profile, and a treasure potion wherever it comes from: [`fixed`]), its own value
 /// ([`treasure_value`]); none for the rest.
 pub fn roll_loot<S: Store>(
     s: &mut Server<S>,
     creature: &Thing,
     killer: u64,
+    clock: Clock,
 ) -> Vec<(u32, Option<u32>)> {
     let Some(c) = creature.creature.as_ref() else {
         return Vec::new();
     };
+    let level = c.stats.level;
     let mut out: Vec<(u32, Option<u32>)> = Vec::new();
     for (t, rate) in c.stats.trophies.clone() {
         if s.rng.chance(rate) {
-            out.push((t, None));
+            out.push(fixed(s, level, t));
         }
     }
     let name = c.stats.loot_profile.and_then(|v| s.catalog.profile_name(v));
@@ -693,7 +731,7 @@ pub fn roll_loot<S: Store>(
     if let Some(p) = profile {
         for (t, rate) in &p.extras {
             if s.rng.chance(*rate) {
-                out.push((*t, None));
+                out.push(fixed(s, level, *t));
             }
         }
         let count = s.rng.weighted(p.counts.iter().copied()).unwrap_or(0);
@@ -708,7 +746,7 @@ pub fn roll_loot<S: Store>(
             .and_then(|m| usize::try_from(m).ok())
             .unwrap_or(MOST_ITEMS);
         let count = count.clamp(min.min(max), max);
-        let level = c.stats.level;
+        let count = crate::rates::loot_count(&mut s.rng, s.cfg.rates.loot, count);
         let base = crate::treasure::base_of(level, c.stats.loot_quality);
         let race = crate::treasure_pools::race_of(s, killer);
         let profile_name = name.as_deref().unwrap_or_default();
@@ -737,16 +775,44 @@ pub fn roll_loot<S: Store>(
         }
         out.extend(crate::treasure_pools::rare(s, profile_name, base, race).map(|t| (t, None)));
     }
-    let treasures = death_treasures(s, creature);
-    out.truncate(MOST_ITEMS.saturating_sub(treasures.len()));
-    out.extend(treasures.into_iter().map(|t| (t, None)));
+    let treasures = death_treasures(s, creature, killer, clock);
+    let own = corpse_profile(s, creature);
+    out.truncate(MOST_ITEMS.saturating_sub(treasures.len() + own.len()));
+    for t in treasures.into_iter().chain(own) {
+        out.push(fixed(s, level, t));
+    }
     out
 }
 
+/// What a creature's corpse holds by its own kind: a template that names its own corpse in place of
+/// the common one, where that corpse's template names a generator profile, has the profile's row
+/// drawn into its corpse as a chest's is at an opening (a boss's quest item lies on its corpse, as
+/// players' guides tell of the bosses whose corpses name one), after all the creature leaves itself.
+/// Like the death treasures it is kept whatever the creature leaves, and none of it is treasure.
+/// Nothing is drawn for a creature whose corpse names no profile, or whose profile has no row.
+fn corpse_profile<S: Store>(s: &mut Server<S>, creature: &Thing) -> Vec<u32> {
+    let profile = s
+        .catalog
+        .get(creature.template)
+        .and_then(|t| t.props.word(CORPSE_OVERRIDE))
+        .and_then(|c| s.catalog.get(c))
+        .and_then(|c| c.props.word(GENERATOR_PROFILE));
+    crate::usable::chests::profile_fill(s, profile, None)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect()
+}
+
 /// The death treasures a creature leaves: each of its template's and its camp's rolled once at its
-/// chance, each item once; none for a creature no camp keeps. Nothing is drawn for a creature with
+/// chance, each item once; one that names a quest rolled once for each claimant holding it where it
+/// needs it ([`claimants`]); none for a creature no camp keeps. Nothing is drawn for a creature with
 /// no row.
-fn death_treasures<S: Store>(s: &mut Server<S>, creature: &Thing) -> Vec<u32> {
+fn death_treasures<S: Store>(
+    s: &mut Server<S>,
+    creature: &Thing,
+    killer: u64,
+    clock: Clock,
+) -> Vec<u32> {
     let Some(camp) = creature
         .creature
         .as_ref()
@@ -756,16 +822,64 @@ fn death_treasures<S: Store>(s: &mut Server<S>, creature: &Thing) -> Vec<u32> {
     else {
         return Vec::new();
     };
-    let rows: Vec<(u32, f32)> = s
+    let rows: Vec<(u32, f32, Option<yalain_content::QuestGate>)> = s
         .loot
         .treasures_of(creature.template, Some(&camp))
-        .map(|t| (t.item, t.chance))
+        .map(|t| (t.item, t.chance, t.requires))
         .collect();
     let mut out: Vec<u32> = Vec::new();
-    for (item, chance) in rows {
-        if !out.contains(&item) && s.rng.chance(chance) {
-            out.push(item);
+    let mut once: Vec<u32> = Vec::new();
+    for (item, chance, requires) in rows {
+        match requires {
+            None => {
+                if !once.contains(&item) && s.rng.chance(chance) {
+                    once.push(item);
+                    out.push(item);
+                }
+            }
+            Some(g) => {
+                let retry = s.quests.quest(g.quest).map_or(0.0, |d| d.retry);
+                let holders = claimants(s, killer)
+                    .into_iter()
+                    .filter(|w| {
+                        s.players.get(w).is_some_and(|p| {
+                            crate::item_use::quest_refusal(
+                                &p.play.quests,
+                                g.quest,
+                                g.status,
+                                retry,
+                                clock.unix,
+                            )
+                            .is_none()
+                        })
+                    })
+                    .count();
+                for _ in 0..holders {
+                    if s.rng.chance(chance) {
+                        out.push(item);
+                    }
+                }
+            }
         }
+    }
+    out
+}
+
+/// Who may claim a creature's corpse as it is made: its killer, if a player in the world, and the
+/// killer's fellows in the world.
+fn claimants<S: Store>(s: &Server<S>, killer: u64) -> Vec<ConnId> {
+    let Some(me) = world_of(s, killer) else {
+        return Vec::new();
+    };
+    let mut out = vec![me];
+    if let Some(f) = s.fellowships.of(killer) {
+        out.extend(
+            s.fellowships.list[f]
+                .fellows
+                .iter()
+                .filter(|x| x.id != killer)
+                .filter_map(|x| world_of(s, x.id)),
+        );
     }
     out
 }
@@ -807,7 +921,7 @@ pub fn corpse_appears<S: Store>(
     corpse.at = dead.at;
     corpse.instance = 0;
     corpse.visual = 10;
-    let loot = roll_loot(s, &dead, killer);
+    let loot = roll_loot(s, &dead, killer, clock);
     let (level, quality, rot, has_profile) = dead.creature.as_ref().map_or(
         (0, None, yalain_content::CorpseRot::default(), false),
         |c| {
@@ -822,12 +936,9 @@ pub fn corpse_appears<S: Store>(
     let mut contents = Vec::new();
     for (template, value) in loot {
         if let Some(item) = crate::inventory::make_item(s, template, 1, value.unwrap_or(0)) {
-            // A treasure item (one drawn from the profile) carries its own.
+            // A treasure item (one drawn from the profile, or a treasure potion) carries its own.
             if value.is_some() {
                 crate::treasure::endow(s, item, level, quality);
-            }
-            if let Some(t) = s.things.get_mut(item) {
-                t.container = Some((id, u32::try_from(contents.len()).unwrap_or(0)));
             }
             contents.push(item);
         }
@@ -853,7 +964,6 @@ pub fn corpse_appears<S: Store>(
     corpse.corpse = Some(Corpse {
         killer,
         originator: creature,
-        contents,
         expires: clock.local.0 + lasts,
         rot,
         creature: dead.template,
@@ -870,6 +980,15 @@ pub fn corpse_appears<S: Store>(
     let create = ServerMessage::CreateObject(corpse_create(&corpse));
     let at = corpse.at;
     s.things.insert(corpse);
+    // What it holds goes in, in the order it was drawn.
+    for item in contents {
+        let _ = crate::holding::move_item(
+            s,
+            item,
+            crate::holding::Place::Nowhere,
+            crate::holding::To::Contents(id),
+        );
+    }
     if let Some(at) = at {
         let viewers: Vec<_> = s
             .players
@@ -1002,8 +1121,12 @@ pub fn corpse_block(t: &Thing) -> Vec<ServerMessage> {
     )
 }
 
-/// A thing leaves the world: every client that knows it forgets it and sees it leave.
+/// A thing leaves the world: every client that knows it forgets it and sees it leave. A chest the
+/// world made is let go first: its opener is told it closed, and what it holds goes with it.
 pub fn vanish<S: Store>(s: &mut Server<S>, net: &mut ServerNet, id: u64) {
+    if s.chests.by_id.contains_key(&id) {
+        crate::usable::chests::release(s, net, id);
+    }
     let Some(t) = s.things.remove(id) else { return };
     let forget = ServerMessage::ForgetObject(ObjectOnly(ObjectStamp {
         id,
@@ -1050,9 +1173,11 @@ pub fn vanish<S: Store>(s: &mut Server<S>, net: &mut ServerNet, id: u64) {
             net.send_ephemeral(*conn, queue::EVENT, seen.position_stream, leave.clone());
         }
     }
+    // What it held goes with it (its list gone with it, each is its own still), and nothing it
+    // lists that is elsewhere now.
     if let Some(c) = t.corpse {
         for item in c.contents {
-            s.things.remove(item);
+            let _ = crate::holding::destroy_item(s, item, crate::holding::Place::Kept(id));
         }
     }
 }
@@ -1140,6 +1265,14 @@ pub const RETURNS_WITH: f32 = 0.75;
 /// it had asked (2017: one recording, 599.99 s after it was told it was dead, with no request; the
 /// longest wait of the 227 that asked was 251.3 s).
 pub const SENT_BACK_AFTER: f64 = 600.0;
+
+/// How long after it comes out of portal space at its lifestone a resurrected player may move
+/// again, in seconds. Its client holds it still for as long as it has been frozen more often than
+/// freed: its death froze it, and so did the trip, whose freeze the drawn scene lifts; the death's
+/// is lifted now (2017: 137 of 138 returns lifted a freeze twice or more; the first that did not
+/// answer a drawn scene came a median 2.94 s after the exit, 2.59 to 3.04 s for 80% of 133, first
+/// in its tick, ahead of any aura's pulse, in 132 of 133).
+pub const MOVES_AFTER_RETURN: f64 = 2.94;
 
 /// How long after its description a character that left the world dead comes back (2017: 1.43 s,
 /// 1 of 1).
@@ -1514,7 +1647,8 @@ pub fn sent_back<S: Store>(
 /// resurrections, played 0), the resurrection's effect and, into portal space, the arrival's (219 of
 /// 227, in that order 216); a second and a half later it is back at the
 /// lifestone it is bound to (or, never bound, the nearest lifestone the world has, else where it
-/// fell), with 5 vitae less and three quarters of its health and vigor.
+/// fell), with 5 vitae less and three quarters of its health and vigor, and free to move again a
+/// moment later ([`moves_again`]).
 pub fn resurrect<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId, clock: Clock) {
     let Some(p) = s.players.get(&world) else {
         return;
@@ -1534,6 +1668,14 @@ pub fn resurrect<S: Store>(s: &mut Server<S>, net: &mut ServerNet, world: ConnId
     crate::effects::protect(s, net, world, clock);
     resurrection_look(s, net, world, &stop);
     crate::places::resurrection_trip(s, net, world, to, clock);
+}
+
+/// Back at its lifestone a moment ago, a player may move again: the freeze its death put on is
+/// lifted, whatever has happened since, so that each freeze it was given is lifted once.
+pub fn moves_again<S: Store>(s: &Server<S>, net: &mut ServerNet, world: ConnId) {
+    if s.players.contains_key(&world) {
+        progress::private(net, world, &session::movement_frozen(false));
+    }
 }
 
 /// For everyone who sees it, a player coming back is set standing at peace and the appearances of

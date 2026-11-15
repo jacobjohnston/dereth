@@ -294,6 +294,30 @@ fn placed(key: &str, here: u16) -> (String, u16) {
     }
 }
 
+/// A placed object a row names (`key@XXYY`, or `pack:key@XXYY`; a bare `key` in a landblock's own
+/// file) must be one of the world's.
+fn check_placed(
+    field: &str,
+    name: &str,
+    l: &Located,
+    objects: &BTreeSet<(String, String, u16)>,
+    out: &mut dyn FnMut(String),
+) {
+    let (pack, key) = split_ref(name, &l.pack);
+    if !key.contains('@') && l.landblock.is_none() {
+        out(format!("{field}: a placed object is named key@XXYY"));
+        return;
+    }
+    let (key, lb) = placed(&key, l.landblock.unwrap_or(0));
+    if !objects.contains(&(pack, key.clone(), lb)) {
+        out(format!("{field}: no object {key}@{lb:04X}"));
+    }
+}
+
+/// A step or a give that keeps its effects' lines quiet with no effects to keep quiet.
+const QUIET_WITHOUT_EFFECTS: &str =
+    "effects_quiet: only a row with effects keeps their lines quiet";
+
 /// The checks after reading: keys unique in their scope, references that resolve, provenance.
 #[must_use]
 #[allow(clippy::too_many_lines)]
@@ -304,10 +328,14 @@ pub fn check_database(db: &Database) -> Vec<Problem> {
     let mut camps: BTreeSet<(String, String, u16)> = BTreeSet::new();
     let mut objects: BTreeSet<(String, String, u16)> = BTreeSet::new();
     let mut routes: BTreeMap<(String, String), usize> = BTreeMap::new();
+    // Shops are named by key alone, in any pack.
+    let mut shops: BTreeSet<String> = BTreeSet::new();
     // Each placed object's id: its templates, and whether a row of it leads somewhere.
     let mut ids: BTreeMap<u64, (BTreeSet<u32>, bool)> = BTreeMap::new();
     // Each camp, by its key and landblock in whichever pack: the templates it makes.
     let mut camp_makes: BTreeMap<(String, u16), BTreeSet<u32>> = BTreeMap::new();
+    // The templates a quest step is triggered by using, whose objects answer a use as a person's.
+    let mut step_used: BTreeSet<u32> = BTreeSet::new();
     for l in db.rows() {
         let lb = l.landblock.unwrap_or(0);
         match &l.row {
@@ -331,6 +359,14 @@ pub fn check_database(db: &Database) -> Vec<Problem> {
             }
             Row::Route(r) => {
                 routes.insert((l.pack.clone(), r.key.clone()), r.waypoints.len());
+            }
+            Row::Store(r) => {
+                shops.insert(r.key.clone());
+            }
+            Row::Step(r) => {
+                if let Trigger::Use(template) = r.trigger {
+                    step_used.insert(template);
+                }
             }
             _ => {}
         }
@@ -383,6 +419,24 @@ pub fn check_database(db: &Database) -> Vec<Problem> {
                         "hero, kingdom: a person is talked to; only a static object keeps a player out"
                             .into(),
                     ));
+                }
+                if r.kind == crate::rows::ObjectKind::Static && step_used.contains(&r.template) {
+                    let held: Vec<&str> = [
+                        ("hero", r.hero),
+                        ("kingdom", r.kingdom.is_some()),
+                        ("requires", r.requires.is_some()),
+                        ("min_level", r.min_level.is_some()),
+                    ]
+                    .into_iter()
+                    .filter_map(|(field, set)| set.then_some(field))
+                    .collect();
+                    if !held.is_empty() {
+                        problems.push(at(format!(
+                            "{}: a person is talked to, and a step's use of template {:#010X} makes this object one; only an object no step uses keeps a player out",
+                            held.join(", "),
+                            r.template
+                        )));
+                    }
                 }
                 if r.kingdom.is_some_and(|k| ![1, 2, 4].contains(&k)) {
                     problems.push(at(
@@ -447,6 +501,11 @@ pub fn check_database(db: &Database) -> Vec<Problem> {
                     None => {}
                 }
             }
+            Row::Keeper(r) => {
+                if let Some(shop) = r.shop.as_ref().filter(|s| !shops.contains(*s)) {
+                    problems.push(at(format!("shop: no [[store]] {shop}")));
+                }
+            }
             Row::Place(r) => {
                 if r.row.is_some() != r.holds.is_some() {
                     problems.push(at(
@@ -463,14 +522,32 @@ pub fn check_database(db: &Database) -> Vec<Problem> {
                     problems.push(at("needs: only a quest under way fails".into()));
                 }
                 if let Some(wants) = r.wants {
-                    if !matches!(r.trigger, Trigger::Give(..)) {
+                    if !matches!(r.trigger, Trigger::Give(..) | Trigger::GiveClass(..)) {
                         problems.push(at("wants: only a give's step wants a count".into()));
                     }
                     if wants == 0 {
                         problems.push(at("wants: a count of at least 1".into()));
                     }
                 }
-                if r.transforms.is_some() && !matches!(r.trigger, Trigger::Give(..)) {
+                if r.effects_quiet && r.effects.is_empty() {
+                    problems.push(at(QUIET_WITHOUT_EFFECTS.into()));
+                }
+                if !r.given_effects.is_empty() {
+                    let handed_back = match r.trigger {
+                        Trigger::Give(item, _) => !r.takes.contains(&item),
+                        Trigger::GiveClass(..) => true,
+                        _ => false,
+                    };
+                    if !handed_back {
+                        problems.push(at(
+                            "given_effects: only a give's step that hands its item back puts effects on it"
+                                .into(),
+                        ));
+                    }
+                }
+                if r.transforms.is_some()
+                    && !matches!(r.trigger, Trigger::Give(..) | Trigger::GiveClass(..))
+                {
                     problems.push(at(
                         "transforms: only a give's step transforms its player".into()
                     ));
@@ -478,12 +555,23 @@ pub fn check_database(db: &Database) -> Vec<Problem> {
                 if let Some(why) = r.to.as_deref().and_then(|to| place_ref(to, &l.pack)) {
                     problems.push(at(format!("to: {why}")));
                 }
+                if r.to_fellows && r.to.is_none() {
+                    problems.push(at(
+                        "to_fellows: only a step that takes its player somewhere takes the fellows"
+                            .into(),
+                    ));
+                }
                 if r.to.is_some()
                     && matches!(r.trigger, Trigger::Arrive(_) | Trigger::ArriveFrom(..))
                 {
                     problems.push(at(
                         "to: a step made on arrival takes the player nowhere further".into(),
                     ));
+                }
+                for camp in &r.fought {
+                    if let Some(why) = fought_camp(camp, &camp_makes) {
+                        problems.push(at(why));
+                    }
                 }
                 if let Trigger::KillIn(template, camp) = &r.trigger {
                     let (key, lb) = match camp.split_once('@') {
@@ -520,6 +608,11 @@ pub fn check_database(db: &Database) -> Vec<Problem> {
                 }
             }
             Row::Give(r) => {
+                for camp in &r.fought {
+                    if let Some(why) = fought_camp(camp, &camp_makes) {
+                        problems.push(at(why));
+                    }
+                }
                 if r.wants == Some(0) {
                     problems.push(at("wants: a count of at least 1".into()));
                 }
@@ -529,8 +622,56 @@ pub fn check_database(db: &Database) -> Vec<Problem> {
                 if r.counts.len() > r.gives.len() {
                     problems.push(at("counts: a count for each item given".into()));
                 }
+                if r.effects_quiet && r.effects.is_empty() {
+                    problems.push(at(QUIET_WITHOUT_EFFECTS.into()));
+                }
             }
             Row::Talk(r) => check_talk(r, l, &objects, &mut |m| problems.push(at(m))),
+            Row::Lever(r) => {
+                for (field, names) in [("levers", &r.levers), ("opens", &r.opens)] {
+                    for name in names {
+                        check_placed(field, name, l, &objects, &mut |m| problems.push(at(m)));
+                    }
+                }
+            }
+            Row::Sequence(r) => {
+                for name in r.objects.iter().flatten() {
+                    check_placed("uses", name, l, &objects, &mut |m| problems.push(at(m)));
+                }
+            }
+            Row::Offering(r) => {
+                let shows = r.takes.iter().filter_map(|(_, s)| s.as_ref());
+                let named = std::iter::once(("object", &r.object))
+                    .chain(shows.map(|s| ("takes", s)))
+                    .chain(r.opens.iter().map(|o| ("opens", o)));
+                for (field, name) in named {
+                    check_placed(field, name, l, &objects, &mut |m| problems.push(at(m)));
+                }
+            }
+            Row::Shifting(r) => {
+                for name in &r.objects {
+                    check_placed("objects", name, l, &objects, &mut |m| problems.push(at(m)));
+                }
+            }
+            Row::SafePassage(r) => {
+                if let Some(why) = r.camp.as_deref().and_then(|c| named_camp(c, &camp_makes)) {
+                    problems.push(at(format!("camp: {why}")));
+                }
+            }
+            Row::Guarded(r) => {
+                for name in &r.objects {
+                    check_placed("objects", name, l, &objects, &mut |m| problems.push(at(m)));
+                }
+                let (pack, key) = split_ref(&r.camp, &l.pack);
+                if key.contains('@') || l.landblock.is_some() {
+                    let (key, lb) = placed(&key, l.landblock.unwrap_or(0));
+                    if !camps.contains(&(pack, key.clone(), lb)) {
+                        problems.push(at(format!("camp: no camp {key}@{lb:04X}")));
+                    }
+                } else {
+                    problems.push(at("camp: a camp is named key@XXYY".into()));
+                }
+            }
             Row::DeathTreasure(r) => {
                 if let Some(camp) = &r.camp {
                     let (pack, key) = split_ref(camp, &l.pack);
@@ -564,7 +705,104 @@ pub fn check_database(db: &Database) -> Vec<Problem> {
     }
     problems.extend(crate::pools_check::check(db));
     problems.extend(check_events(db));
+    problems.extend(tallies(&db.rows().collect::<Vec<_>>()));
     problems
+}
+
+/// Every `[[tally]]` a step, a give or a line names is one of these rows', and a count it waits
+/// on is one the tally reaches; every `[[event]]` a tally starts or resets on is too; and an event
+/// with no windows of its own is one a tally starts.
+pub(crate) fn tallies(rows: &[&Located]) -> Vec<Problem> {
+    use yalain_content::tallies::Reset;
+    let tallies: BTreeMap<&str, &yalain_content::tallies::Tally> = rows
+        .iter()
+        .filter_map(|l| match &l.row {
+            Row::Tally(t) => Some((t.tally.key.as_str(), &t.tally)),
+            _ => None,
+        })
+        .collect();
+    let events: BTreeSet<&str> = rows
+        .iter()
+        .filter_map(|l| match &l.row {
+            Row::Event(e) => Some(e.key.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut out = Vec::new();
+    for l in rows {
+        let mut at = |m: String| out.push(Problem::new(&l.file, l.line, m));
+        let named: Vec<(&str, &str)> = match &l.row {
+            Row::Step(s) => s
+                .tallies
+                .iter()
+                .map(|g| ("requires", g.tally.as_str()))
+                .chain(s.adds.iter().map(|a| ("adds", a.tally.as_str())))
+                .collect(),
+            Row::Give(g) => g
+                .tallies
+                .iter()
+                .map(|g| ("requires", g.tally.as_str()))
+                .chain(g.adds.iter().map(|a| ("adds", a.tally.as_str())))
+                .collect(),
+            Row::Talk(r) => r
+                .requires
+                .iter()
+                .map(|g| ("requires", g.tally.as_str()))
+                .chain(r.fills.iter().map(|k| ("fills", k.as_str())))
+                .collect(),
+            Row::Tally(r) => {
+                let x = &r.tally;
+                let resets = match &x.resets {
+                    Reset::Ends(e) => Some(("resets", e.as_str())),
+                    _ => None,
+                };
+                for (field, e) in x
+                    .starts
+                    .iter()
+                    .map(|st| ("starts", st.event.as_str()))
+                    .chain(resets)
+                {
+                    if !events.contains(e) {
+                        at(format!("{field}: no [[event]] {e}"));
+                    }
+                }
+                Vec::new()
+            }
+            Row::Event(e) if e.when.is_empty() => {
+                let started = tallies
+                    .values()
+                    .any(|x| x.starts.as_ref().is_some_and(|st| st.event == e.key));
+                if !started {
+                    at("when: an event with no windows is on only while a tally starts it, and no [[tally]] does".into());
+                }
+                Vec::new()
+            }
+            _ => Vec::new(),
+        };
+        for (field, key) in named {
+            if !tallies.contains_key(key) {
+                at(format!("{field}: no [[tally]] {key}"));
+            }
+        }
+        let gates: &[yalain_content::tallies::Gate] = match &l.row {
+            Row::Step(s) => &s.tallies,
+            Row::Give(g) => &g.tallies,
+            Row::Talk(r) => &r.requires,
+            _ => &[],
+        };
+        for g in gates {
+            let full = tallies.get(g.tally.as_str()).map(|x| x.full);
+            if let (yalain_content::tallies::Holds::AtLeast(n), Some(full)) = (g.holds, full) {
+                if n > full {
+                    at(format!(
+                        "requires: {} never reaches {n}: it is full at {full}",
+                        g.tally
+                    ));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Every camp, object and step that names an `[[event]]` names one the database has.
@@ -652,6 +890,7 @@ fn scope_key(l: &Located) -> Option<String> {
         Row::Place(r) => format!("place {}", r.key),
         Row::Talk(r) => format!("talk {}", r.key),
         Row::Route(r) => format!("route {}", r.key),
+        Row::Store(r) => format!("store {}", r.key),
         _ => return None,
     })
 }
@@ -685,5 +924,30 @@ fn check_prov(p: &Prov, out: &mut dyn FnMut(String)) {
     }
     for (k, f) in &p.fields {
         check_prov(f, &mut |m| out(format!("{k}: {m}")));
+    }
+}
+
+/// What is wrong with a camp a step's or a give's `requires` waits on its player having fought
+/// (`key`, `key@XXYY` or `pack:key@XXYY`), if anything: no camp of the world, or several.
+fn fought_camp(camp: &str, camps: &BTreeMap<(String, u16), BTreeSet<u32>>) -> Option<String> {
+    named_camp(camp, camps).map(|why| format!("requires: {why}"))
+}
+
+/// What is wrong with a camp a row names (`key`, `key@XXYY` or `pack:key@XXYY`), if anything: no
+/// camp of the world, or several.
+fn named_camp(camp: &str, camps: &BTreeMap<(String, u16), BTreeSet<u32>>) -> Option<String> {
+    let named = camp.split_once(':').map_or(camp, |(_, k)| k);
+    let (key, lb) = match named.split_once('@') {
+        Some((k, b)) => (k, u16::from_str_radix(b, 16).ok()),
+        None => (named, None),
+    };
+    match camps
+        .keys()
+        .filter(|(k, b)| k == key && lb.is_none_or(|lb| lb == *b))
+        .count()
+    {
+        0 => Some(format!("no camp {camp}")),
+        1 => None,
+        _ => Some(format!("several camps are {camp}: name one as {camp}@XXYY")),
     }
 }

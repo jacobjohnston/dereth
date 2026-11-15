@@ -347,6 +347,10 @@ pub struct Settings {
     /// `auberean.sets`): whether each is open. A section not named is as it is at first.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub library_open: BTreeMap<String, bool>,
+    /// The interface the Dereth client starts every world in until the player changes it there in
+    /// game, by its name ([`crate::interface::default_of`]). `None` until the player chooses one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
 }
 
 /// The most Library sections whose folding is kept.
@@ -434,6 +438,7 @@ impl Default for Settings {
             update_components: true,
             library_open: BTreeMap::new(),
             realm: Realm::Dereth,
+            interface: None,
         }
     }
 }
@@ -463,7 +468,7 @@ pub struct AubereanSettings {
     #[serde(default, skip_serializing_if = "is_auberean")]
     pub client: crate::auberean::Client,
     /// The private copies of the retail client's install, by the world each is for: made when the
-    /// player asks, for a world that writes into the install
+    /// player first plays it with the retail client, for a world that writes into the install
     /// ([`crate::world::World::writes_retail_install`]), which is then played from its copy.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub retail_copies: BTreeMap<String, PathBuf>,
@@ -515,6 +520,63 @@ pub struct LauncherState {
     /// Never read or written with the file.
     #[serde(skip)]
     pub hide_built_in_worlds: bool,
+    /// The sets the player removed from either game's Library, by what their files were, so one
+    /// added again takes its place in every choice saved with it ([`LauncherState::reclaim`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forgotten_sets: Vec<ForgottenSet>,
+}
+
+/// A set removed from the Library: its id, and what its files were.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForgottenSet {
+    pub id: String,
+    pub kind: SetKind,
+    pub files: Vec<FileMark>,
+}
+
+/// What one file of a set is, as far as telling a set's files again goes: its role, size and the
+/// iteration it reports.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct FileMark {
+    pub role: crate::datset::DatRole,
+    pub size: u64,
+    pub iterations: Option<u32>,
+}
+
+impl ForgottenSet {
+    /// How many removed sets are remembered: the latest.
+    pub const KEPT: usize = 32;
+
+    #[must_use]
+    pub fn of(set: &DatSet) -> ForgottenSet {
+        ForgottenSet {
+            id: set.id.clone(),
+            kind: set.kind,
+            files: marks(set),
+        }
+    }
+}
+
+/// A set's files as [`FileMark`]s, in order: empty when any of them did not read.
+fn marks(set: &DatSet) -> Vec<FileMark> {
+    if set
+        .files
+        .iter()
+        .any(|f| f.error.is_some() || f.iterations.is_none())
+    {
+        return Vec::new();
+    }
+    let mut m: Vec<FileMark> = set
+        .files
+        .iter()
+        .map(|f| FileMark {
+            role: f.role,
+            size: f.size,
+            iterations: f.iterations,
+        })
+        .collect();
+    m.sort();
+    m
 }
 
 impl Default for LauncherState {
@@ -532,6 +594,7 @@ impl Default for LauncherState {
             settings: Settings::default(),
             auberean: AubereanSettings::default(),
             hide_built_in_worlds: false,
+            forgotten_sets: Vec::new(),
         }
     }
 }
@@ -654,6 +717,7 @@ impl LauncherState {
         take(parts, "world_prefs", &mut s.world_prefs, &mut reset);
         take(parts, "settings", &mut s.settings, &mut reset);
         take(parts, "auberean", &mut s.auberean, &mut reset);
+        take(parts, "forgotten_sets", &mut s.forgotten_sets, &mut reset);
         (s, reset)
     }
 
@@ -1223,6 +1287,75 @@ impl LauncherState {
         true
     }
 
+    /// Remove set `id` from either game's Library, remembering what its files were
+    /// ([`Self::reclaim`]). Answers the set removed.
+    pub fn remove_set(&mut self, id: &str) -> Option<DatSet> {
+        let set = [Game::Dereth, Game::Auberean]
+            .into_iter()
+            .find_map(|game| {
+                let sets = self.sets_mut(game);
+                let at = sets.iter().position(|s| s.id == id)?;
+                Some(sets.remove(at))
+            })?;
+        let forgotten = ForgottenSet::of(&set);
+        if !forgotten.files.is_empty() {
+            self.forgotten_sets.retain(|f| f.id != forgotten.id);
+            self.forgotten_sets.push(forgotten);
+            let over = self.forgotten_sets.len().saturating_sub(ForgottenSet::KEPT);
+            self.forgotten_sets.drain(..over);
+        }
+        Some(set)
+    }
+
+    /// The set `id` was just added: when it holds the files of a set removed before, every choice
+    /// saved with the removed one (Play Again, a favourite, a world's last choice) names it from
+    /// now on. Answers whether it did.
+    pub fn reclaim(&mut self, id: &str) -> bool {
+        let Some(set) = self
+            .dat_set(id)
+            .or_else(|| self.auberean.dat_sets.iter().find(|s| s.id == id))
+        else {
+            return false;
+        };
+        let mine = ForgottenSet::of(set);
+        if mine.files.is_empty() {
+            return false;
+        }
+        let Some(at) = self
+            .forgotten_sets
+            .iter()
+            .rposition(|f| f.kind == mine.kind && f.files == mine.files)
+        else {
+            return false;
+        };
+        let old = self.forgotten_sets.remove(at).id;
+        if old != id {
+            self.retarget(&old, id);
+        }
+        true
+    }
+
+    /// Every saved choice that names set `from` names set `to` instead.
+    fn retarget(&mut self, from: &str, to: &str) {
+        let swap = |slot: &mut Option<String>| {
+            if slot.as_deref() == Some(from) {
+                *slot = Some(to.to_owned());
+            }
+        };
+        for r in &mut self.recent {
+            swap(&mut r.dat_set_id);
+            swap(&mut r.classic_set_id);
+        }
+        for f in &mut self.favourites {
+            swap(&mut f.dat_set_id);
+            swap(&mut f.classic_set_id);
+        }
+        for p in self.world_prefs.values_mut() {
+            swap(&mut p.dat_set_id);
+            swap(&mut p.classic_set_id);
+        }
+    }
+
     /// A fresh id, unique within this state. Not a UUID: the launcher has no randomness to spend on
     /// it and needs uniqueness only within one file.
     pub fn new_id(&self, prefix: &str) -> String {
@@ -1231,6 +1364,7 @@ impl LauncherState {
                 || self.dat_sets.iter().any(|s| s.id == id)
                 || self.auberean.dat_sets.iter().any(|s| s.id == id)
                 || self.favourites.iter().any(|f| f.id == id)
+                || self.forgotten_sets.iter().any(|f| f.id == id)
         };
         (1u32..)
             .map(|n| format!("{prefix}{n}"))

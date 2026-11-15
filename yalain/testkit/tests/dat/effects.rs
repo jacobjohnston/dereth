@@ -3,7 +3,7 @@
 
 use yalain_testkit::authored::Portal;
 use yalain_world::craft::Action;
-use yalain_world::effect_defs::Kind;
+use yalain_world::effect_defs::{Kind, Scale};
 
 /// The effects of the heals, a buff, a quest's blessing and the Arwic mines' recipe read as the
 /// data defines them: Ease Suffering heals 25 health at a rating of 1 and 250 at 50, Inner Calm
@@ -55,6 +55,21 @@ fn the_effects_read_as_the_data_defines_them() {
             update: 0x2000_0004
         })
     );
+}
+
+/// The mark the turrets' guards put on reads as the data defines it: a record of four hours, gone at
+/// logout and at a teleport; Aunmauri's Courage ends at neither.
+/// Behaviour: server.effects.ends-at-teleport
+#[test]
+fn the_mark_lasts_four_hours_and_ends_at_logout_and_at_a_teleport() {
+    let p = Portal::open();
+    let t = p.effects(&[0x6F00_1F31, 0x6F00_1DF7]);
+    let mark = t.get(0x6F00_1F31).expect("the mark");
+    assert!(mark.lasts());
+    assert_eq!(mark.duration.at(1.0), Some(14_400.0));
+    assert!(mark.ends_at_logout && mark.ends_at_teleport);
+    let courage = t.get(0x6F00_1DF7).expect("Courage");
+    assert!(!courage.ends_at_logout && !courage.ends_at_teleport);
 }
 
 /// The Arwic mines' sword recipe reads as the data defines it: twenty iron in its one slot, two
@@ -329,27 +344,37 @@ fn a_creatures_body_is_its_looks_setups() {
     );
 }
 
-/// A taunt reads at the low end of the range its data gives: Growl a twentieth of a creature's
-/// health, Ruse's and Taunt Force's a hundredth, Challenge's 0.15, Cragstone's Rebuke a quarter;
-/// a detaunt the same below nothing, Blinding Arrow's and Challenge's own.
-/// Behaviour: server.creatures.a-taunt-counts-at-the-draw
+/// A taunt reads its share of a creature's whole health along the range its data gives, from its
+/// lowest spellcraft to its highest: Growl 5% at 1 to 10% at 50, Soft Underbelly 5% to 20%, Ruse
+/// 1% to 5%, Taunt Force's Challenge 1% at 1 to 5% at 10, the Juggernaut's Challenge 15% to 20%,
+/// Cragstone's Rebuke 25% at 1 to all of it at 150; a detaunt the same below nothing, Blinding
+/// Arrow's 10% to 15% and the Juggernaut's Challenge's own 5% to 10%.
+/// Behaviour: server.creatures.a-taunts-share-follows-its-rating
 #[test]
-fn a_taunt_reads_at_the_low_end_of_its_share_of_a_creatures_health() {
+fn a_taunt_reads_its_share_of_a_creatures_health_from_its_lowest_spellcraft_to_its_highest() {
     let p = Portal::open();
     let wanted = [
-        (0x7000_090D, 0.05),
-        (0x7000_1FE3, 0.05),
-        (0x7000_07C9, 0.01),
-        (0x7000_1EDB, 0.01),
-        (0x7000_0872, 0.15),
-        (0x7000_1F3E, 0.25),
-        (0x7000_1F55, -0.10),
-        (0x7000_1F7A, -0.05),
+        (0x7000_090D, [(1.0, 0.05), (50.0, 0.10)]),
+        (0x7000_1FE3, [(1.0, 0.05), (50.0, 0.20)]),
+        (0x7000_07C9, [(1.0, 0.01), (50.0, 0.05)]),
+        (0x7000_1EDB, [(1.0, 0.01), (10.0, 0.05)]),
+        (0x7000_0872, [(1.0, 0.15), (50.0, 0.20)]),
+        (0x7000_1F3E, [(1.0, 0.25), (150.0, 1.0)]),
+        (0x7000_1F55, [(1.0, -0.10), (50.0, -0.15)]),
+        (0x7000_1F7A, [(1.0, -0.05), (50.0, -0.10)]),
     ];
     let t = p.effects(&wanted.map(|w| w.0));
-    for (state, share) in wanted {
+    for (state, line) in wanted {
         match t.get(state).map(|d| &d.kind) {
-            Some(Kind::Taunt(s)) => assert!((s - share).abs() < 1e-6, "{state:08X}: {s}"),
+            Some(Kind::Taunt(Scale(read))) => {
+                assert_eq!(read.len(), 2, "{state:08X}: {read:?}");
+                for ((x, y), (wx, wy)) in read.iter().zip(line) {
+                    assert!(
+                        (x - wx).abs() < 1e-6 && (y - wy).abs() < 1e-6,
+                        "{state:08X}: {read:?}"
+                    );
+                }
+            }
             other => panic!("{state:08X}: {other:?}"),
         }
     }
@@ -664,6 +689,64 @@ fn the_effects_of_items_uses_read_from_their_names() {
     );
 }
 
+/// A chain of other effects reads as the data defines it: the chain of the Atlan weapon recipes holds
+/// sixteen grants, in its order, each read with it as the recipe it teaches.
+/// Behaviour: server.effects.a-chain-reads-as-its-data-says
+#[test]
+fn a_chain_of_effects_reads_its_effects_in_order_and_they_read_with_it() {
+    let p = Portal::open();
+    let t = p.effects(&[0x6F00_1CAC]);
+    let Kind::Instants(list) = &t.get(0x6F00_1CAC).expect("the chain").kind else {
+        panic!("a chain of other effects")
+    };
+    let grants: Vec<u32> = (0..16).map(|i| 0x6F00_1CAD + 2 * i).collect();
+    assert_eq!(*list, grants);
+    let recipes: Vec<u32> = grants
+        .iter()
+        .map(|g| match t.get(*g).map(|d| &d.kind) {
+            Some(Kind::GrantRecipe(r)) => *r,
+            other => panic!("{g:08X}: {other:?}"),
+        })
+        .collect();
+    assert_eq!(recipes[0], 0x6F00_1CAE, "the first weapon's recipe");
+    assert_eq!(recipes.len(), 16);
+}
+
+/// The chains a start keeps, read from the data: the Atlan weapon recipe's outcome puts on the chain
+/// that takes the weapons' recipes away and the one teaching the imbues, and both stay chains; the
+/// finishing chain a skill's combination adds (Unravel Magic's) reads as nothing.
+/// Behaviour: server.effects.a-chain-reads-as-its-data-says
+#[test]
+fn a_recipes_outcome_chains_are_kept_and_a_combinations_finisher_is_not() {
+    use yalain_world::effect_defs::chain_roots;
+    let p = Portal::open();
+    let craft = p.crafting(&[], &[0x6F00_1CAE]);
+    let crafted = craft.outcome_effects();
+    for chain in [0x6F00_1CCE, 0x6F00_1CDF] {
+        assert!(
+            crafted.contains(&chain),
+            "{chain:08X} among the outcome's effects"
+        );
+    }
+    let mut t = p.effects(&[0x6F00_1CCE, 0x6F00_1CDF, 0x6F00_10D8]);
+    t.keep_chains_of(chain_roots(
+        &yalain_world::item_use::ItemUses::new(),
+        &yalain_content::item_rows::ItemRows::default(),
+        &yalain_content::quests::QuestTable::default(),
+        &craft,
+    ));
+    for chain in [0x6F00_1CCE, 0x6F00_1CDF] {
+        assert!(
+            matches!(t.get(chain).map(|d| &d.kind), Some(Kind::Instants(_))),
+            "{chain:08X} kept"
+        );
+    }
+    assert!(matches!(
+        t.get(0x6F00_10D8).map(|d| &d.kind),
+        Some(Kind::Other)
+    ));
+}
+
 /// The effects that give a player its regeneration rates read as the data defines them: Robustify
 /// at a rating of 50 adds 0.08 to the combat health rate and doubles the peace health rate; a
 /// crafted item's bonus adds 0.08 to the combat health rate; a life-regeneration jewel adds 0.07 to it and
@@ -811,17 +894,27 @@ fn skills_effect_states(p: &Portal) -> Vec<u32> {
 
 /// As a start reads the skills' effects, an immunity is what its world's rules say: with no rule
 /// the short effects read as no immunity and the long ones as no ward (their data names neither
-/// the long one nor its classes); a world whose rules name none has the server's own twelve (three of them the
-/// install's skills put on), each leaving its long one, which keeps its classes off for certain;
-/// and a world's rows are its immunities alone.
+/// the long one nor its classes); with the test world's twelve (three of them the install's skills
+/// put on), each leaves its long one, which keeps its classes off for certain; and a world's rows
+/// are its immunities alone.
 /// Behaviour: server.effects.immunities-as-rows-say
 #[test]
-fn an_immunity_reads_as_its_worlds_rules_say_and_without_rows_as_the_servers_own() {
-    use yalain_world::effect_defs::{immunities_or_2017, EffectRules};
+fn an_immunity_reads_as_its_worlds_rules_say_and_without_rows_as_none() {
+    use yalain_world::effect_defs::{EffectRules, Ward};
     let p = Portal::open();
     let mut states = skills_effect_states(&p);
     let mut own = EffectRules::default();
-    assert!(immunities_or_2017(&mut own), "named none");
+    for (short, long, classes) in yalain_testkit::TEST_IMMUNITIES {
+        own.immunities.insert(short, long);
+        own.wards.insert(
+            long,
+            Ward {
+                classes: classes.to_vec(),
+                effects: Vec::new(),
+                chance: 1.0,
+            },
+        );
+    }
     assert_eq!(own.immunities.len(), 12);
     let by_skills = p.effects_ruled(&states, &own);
     let skills_put_on: Vec<u32> = own
@@ -872,8 +965,7 @@ fn an_immunity_reads_as_its_worlds_rules_say_and_without_rows_as_the_servers_own
         "[[effect_rule]]\neffect = 0x70000720\nthen = 0x7000071D\nprov = { from = \"authored\" }\n"
             .into(),
     );
-    let mut rows = p.compile(&files).effect_rules;
-    assert!(!immunities_or_2017(&mut rows), "its rows alone");
+    let rows = p.compile(&files).effect_rules;
     let ruled = p.effects_ruled(&states, &rows);
     let immunities: Vec<(u32, &Kind)> = ruled
         .effects
@@ -1144,6 +1236,7 @@ fn immolation_and_bladeskin_put_their_effects_on_their_user() {
         u.vigor_add = 0.0;
         u.vigor_mult = 0.0;
         u.min_vigor = 0.0;
+        u.focus_add = (0.0, 0.0);
     }
 
     let mut h = Harness::new();
@@ -1235,7 +1328,10 @@ fn the_effects_that_answer_what_comes_at_them_read_as_the_data_defines_them() {
             Kind::VitalOverTime { .. }
         ));
     }
-    assert_eq!(t.get(0x7000_1EDB).expect("read").kind, Kind::Taunt(0.01));
+    assert_eq!(
+        t.get(0x7000_1EDB).expect("read").kind,
+        Kind::Taunt(Scale(vec![(1.0, 0.01), (10.0, 0.05)]))
+    );
 }
 
 /// A recipe that binds its product names it by the product's ordinal over the whole spinner range
@@ -1422,7 +1518,8 @@ fn every_refining_recipe_reads_with_its_product() {
                 c.recipes.get(r).map(|d| d.custom),
                 Some(Custom::Refine {
                     product,
-                    full_at: 150
+                    full_at: 150,
+                    start: 34,
                 }),
                 "{r:08X}"
             );
@@ -1866,6 +1963,21 @@ fn a_template_with_no_properties_has_what_its_class_says() {
     );
 }
 
+/// A chest whose template names nothing has the generator profile its class sets for its contents:
+/// the Frozen Ravine's tyrant chest and Eeruk's three treasury chests their own hoards, a tier chest
+/// its tier's.
+/// Behaviour: server.items.class-properties
+#[test]
+fn a_chest_with_no_properties_has_the_contents_its_class_says() {
+    let p = Portal::open();
+    let profile = |t: u32| p.template(t).props.word("GeneratorProfile");
+    assert_eq!(profile(0x4700_129F), Some(0x360), "the tyrant's chest");
+    assert_eq!(profile(0x4700_1463), Some(0x362), "Eeruk's, human");
+    assert_eq!(profile(0x4700_1464), Some(0x363), "Eeruk's, Lugian");
+    assert_eq!(profile(0x4700_1465), Some(0x364), "Eeruk's, Tumerok");
+    assert_eq!(profile(0x4700_0EDF), Some(858), "the first tier's");
+}
+
 /// A class's own value stands, though it be nothing and its base sets one; a class that sets none
 /// takes its base's.
 /// Behaviour: server.items.class-properties
@@ -1907,6 +2019,18 @@ fn a_glyph_and_treasure_are_named_though_only_their_qualities_say() {
         p.template(0x4700_10A2).facts.name.map(|n| n.0),
         Some(0xA860_7CEC)
     );
+}
+
+/// The install's items and portals for heroes alone read as such: a trophy, a sword, a suit of
+/// armor and a blue portal; an ordinary item does not.
+/// Behaviour: server.items.hero-only
+#[test]
+fn the_installs_items_and_portals_for_heroes_alone_read_as_for_heroes() {
+    let p = Portal::open();
+    for t in [0x4700_14CC, 0x4700_13F7, 0x4700_12F8, 0x4700_1B5B] {
+        assert!(p.template(t).props.flag("Usage_HeroOnly"), "{t:#x}");
+    }
+    assert!(!p.template(0x4700_0845).props.flag("Usage_HeroOnly"));
 }
 
 /// A template whose least level is only its class's isn't one that sets it, as one whose entity says.
@@ -2150,16 +2274,21 @@ fn the_installs_armor_effects_count_on_a_player_as_recorded() {
 }
 
 /// The practice dummies that send back a share of each attack are the install's templates on a
-/// practice dummy's NPC table: nine, of levels 30 to 70, and not the level-30 one on the plain
-/// drudges' table.
+/// practice dummy's NPC table (every level's begins with its name): nine, of levels 30 to 70, and
+/// not the level-30 one on the plain drudges' table. The world's row for them names these.
 /// Behaviour: server.creatures.practice-dummies-from-the-install
 #[test]
 fn the_practice_dummies_are_the_nine_on_their_npc_table() {
     let p = Portal::open();
+    let dummy = |props: &yalain_content::Props| {
+        props
+            .text("AI_NPCTable")
+            .is_some_and(|t| t.starts_with("NPCTable_WingChunDummy"))
+    };
     let mut dummies: Vec<u32> = p
         .every_template_props()
         .iter()
-        .filter(|(_, props)| yalain_world::spawn::is_practice_dummy(props))
+        .filter(|(_, props)| dummy(props))
         .map(|(id, _)| *id)
         .collect();
     dummies.sort_unstable();
@@ -2178,12 +2307,54 @@ fn the_practice_dummies_are_the_nine_on_their_npc_table() {
         ]
     );
     // As the catalog describes them too.
-    assert!(yalain_world::spawn::is_practice_dummy(
-        &p.template(0x4700_2DAF).props
-    ));
-    assert!(!yalain_world::spawn::is_practice_dummy(
-        &p.template(0x4700_2DB0).props
-    ));
+    assert!(dummy(&p.template(0x4700_2DAF).props));
+    assert!(!dummy(&p.template(0x4700_2DB0).props));
+}
+
+/// The portal beacons' immunity and the imbuers' spell read as the data defines them: the immunity
+/// takes every attack's harm and every effect's, whole, and sends none back; the spell put on a
+/// weapon lasts 1,800 s and applies the dispel, which the world's rule names the immunity for; a
+/// practice dummy's effect watches attacks alone.
+/// Behaviour: server.effects.beacon-immunity-and-sledgehammer-read
+#[test]
+fn the_beacons_immunity_and_the_imbuers_spell_read_as_the_data_defines_them() {
+    use yalain_world::effect_defs::{EffectRules, Kind};
+    const SPELL: u32 = 0x6F00_1E04;
+    const DISPEL: u32 = 0x6F00_1E05;
+    const IMMUNITY: u32 = 0x6F00_1E06;
+    const DUMMY: u32 = 0x7000_1C79;
+    let p = Portal::open();
+    let rules = EffectRules {
+        dispels: std::collections::BTreeMap::from([(DISPEL, vec![IMMUNITY])]),
+        ..EffectRules::default()
+    };
+    let t = p.effects_ruled(&[SPELL, IMMUNITY, DUMMY], &rules);
+    let spell = t.get(SPELL).expect("the spell");
+    assert_eq!(spell.kind, Kind::Applies(DISPEL));
+    assert_eq!(spell.duration.at(1.0), Some(1800.0));
+    assert!((t.chance(SPELL, 1.0) - 1.0).abs() < f32::EPSILON);
+    assert_eq!(
+        t.get(DISPEL).map(|d| &d.kind),
+        Some(&Kind::Dispel(vec![IMMUNITY])),
+        "read as what the spell applies"
+    );
+    assert!(t.get(DISPEL).is_some_and(|d| !d.lasts()));
+    let Some(Kind::Watcher(w)) = t.get(IMMUNITY).map(|d| &d.kind) else {
+        panic!("the immunity is a watcher");
+    };
+    assert!(w.watches && w.effects && w.shares);
+    assert_eq!(
+        (w.absorbs.chance, w.absorbs.amount.at(1.0)),
+        (1.0, Some(1.0))
+    );
+    assert_eq!(w.sends_back.amount.at(1.0), None);
+    let Some(Kind::Watcher(w)) = t.get(DUMMY).map(|d| &d.kind) else {
+        panic!("the dummy's is a watcher");
+    };
+    assert!(w.watches && !w.effects);
+    // With no rule the dispel does nothing.
+    let bare = p.effects(&[SPELL]);
+    assert_eq!(bare.get(DISPEL).map(|d| &d.kind), Some(&Kind::Other));
 }
 
 /// The effects that raise or lower what kills pay read as the data defines them, each change by its
@@ -2979,4 +3150,617 @@ fn the_crystalabra_gives_its_user_and_fellows_two_points_of_vitae() {
         "{}",
         vitae(&h, fellow)
     );
+}
+
+mod world_recipes {
+    //! The recipes a world defines, made from the September 2013 data's own: what they take, make
+    //! and use up, their records, and making them.
+
+    use auberean_protocol::{queue, ServerMessage};
+    use auberean_script::args::Arg;
+    use auberean_script::graph::Graph;
+    use auberean_script::library::Elem;
+    use auberean_script::native_object::{Item, NativeObject};
+    use yalain_content::crafts::{Recipe, RecipeIngredient};
+    use yalain_testkit::authored::Portal;
+    use yalain_testkit::play::server_call;
+    use yalain_testkit::Harness;
+    use yalain_world::calls::{self, Value};
+    use yalain_world::craft::{error, function, Action, Crafting};
+
+    /// An install quest recipe of three slots, one item each: the seal fragments fused.
+    const FUSE: u32 = 0x6F00_02BE;
+    /// Its craft skill (the quest recipes) and its category.
+    const QUEST_RECIPES: u32 = 0x6F00_06A0;
+    const FUSE_CATEGORY: u32 = 690;
+    /// Templates the rows take and make, none of them any install recipe's.
+    const GEAR: u32 = 0x4700_1600;
+    const PUMP: u32 = 0x4700_1609;
+    const COG: u32 = 0x4700_1608;
+    const JOINT: u32 = 0x4700_161B;
+    const ROD: u32 = 0x4700_161A;
+    const UNIT: u32 = 0x4700_1605;
+    const SYSTEM: u32 = 0x4700_1601;
+    const DEVICE: u32 = 0x4700_1606;
+    /// String references a row names: a template's name, and another for its slot.
+    const NAME: (u32, u32) = (0x00DD_730E, 0x2500_2007);
+    const SLOT_NAME: (u32, u32) = (0x2FF0_3B27, 0x2500_2007);
+
+    /// The rows' ids, which no record of the install holds.
+    const THREE: u32 = 0x6F7E_0001;
+    const TWO: u32 = 0x6F7E_0002;
+    const FOUR: u32 = 0x6F7E_0003;
+    const NO_LIKE: u32 = 0x6F7E_0004;
+
+    fn slot(items: &[u32], count: u32) -> RecipeIngredient {
+        RecipeIngredient {
+            items: items.to_vec(),
+            count,
+            name: None,
+        }
+    }
+
+    fn row(recipe: u32, ingredients: Vec<RecipeIngredient>, product: u32) -> Recipe {
+        Recipe {
+            recipe,
+            like: FUSE,
+            name: NAME,
+            description: None,
+            ingredients,
+            product,
+            count: 1,
+            skill: None,
+            category: None,
+        }
+    }
+
+    /// The test world's crafting with these rows, made as a start makes them: the rows not made.
+    fn with_rows(p: &Portal, rows: Vec<Recipe>) -> (Crafting, Vec<(u32, String)>) {
+        let mut c = p.crafting(&[], &[FUSE]);
+        let mut crafts = yalain_testkit::test_crafts();
+        crafts.recipes = rows.into_iter().map(|r| (r.recipe, r)).collect();
+        c.take_world_crafts(&crafts);
+        let refused = p.world_recipes(&mut c);
+        (c, refused)
+    }
+
+    /// What a recipe's outcomes do, each outcome's actions in order: made (template, count), used
+    /// up (slot, count), or anything else by its kind.
+    fn outcomes(c: &Crafting, recipe: u32) -> Vec<Vec<String>> {
+        c.recipes[&recipe]
+            .checks
+            .iter()
+            .flat_map(|ch| &ch.outcomes)
+            .map(|o| {
+                o.actions
+                    .iter()
+                    .map(|a| match a {
+                        Action::Produce {
+                            template, quantity, ..
+                        } => format!("make {template:08X} x{quantity}"),
+                        Action::Destroy {
+                            ordinal, quantity, ..
+                        } => format!("use {ordinal} x{quantity}"),
+                        Action::Other => "other".into(),
+                        other => format!("{other:?}"),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// A row's recipe is the install recipe it names with its own slots and product: the fragments'
+    /// fusing made over takes the row's three parts, two systems or four slots (one of two
+    /// templates, one of three items), one slot each as the row lists them, makes the row's product
+    /// and uses up each slot, its craft skill the install recipe's, its category the row's where it
+    /// names one; the install recipe's quest effect and line are gone. Its record reads back to the
+    /// same recipe and carries the row's name and the slot's. A row whose id the install holds, or
+    /// whose recipe to make it from does not exist, is not made.
+    /// Behaviour: server.craft.world-recipes-made
+    #[test]
+    fn a_world_recipe_is_the_install_recipe_it_names_with_its_rows_slots_and_product() {
+        use yalain_world::start::Nav;
+        let p = Portal::open();
+        let mut two = row(TWO, vec![slot(&[SYSTEM], 1), slot(&[UNIT], 1)], DEVICE);
+        two.category = Some(605);
+        let mut four = row(
+            FOUR,
+            vec![
+                slot(&[GEAR, PUMP], 1),
+                slot(&[COG], 3),
+                slot(&[JOINT], 1),
+                slot(&[ROD], 1),
+            ],
+            SYSTEM,
+        );
+        four.ingredients[0].name = Some(SLOT_NAME);
+        four.count = 2;
+        let mut no_like = row(NO_LIKE, vec![slot(&[GEAR], 1)], SYSTEM);
+        no_like.like = 0x6F7E_FFFF;
+        let held = row(FUSE + 1, vec![slot(&[GEAR], 1)], SYSTEM);
+        let (c, refused) = with_rows(
+            &p,
+            vec![
+                row(
+                    THREE,
+                    vec![slot(&[GEAR], 1), slot(&[PUMP], 1), slot(&[COG], 1)],
+                    SYSTEM,
+                ),
+                two,
+                four,
+                no_like,
+                held,
+            ],
+        );
+        let refused: Vec<u32> = refused.into_iter().map(|(id, _)| id).collect();
+        assert_eq!(refused, [FUSE + 1, NO_LIKE]);
+        assert!(!c.recipes.contains_key(&NO_LIKE));
+        let fuse = &c.recipes[&FUSE];
+        for (id, slots, category) in [
+            (
+                THREE,
+                vec![(vec![GEAR], 1), (vec![PUMP], 1), (vec![COG], 1)],
+                FUSE_CATEGORY,
+            ),
+            (TWO, vec![(vec![SYSTEM], 1), (vec![UNIT], 1)], 605),
+            (
+                FOUR,
+                vec![
+                    (vec![GEAR, PUMP], 1),
+                    (vec![COG], 3),
+                    (vec![JOINT], 1),
+                    (vec![ROD], 1),
+                ],
+                FUSE_CATEGORY,
+            ),
+        ] {
+            let r = &c.recipes[&id];
+            assert_eq!(r.skill, QUEST_RECIPES);
+            assert_eq!(r.category, category, "{id:08X}");
+            assert_eq!(
+                (r.animation, r.cycles, r.difficulty, r.cost),
+                (fuse.animation, fuse.cycles, fuse.difficulty, fuse.cost)
+            );
+            let got: Vec<(u32, Vec<u32>, u32)> = r
+                .ingredients
+                .iter()
+                .map(|i| {
+                    let mut items = i.items.clone();
+                    items.sort_unstable();
+                    (i.ordinal, items, i.quantity)
+                })
+                .collect();
+            let want: Vec<(u32, Vec<u32>, u32)> = (1..)
+                .zip(&slots)
+                .map(|(o, (items, n))| {
+                    let mut items = items.clone();
+                    items.sort_unstable();
+                    (o, items, *n)
+                })
+                .collect();
+            assert_eq!(got, want, "{id:08X}");
+            assert!(r.ingredients.iter().all(|i| i.classes.is_empty()));
+            let product = if id == TWO { DEVICE } else { SYSTEM };
+            let made = if id == FOUR { 2 } else { 1 };
+            let mut want = vec![format!("make {product:08X} x{made}"), "other".into()];
+            want.extend((1..).zip(&slots).map(|(o, (_, n))| format!("use {o} x{n}")));
+            assert_eq!(outcomes(&c, id), [want], "{id:08X}");
+        }
+        // The install recipe itself is as it was: its quest effect and line are its own.
+        assert!(outcomes(&c, FUSE)[0]
+            .iter()
+            .any(|a| a.starts_with("Effect")));
+        assert!(outcomes(&c, FUSE)[0].iter().any(|a| a.starts_with("Text")));
+        // The records: each a saved state the library reads whole, the same recipe again, holding
+        // nothing of the actions left out.
+        let lib = p.library();
+        for id in [THREE, TWO, FOUR] {
+            let st: auberean_assets::script::ScriptState =
+                auberean_assets::decode(id, &c.records[&id], &auberean_assets::Context::empty())
+                    .expect("a saved state's record");
+            assert_eq!(lib.package_name(st.package), "Recipe");
+            let g = Graph::decode(&st.graph, &lib).expect("the graph reads whole");
+            // Nothing of the actions left out stays in the record, reached or not.
+            let kinds: Vec<String> = g
+                .entries
+                .iter()
+                .filter_map(|e| match &e.body {
+                    auberean_script::graph::Body::Object(o) => {
+                        Some(lib.package_name(o.package_id()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            for gone in ["PlayerEffectRecipeAction", "TextRecipeAction"] {
+                assert!(!kinds.iter().any(|k| k == gone), "{id:08X}: {gone}");
+            }
+            let again = yalain_world::craft::RecipeDef::from_state(id, &lib, &g).expect("a recipe");
+            let r = &c.recipes[&id];
+            assert_eq!(
+                (
+                    &again.ingredients,
+                    &again.checks,
+                    again.skill,
+                    again.category
+                ),
+                (&r.ingredients, &r.checks, r.skill, r.category)
+            );
+            let nav = Nav::new(&lib, &g);
+            let root = nav.object(g.root().expect("a root")).expect("the root");
+            let text = |o, name: &str| match nav.native(nav.field(o, name).expect(name)) {
+                Ok(NativeObject::TextInfo(t)) => (t.string_id, t.table, t.literal.is_none()),
+                other => panic!("{name}: {other:?}"),
+            };
+            assert_eq!(text(root, "m_siName"), (NAME.0, NAME.1, true));
+            assert_eq!(text(root, "m_siDesc"), (0, 0, true));
+            let slots = nav.list(root, "m_ingredients").expect("the slots");
+            let first = if id == FOUR { SLOT_NAME } else { (0, 0) };
+            assert_eq!(text(slots[0], "m_siDesc"), (first.0, first.1, true));
+            assert_eq!(
+                nav.field(root, "m_maxNumIngredients").expect("its most"),
+                u32::try_from(r.ingredients.len()).expect("few")
+            );
+        }
+    }
+
+    fn calls_of(h: &Harness, b: usize, from: usize) -> Vec<(u32, Vec<Value>)> {
+        h.world_messages(b, from)
+            .iter()
+            .filter_map(|m| match m {
+                ServerMessage::PlayerCall(c) => Some((
+                    c.function.0,
+                    c.args
+                        .as_ref()
+                        .and_then(|a| calls::values(&a.0).ok())
+                        .unwrap_or_default(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn add_ingredient(h: &mut Harness, b: usize, recipe: u32, slot: u32, item: u64) -> u32 {
+        let from = h.bots[b].inbox.len();
+        h.bots[b].send(
+            true,
+            queue::WEENIE,
+            &server_call(
+                function::ADD_INGREDIENT,
+                &[
+                    Arg::Int(0),
+                    Arg::LongInt(item),
+                    Arg::Int(slot),
+                    Arg::Int(recipe),
+                ],
+            ),
+        );
+        h.run(4);
+        let got = calls_of(h, b, from);
+        let (_, v) = got
+            .iter()
+            .find(|(f, _)| *f == function::INGREDIENT_ADDED)
+            .expect("answered");
+        match v[0] {
+            Value::Int(e) => e,
+            ref other => panic!("an error, not {other:?}"),
+        }
+    }
+
+    /// Ask to make a recipe with items by slot; what the answer said (its error).
+    fn execute(h: &mut Harness, b: usize, recipe: u32, slots: &[(u32, u64)]) -> u32 {
+        let mut g = yalain_world::graph::Builder::new();
+        let entries: Vec<(Item, Item)> = slots
+            .iter()
+            .map(|(s, i)| (Item::Word(*s), Item::Long(*i)))
+            .collect();
+        g.native(
+            8,
+            yalain_world::graph::hash(Elem::Word, Elem::Long, 0, &entries),
+        );
+        let from = h.bots[b].inbox.len();
+        h.bots[b].send(
+            true,
+            queue::WEENIE,
+            &server_call(
+                function::EXECUTE,
+                &[
+                    Arg::LongInt(0),
+                    Arg::Object(g.graph()),
+                    Arg::Int(0),
+                    Arg::Int(recipe),
+                ],
+            ),
+        );
+        let t = h.now.0 + 8.0;
+        while h.now.0 < t {
+            h.step();
+        }
+        let got = calls_of(h, b, from);
+        let (_, v) = got
+            .iter()
+            .find(|(f, _)| *f == function::EXECUTED)
+            .expect("answered");
+        match v[1] {
+            Value::Int(e) => e,
+            ref other => panic!("an error, not {other:?}"),
+        }
+    }
+
+    /// A world recipe is made as an install recipe is: unknown to a player who hasn't learned it,
+    /// it is refused as the install's is; learned from a quest step that teaches it by name, a part
+    /// not its slot's is refused as one in the install recipe's slot is, its parts go in, and
+    /// making it makes the row's product and uses up its parts.
+    /// Behaviour: server.craft.world-recipes-craft
+    #[test]
+    fn a_world_recipe_learned_from_a_step_is_refused_and_made_as_an_install_recipe_is() {
+        use yalain_content::quests::{Step, Trigger, Update};
+        let p = Portal::open();
+        let (c, refused) = with_rows(
+            &p,
+            vec![row(
+                THREE,
+                vec![slot(&[GEAR], 1), slot(&[PUMP], 1), slot(&[COG], 1)],
+                SYSTEM,
+            )],
+        );
+        assert!(refused.is_empty(), "{refused:?}");
+        let mut h = Harness::new();
+        h.server.crafting = c;
+        for t in [GEAR, PUMP, COG, UNIT, SYSTEM] {
+            h.server.catalog.insert(p.template(t));
+        }
+        let (b, me) = h.player_in_world("one", "Elara");
+        h.run(5);
+        let world = *h
+            .server
+            .players
+            .iter()
+            .find(|(_, x)| x.character == me)
+            .expect("in the world")
+            .0;
+        for t in [GEAR, PUMP, COG, UNIT] {
+            yalain_world::inventory::give(&mut h.server, &mut h.net, world, t, 1);
+        }
+        h.run(2);
+        let held = |h: &Harness, t: u32| {
+            h.server.players[&world]
+                .play
+                .items
+                .iter()
+                .find(|i| i.template == t)
+                .map(|i| i.id)
+        };
+        let (gear, pump, cog, unit) = (
+            held(&h, GEAR).expect("a gear"),
+            held(&h, PUMP).expect("a pump"),
+            held(&h, COG).expect("a cog"),
+            held(&h, UNIT).expect("a unit"),
+        );
+        let slots = [(1, gear), (2, pump), (3, cog)];
+        assert_eq!(execute(&mut h, b, THREE, &slots), error::BAD_RECIPE);
+        assert_eq!(execute(&mut h, b, FUSE, &slots), error::BAD_RECIPE);
+        let step = Step {
+            key: String::new(),
+            quest: 0,
+            needs: 0,
+            trigger: Trigger::Use(0x4700_314D),
+            tell: None,
+            update: Update::Nothing,
+            xp: 0,
+            gives: Vec::new(),
+            counts: Vec::new(),
+            effects: Vec::new(),
+            text: None,
+            recipes: vec![THREE, FUSE],
+            placed: "authored for a test".into(),
+            requires: Vec::new(),
+            takes: Vec::new(),
+            to: None,
+            races: Vec::new(),
+            effects_last: false,
+            effects_quiet: false,
+            fellows: false,
+            wants: None,
+            levels: None,
+            xp_share: 0.0,
+            transforms: None,
+            chance: None,
+            to_fellows: false,
+        };
+        let clock = h.clock();
+        yalain_world::quests::run(&mut h.server, &mut h.net, world, &step, None, clock);
+        h.run(2);
+        let known: Vec<u32> = h.server.players[&world]
+            .play
+            .recipes
+            .iter()
+            .map(|r| r.recipe)
+            .collect();
+        assert!(
+            known.contains(&THREE) && known.contains(&FUSE),
+            "{known:x?}"
+        );
+        let wrong = add_ingredient(&mut h, b, FUSE, 1, unit);
+        assert_ne!(wrong, 0);
+        assert_eq!(add_ingredient(&mut h, b, THREE, 1, unit), wrong);
+        assert_eq!(add_ingredient(&mut h, b, THREE, 1, gear), 0);
+        assert_eq!(execute(&mut h, b, THREE, &slots), 0);
+        let me = &h.server.players[&world].play;
+        assert!(me.items.iter().any(|i| i.template == SYSTEM));
+        for t in [GEAR, PUMP, COG] {
+            assert!(!me.items.iter().any(|i| i.template == t), "{t:08X} used up");
+        }
+        assert!(me.items.iter().any(|i| i.template == UNIT), "the unit kept");
+    }
+}
+
+/// What weapons put on what they hit reads from the names their templates give, at the template's
+/// spellcraft: 189 templates name one and 188 of those resolve; the Sword of the Doomed Hero's Dark
+/// Vengeance slays the Empowered Warath's superclass by ten million a point of spellcraft, always,
+/// and the Warath has a million health; the bone blade's Crippling goes on at 100 a tenth of the
+/// time. A player striking the Warath with the sword kills it.
+/// Behaviour: server.combat.weapon-hit-effects-read
+#[test]
+fn the_effects_weapons_put_on_what_they_hit_read_from_their_names() {
+    use yalain_content::props::creature_property::SUPER_CLASS;
+    use yalain_world::item_use::UsageEffect;
+    const SWORD: u32 = 0x4700_13F7;
+    const WARATH: u32 = 0x4700_2D93;
+    const BONE_BLADE: u32 = 0x4700_1FDB;
+    const DARK_VENGEANCE: u32 = 0x6F00_1AFE;
+    const CRIPPLING: u32 = 0x6F00_03E0;
+    let p = Portal::open();
+    let naming: Vec<u32> = p
+        .every_template_props()
+        .iter()
+        .filter(|(_, props)| {
+            (1..=8).any(|n| props.text(&format!("Item_TargetEffect{n}")).is_some())
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    let hits = p.hit_effects(&naming);
+    assert_eq!((naming.len(), hits.len()), (189, 188));
+    let of = |t: u32| -> Vec<(u32, f32)> {
+        hits.get(&t)
+            .map(|l| {
+                l.iter()
+                    .map(|e: &UsageEffect| (e.state, e.spellcraft))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    assert_eq!(of(SWORD), vec![(DARK_VENGEANCE, 1.0)]);
+    assert_eq!(of(BONE_BLADE), vec![(CRIPPLING, 100.0)]);
+    let t = p.effects(&[DARK_VENGEANCE, CRIPPLING]);
+    let warath = p.template(WARATH);
+    let superclass = warath.props.word(SUPER_CLASS).expect("a superclass");
+    let Kind::Slayer(classes) = &t.get(DARK_VENGEANCE).expect("read").kind else {
+        panic!("a slayer");
+    };
+    assert_eq!(classes, &vec![(superclass, 10_000_000.0)]);
+    assert!((t.chance(DARK_VENGEANCE, 1.0) - 1.0).abs() < f32::EPSILON);
+    assert_eq!(
+        warath.props.int("GameplayStatistics_MaxHealth"),
+        Some(1_000_000)
+    );
+    assert!(t.get(CRIPPLING).is_some_and(|d| d.lasts()));
+    assert!((t.chance(CRIPPLING, 100.0) - 0.1).abs() < 1e-6);
+
+    // In play: the Warath's kind, at its health, struck with the sword.
+    let mut h = yalain_testkit::Harness::new();
+    h.add_creatures(1);
+    let (b, me) = h.player_in_world("one", "Elara");
+    h.bots[b].send(
+        true,
+        auberean_protocol::queue::WEENIE,
+        &auberean_protocol::ClientMessage::SceneRenderingComplete(auberean_protocol::login::Empty),
+    );
+    h.run(5);
+    // A new player may wield it here: no hero and no least level asked; held as a sword.
+    let mut sword = p.template(SWORD);
+    sword
+        .props
+        .set("Usage_HeroOnly", yalain_content::Prop::Bool(false))
+        .set("Usage_MinLevel", yalain_content::Prop::Int(0));
+    h.server.catalog.insert(sword);
+    h.server
+        .catalog
+        .implements
+        .insert(SWORD, yalain_world::skill_use::implement::SWORD);
+    h.arm(b, me, SWORD);
+    h.server.effect_table = t;
+    h.server.hit_effects = hits;
+    let beetle = h
+        .world_messages(b, 0)
+        .iter()
+        .find_map(|m| match m {
+            auberean_protocol::ServerMessage::CreateObject(o)
+                if o.weenie.entity_did == yalain_testkit::TEST_CREATURE =>
+            {
+                Some(o.id)
+            }
+            _ => None,
+        })
+        .expect("the camp's creature");
+    let mut kind = h
+        .server
+        .catalog
+        .get(yalain_testkit::TEST_CREATURE)
+        .expect("its template")
+        .clone();
+    kind.props
+        .set(SUPER_CLASS, yalain_content::Prop::Word(superclass));
+    h.server.catalog.insert(kind);
+    {
+        let t = h.server.things.get_mut(beetle).expect("the creature");
+        t.max_health = 1_000_000;
+        t.health = 1_000_000;
+        let c = t.creature.as_mut().expect("a creature");
+        c.stats.natural_damage = 0.0;
+    }
+    h.bots[b].send(
+        true,
+        auberean_protocol::queue::WEENIE,
+        &yalain_testkit::play::server_call(
+            0x8204_0008,
+            &[auberean_script::args::Arg::LongInt(beetle)],
+        ),
+    );
+    h.run_until(20_000, |h| {
+        h.server.things.get(beetle).is_none_or(|t| !t.alive())
+    });
+    assert!(h.server.things.get(beetle).is_none_or(|t| !t.alive()));
+}
+
+/// The heroes' three forces read from the install as what they are: Armor Force adds 10 armor at
+/// 1 to 100 at 10, Reflection Force sends back a share of each attack's harm (0.08 at 1 to 0.4 at
+/// 10), Taunt Force's reply answers with its taunt and watches its holder's vitals change; each a
+/// force in the one class, costing focus on each attack (Armor Force 2 at 1 to 10 at 10, the others
+/// 1 to 5), as the guides give them. An effect with no price is no force.
+/// Behaviour: server.forces.read-from-the-install
+#[test]
+fn the_installs_three_forces_read_with_their_focus_prices_in_one_class() {
+    use yalain_world::effect_defs::WATCHES_VITALS;
+    use yalain_world::player::quality;
+    const ARMOR: u32 = 0x7000_1EC6;
+    const REFLECTION: u32 = 0x7000_1ED9;
+    const TAUNT: u32 = 0x7000_1EDA;
+    const CHALLENGE: u32 = 0x7000_1EDB;
+    const LUMBERING_MIGHT_ARMOR: u32 = 0x7000_0922;
+    let t = Portal::open().effects(&[ARMOR, REFLECTION, TAUNT, LUMBERING_MIGHT_ARMOR]);
+    for (state, at_1, at_10) in [(ARMOR, 2, 10), (REFLECTION, 1, 5), (TAUNT, 1, 5)] {
+        let f = t.force(state).expect("a force");
+        assert_eq!(
+            (f.vital, f.cost(1.0), f.cost(10.0)),
+            (quality::FOCUS, at_1, at_10),
+            "{state:08X}"
+        );
+        let d = t.get(state).expect("read");
+        assert!(d.duration.is_empty(), "held until turned off");
+        assert_eq!(d.eq_class, t.get(ARMOR).expect("read").eq_class);
+    }
+    assert!(t.force(LUMBERING_MIGHT_ARMOR).is_none());
+    let Kind::Numeric {
+        stats, magnitude, ..
+    } = &t.get(ARMOR).expect("read").kind
+    else {
+        panic!("Armor Force")
+    };
+    assert_eq!(stats, &[yalain_world::effects::ARMOR_RATING]);
+    assert_eq!(
+        (magnitude.at(1.0), magnitude.at(10.0)),
+        (Some(10.0), Some(100.0))
+    );
+    let Kind::Watcher(w) = &t.get(REFLECTION).expect("read").kind else {
+        panic!("Reflection Force")
+    };
+    assert!(w.shares && w.watches);
+    let back = (w.sends_back.amount.at(1.0), w.sends_back.amount.at(10.0));
+    assert!(
+        matches!(back, (Some(a), Some(b)) if (a - 0.08).abs() < 1e-6 && (b - 0.4).abs() < 1e-6),
+        "{back:?}"
+    );
+    let taunt = t.get(TAUNT).expect("read");
+    assert!(matches!(taunt.kind, Kind::Reply { effect, .. } if effect == CHALLENGE));
+    assert_ne!(taunt.internal_flags & WATCHES_VITALS, 0);
 }

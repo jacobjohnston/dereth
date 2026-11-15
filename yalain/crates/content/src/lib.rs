@@ -28,27 +28,37 @@ use auberean_assets::script::Qualities;
 
 pub mod crafts;
 pub mod creature_rows;
+pub mod defenses;
 pub mod effect_rules;
+pub mod escorts;
 pub mod events;
+pub mod fought;
 pub mod gathering;
+pub mod guards;
+pub mod heroes;
 pub mod item_rows;
 pub mod kingdoms;
+pub mod levers;
 pub mod locks;
 pub mod loot;
 pub mod movement;
+pub mod offerings;
 pub mod plants;
 pub mod pools;
 pub mod popups;
 pub mod props;
 pub mod quests;
+pub mod shifting;
 pub mod spawns;
 pub mod stores;
 pub mod story;
 pub mod talk;
+pub mod tallies;
 pub mod treasure_effects;
 pub mod treasure_looks;
 pub mod treasure_tables;
 pub mod treasure_words;
+pub mod untraining;
 pub mod worn_table;
 
 pub use locks::{Lock, LockTable};
@@ -101,8 +111,10 @@ pub struct WeaponRule {
     pub stance: Option<u32>,
 }
 
-/// What a creature's death effect makes around its killer, in place of what the install can say.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// What a creature's death effect makes around its killer, or an item's use effect around its user,
+/// in place of what the install can say: creatures, or a portal; or what the death of a creature of
+/// a template makes, at a place or where it died.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeathSpawn {
     /// The template of what it makes.
     pub template: u32,
@@ -112,8 +124,28 @@ pub struct DeathSpawn {
     pub chance: f32,
     /// Where each is made, in meters from the killer, as the killer faces.
     pub offset: [f32; 2],
-    /// How long each stands, in seconds, where it doesn't stay until killed.
+    /// How long each stands, in seconds, where it doesn't stay until killed (a portal: until the
+    /// server stops).
     pub lasts: Option<f32>,
+    /// The kingdom a player must be of to use a portal it makes, as a description's faction names
+    /// it; none, the kingdom the portal's template requires, if any.
+    pub kingdom: Option<u32>,
+    /// Where each stands, for a creature's own row: a place of the world, in place of its offset
+    /// from where the creature died.
+    pub at: Option<Place>,
+    /// Where a portal it makes leads, in place of its template's destination.
+    pub to: Option<Place>,
+    /// The name what it makes is shown and examined by, in place of its template's.
+    pub name: Option<Words>,
+}
+
+impl DeathSpawn {
+    /// The key a creature's own row is found by among the effects' rows: its template, written
+    /// `0x` and eight hex digits.
+    #[must_use]
+    pub fn of_creature(template: u32) -> String {
+        format!("0x{template:08X}")
+    }
 }
 
 /// Whom a kind of pet tends.
@@ -720,6 +752,52 @@ pub struct ContentPack {
     /// The world's scheduled events and what they gate. Not part of the text form: the world
     /// database's events fill it.
     pub events: events::EventTable,
+    /// The world's tallies and what fills, waits on and says them. Not part of the text form: the
+    /// world database's tallies fill it.
+    pub tallies: tallies::TallyTable,
+    /// The creatures quest steps set to follow their players. Not part of the text form: the
+    /// world database's steps fill it.
+    pub escorts: escorts::EscortTable,
+    /// The steps and gives that wait on a player's craft skills. Not part of the text form: the
+    /// world database's steps and gives fill it.
+    pub craft_gates: crafts::CraftGates,
+    /// The steps and gives that wait on their player having an untraining under way. Not part of
+    /// the text form: the world database's steps and gives fill it.
+    pub untraining_gates: untraining::UntrainingGates,
+    /// The steps and gives that run only for heroes. Not part of the text form: the world
+    /// database's steps and gives fill it.
+    pub hero_gates: heroes::HeroGates,
+    /// The steps and gives that wait on their player having fought a camp's last creature to die.
+    /// Not part of the text form: the world database's steps and gives fill it.
+    pub fought_gates: fought::FoughtGates,
+    /// The gives that move no quest and take any item of a class: the class (a script package, by
+    /// number) of each, by the give's place among the quest table's gives. Not part of the text
+    /// form: the world database's gives fill it.
+    pub class_gives: BTreeMap<usize, u32>,
+    /// The effects quest steps put on the item given them, as they hand it back: by the step's
+    /// quest and key. Not part of the text form: the world database's steps fill it.
+    pub given_effects: BTreeMap<(u32, String), Vec<u32>>,
+    /// The quests that go with another quest's holder (the fellows protecting the one who carries
+    /// it): each such companion quest, by the quest it goes with. As a player's quest of that id is
+    /// done, its companions under way of the player's and of each of its fellows in the world are
+    /// done; as it fails or is cancelled, they fail. Not part of the text form: the world
+    /// database's quests fill it.
+    pub companions: BTreeMap<u32, Vec<u32>>,
+    /// The levers whose pulls open doors. Not part of the text form: the world database's levers
+    /// fill it.
+    pub levers: levers::LeverTable,
+    /// The objects that take a set of items and then open the way for a while. Not part of the
+    /// text form: the world database's offerings fill it.
+    pub offerings: offerings::OfferingTable,
+    /// The objects usable only while every creature of a camp is dead. Not part of the text form:
+    /// the world database's guarded rows fill it.
+    pub guards: guards::GuardTable,
+    /// The devices creatures come to attack. Not part of the text form: the world database's
+    /// defense rows fill it.
+    pub defenses: defenses::DefenseTable,
+    /// The placed objects of which one stands at a time, moving on after each use. Not part of the
+    /// text form: the world database's shifting rows fill it.
+    pub shifting: shifting::ShiftTable,
 }
 
 /// The kind of player conflict a place allows.
@@ -1089,6 +1167,20 @@ impl ContentPack {
             objects,
             conflict: BTreeMap::new(),
             events: events::EventTable::default(),
+            tallies: tallies::TallyTable::default(),
+            escorts: escorts::EscortTable::default(),
+            craft_gates: crafts::CraftGates::default(),
+            untraining_gates: untraining::UntrainingGates::default(),
+            hero_gates: heroes::HeroGates::default(),
+            fought_gates: fought::FoughtGates::default(),
+            class_gives: BTreeMap::new(),
+            given_effects: BTreeMap::new(),
+            companions: BTreeMap::new(),
+            levers: levers::LeverTable::default(),
+            offerings: offerings::OfferingTable::default(),
+            guards: guards::GuardTable::default(),
+            shifting: shifting::ShiftTable::default(),
+            defenses: defenses::DefenseTable::default(),
         })
     }
 

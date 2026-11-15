@@ -115,6 +115,9 @@ pub fn call<S: Store>(
         crate::mounts::DISMOUNT => crate::mounts::dismount(s, net, world),
         crate::personal::function::SET_ALIAS => crate::personal::set_alias(s, world, &values),
         crate::personal::function::INSCRIBE => crate::personal::inscribe(s, net, world, &values),
+        crate::personal::function::UNINSCRIBE => {
+            crate::personal::uninscribe(s, net, world, &values);
+        }
         crate::personal::function::LIST_SKILLS => crate::personal::list_skills(s, net, world),
         crate::quests::CANCEL_QUEST => crate::quests::cancel(s, net, world, &values, clock),
         function::USE => {
@@ -190,10 +193,16 @@ pub fn call<S: Store>(
             crate::store::turn_page(s, net, world, false, clock.local);
         }
         crate::store::function::LEAVE_STORE => crate::store::leave(s, world),
+        crate::store::function::UPDATE_SALES => crate::store::update_sales(s, net, world, &values),
         crate::store::function::PURCHASE => crate::store::purchase(s, net, world, &values, clock),
         crate::skills::function::TRAIN => crate::skills::train(s, net, world, &values),
         crate::skills::function::UNTRAIN => crate::skills::untrain(s, net, world, &values, clock),
         crate::skills::function::UNTRAIN_CANCEL => crate::skills::cancel_untraining(s, net, world),
+        crate::skills::function::SELL_BACK_ALL
+        | crate::skills::function::SELL_BACK_ALL_HERO
+        | crate::skills::function::SELL_BACK_ALL_CRAFT => {
+            crate::skills::sell_back_all(s, net, world, f, clock);
+        }
         crate::death::player_fn::RESURRECT => crate::death::resurrect(s, net, world, clock),
         crate::resurrections::function::DECLINE => crate::resurrections::declined(s, world),
         crate::skills::function::RAISE => crate::skills::raise(s, net, world, &values, clock),
@@ -201,7 +210,9 @@ pub fn call<S: Store>(
         | crate::pets::function::RETURN
         | crate::pets::function::MODE
         | crate::pets::function::DIE
-        | crate::pets::function::NAME => crate::pets::request(s, net, world, f, &values, clock),
+        | crate::pets::function::NAME
+        | crate::pets::function::HEAL
+        | crate::pets::function::BUFF => crate::pets::request(s, net, world, f, &values, clock),
         _ => s.unhandled.note(format!("script call {f:#010x}")),
     }
 }
@@ -563,7 +574,7 @@ fn profile_bytes<S: Store>(
         // An item in another player's pack is seen by no one until it is offered.
         let another_holds = t.kind == crate::things::Kind::Item
             && t.container
-                .is_some_and(|(c, _)| c != me.character && crate::social::world_of(s, c).is_some());
+                .is_some_and(|c| c != me.character && crate::social::world_of(s, c).is_some());
         if another_holds && !me.known.contains_key(&req.object) {
             s.unhandled.note("examining an item another player holds");
             return None;
@@ -608,8 +619,14 @@ fn profile_bytes<S: Store>(
             }
             crate::things::Kind::Corpse
             | crate::things::Kind::Node
-            | crate::things::Kind::Portal => {
-                profile::npc(req.asked, profile::item_name(&t.facts), &t.facts)
+            | crate::things::Kind::Portal
+            | crate::things::Kind::Placed => {
+                // A name its row gave it as text, else its template's (or its row's reference).
+                let name = match t.description.name_text.as_deref() {
+                    Some(text) => profile::item_named(profile::literal(text)),
+                    None => profile::item_name(&t.facts),
+                };
+                profile::npc(req.asked, name, &t.facts)
             }
         }
     } else if let Some(i) = crate::presence::content_by_id(&s.content.objects, req.object) {
@@ -643,7 +660,7 @@ fn profile_bytes<S: Store>(
                     Some(if def.hidden {
                         profile::QuestLine::Hidden
                     } else {
-                        profile::QuestLine::Named(profile::quest_line(g.status), def.name)
+                        profile::QuestLine::Named(profile::quest_line(g.status), def.name.clone())
                     })
                 });
                 let recall = if lifestone {

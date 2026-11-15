@@ -61,6 +61,36 @@ pub struct MasterConfiguration {
     /// DIVERGE: an extra section; ACE has no network of worlds (V451).
     #[serde(rename = "Federation")]
     pub federation: FederationConfiguration,
+
+    /// Not ACE: server-controlled AI Players (`[ai_players]`).
+    #[serde(rename = "AiPlayers")]
+    pub ai_players: AiPlayersConfiguration,
+}
+
+/// `empyrean.toml` -> `[ai_players]`: how AI Players fill the world. Switched on and off with
+/// `@aiplayers` (the `ai_players_enabled` property), not here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiPlayersConfiguration {
+    /// Seconds an AI Player stays once no real player is near.
+    #[serde(rename = "LeaveAfterSeconds")]
+    pub leave_after_seconds: u32,
+    /// The most AI Players in the world at once.
+    #[serde(rename = "MaxTotal")]
+    pub max_total: u32,
+    /// Town levels over the ones worked out from the land, as `Holtburg=5, Arwic=12`.
+    #[serde(rename = "TownLevels")]
+    pub town_levels: String,
+}
+
+impl Default for AiPlayersConfiguration {
+    fn default() -> Self {
+        Self {
+            leave_after_seconds: 60,
+            max_total: 60,
+            town_levels: String::new(),
+        }
+    }
 }
 
 /// `empyrean.toml` -> `[portal_storms]`: moving players out of a crowded landblock. Off by default,

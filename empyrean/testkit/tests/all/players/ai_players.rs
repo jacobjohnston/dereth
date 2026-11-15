@@ -224,4 +224,29 @@ mod real {
             "the player saw an AI Player move"
         );
     }
+
+    #[test]
+    fn town_levels_come_from_the_land_round_each_town() {
+        let mut l = create_character(&[44, 6, 21, 22, 24]);
+        let w = &mut l.ts.world;
+        let mut by_name = std::collections::BTreeMap::new();
+        for (i, t) in ai_players::towns::TOWNS.iter().enumerate() {
+            let level = ai_players::levels::town_level(w, i);
+            println!("{:>22}: {level:>3} (first guess {})", t.name, t.level);
+            by_name.insert(t.name, level);
+        }
+        assert!(
+            by_name["Holtburg"] <= 15,
+            "a starting town is for new characters"
+        );
+        assert!(by_name["Yaraq"] <= 15 && by_name["Shoushi"] <= 15);
+        for far in ["Fort Tethana", "Wai Jhou", "Ayan Baqur", "Kara"] {
+            assert!(by_name[far] >= 60, "{far} is for seasoned characters");
+        }
+        let holtburg = ai_players::levels::block_at(42.28, 33.31);
+        assert!(
+            !ai_players::levels::around(w, holtburg, 1).is_empty(),
+            "creatures round Holtburg"
+        );
+    }
 }

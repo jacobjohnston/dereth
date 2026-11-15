@@ -6,6 +6,7 @@
 //! for an AI Player), and every few seconds the director logs AI Players in near real players and
 //! out again when none is near.
 
+pub mod levels;
 pub mod names;
 pub mod planner;
 pub mod towns;
@@ -40,14 +41,16 @@ const DIRECTOR_EVERY: f64 = 2.0;
 const SPAWN_RADIUS: f64 = 5000.0;
 /// And stay while one is within this many.
 const KEEP_RADIUS: f64 = 6000.0;
-/// Seconds an AI Player with no real player near waits before it logs out.
-const LEAVE_AFTER: f64 = 60.0;
 /// Seconds a login may take before it is given up.
 const LOGIN_TIMEOUT: f64 = 60.0;
 /// Seconds an AI Player stays in portal space, as a client would.
 const PORTAL_SPACE: f64 = 1.0;
-/// The most AI Players in the world at once.
-const MAX_TOTAL: usize = 60;
+/// `[ai_players]` in `empyrean.toml`, or its defaults.
+fn settings() -> empyrean_common::master_configuration::AiPlayersConfiguration {
+    empyrean_common::config_manager::ConfigManager::try_config()
+        .map(|c| c.ai_players.clone())
+        .unwrap_or_default()
+}
 /// Metres from a town's centre an AI Player may arrive at.
 const TOWN_SPREAD: f32 = 25.0;
 /// Metres in one map unit.
@@ -124,6 +127,8 @@ pub struct AiPlayersState {
     rng: u64,
     /// The route planner's thread, started with the first route.
     planner: Option<planner::Planner>,
+    /// The land's monster levels, worked out as asked.
+    pub levels: levels::Levels,
 }
 
 impl AiPlayersState {
@@ -613,7 +618,7 @@ fn direct(w: &mut World, now: f64) {
             if let Some(b) = w.ai_players.bots.get_mut(&id) {
                 b.alone_since = Some(since);
             }
-            if now - since >= LEAVE_AFTER {
+            if now - since >= f64::from(settings().leave_after_seconds) {
                 log_out(w, id);
             }
         }
@@ -631,7 +636,8 @@ fn direct(w: &mut World, now: f64) {
         .values()
         .filter(|b| b.stage != Stage::LoggingOut)
         .count();
-    if loading || now < w.ai_players.next_login || active >= MAX_TOTAL {
+    let max_total = usize::try_from(settings().max_total).unwrap_or(usize::MAX);
+    if loading || now < w.ai_players.next_login || active >= max_total {
         return;
     }
     let mut short: Vec<(usize, usize)> = towns::of_era(w.era.id)
@@ -673,9 +679,9 @@ pub fn log_out(w: &mut World, id: u32) {
 }
 
 /// The level range town `town` wants: its level to 20 above it, within the world's.
-fn levels_for(w: &World, town: usize) -> (u32, u32) {
+fn levels_for(w: &mut World, town: usize) -> (u32, u32) {
     let max = crate::world_objects::player_xp::get_max_level(w);
-    let low = towns::TOWNS[town].level.clamp(1, max);
+    let low = levels::town_level(w, town).clamp(1, max);
     (low, (low + 20).min(max))
 }
 

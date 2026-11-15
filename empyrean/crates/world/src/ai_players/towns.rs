@@ -1,7 +1,7 @@
 //! The towns AI Players fill: where each stands, its size and the level it is for.
 //!
-//! The spots are the end of retail's (as the world's place marks have them). The levels are a
-//! first guess, until the level map works them out from the land around each town.
+//! The spots are the end of retail's (as the world's place marks have them). The levels here are
+//! a first guess, used only where the land round a town gives none (see `levels::town_level`).
 
 use dereth_primitives::era::EraId;
 

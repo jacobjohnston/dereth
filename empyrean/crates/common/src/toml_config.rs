@@ -662,6 +662,31 @@ pub const SECTIONS: &[Section] = &[
         ],
     },
     Section {
+        toml: &["ai_players"],
+        ace: &["AiPlayers"],
+        array: false,
+        help: "AI Players: server-controlled characters that log in near real players, fill towns and\n\
+               hunt the land around them. Switched on and off with @aiplayers (the ai_players_enabled\n\
+               property), not here.",
+        keys: &[
+            e(
+                "leave_after_seconds",
+                "LeaveAfterSeconds",
+                "Seconds an AI Player stays once no real player is within 6 km.",
+            ),
+            e(
+                "max_total",
+                "MaxTotal",
+                "The most AI Players in the world at once.",
+            ),
+            e(
+                "town_levels",
+                "TownLevels",
+                "Town levels over the ones worked out from the land, as \"Holtburg=5, Arwic=12\".",
+            ),
+        ],
+    },
+    Section {
         toml: &["portal_storms"],
         ace: &["PortalStorms"],
         array: false,

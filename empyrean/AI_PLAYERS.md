@@ -43,8 +43,8 @@ language models. This is a local feature (`local/ai-players`), not for upstream.
   schools up to what it casts reliably. `SpellComponentsRequired` off and `SafeSpellComponents` on.
 - **Movement.** AI Players move as a client does, with the motion and position messages a client
   sends, so watchers see them run. Routes come from `dereth-navigation`, outdoors only.
-- **Levels.** A table of expected monster level for every outdoor landblock, built at startup from
-  encounters and generators; town levels from the land around them, overridable in TOML.
+- **Levels.** The creatures of every outdoor landblock with their levels, from its encounters and
+  generators, worked out as asked; town levels from the land around them, overridable in TOML.
 - **Kills and deaths.** AI Player kills drop no loot. AI Players drop nothing, take no vitae and
   gain no XP.
 
@@ -62,7 +62,11 @@ language models. This is a local feature (`local/ai-players`), not for upstream.
    own; trips longer than 180 m go in hops, and a body stopped by something replans. Town AI
    Players wander within 40 m of the centre, stand a while, and now and then sit. A new area's
    first route takes seconds to plan (its map is built once); later ones take milliseconds.
-4. Level map and town levels.
+4. Done. Level map: each outdoor landblock's creatures, from its encounters and outdoor
+   generators (followed four deep), with their levels and chances, worked out as asked. A town's
+   level is the median of the creatures in and next to its landblock (Holtburg 8, Arwic 15,
+   Fort Tethana 100), unless `[ai_players] town_levels` sets it. `leave_after_seconds` (60) and
+   `max_total` (60) are in the same section.
 5. Hunters.
 6. Town buffers.
 7. Tests and soak runs with AI Players on.

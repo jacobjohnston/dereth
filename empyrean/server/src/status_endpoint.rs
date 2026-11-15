@@ -24,7 +24,9 @@
 //! and its level limits; where each lifestone, portal, vendor and person the world places stands;
 //! both as `text/tab-separated-values`), and the status document names them (`"portals"` and
 //! `"places"`, each a path on this endpoint, `null` when not published); with it off, `/portals`
-//! and `/places` are `404` like any other path.
+//! and `/places` are `404` like any other path. With `server.publish_places` on, `GET /places`
+//! answers instead with the world's places for a map ([`crate::place_table`], JSON), `503` the same
+//! way until they are ready, and the status document leaves `"places"` `null`.
 //!
 //! The snapshot is taken on the world thread (a command through the world queue), so the
 //! endpoint never reads the world from another thread. Anything else is `404`, or `405` for a method
@@ -45,6 +47,7 @@ use empyrean_world::managers::world_manager::WorldStatusState;
 use empyrean_world::managers::{landblock_manager, player_manager};
 use empyrean_world::World;
 
+use crate::place_table::PlaceTable;
 use crate::portal_table::PortalTable;
 
 /// How long a request waits for the world thread's snapshot before answering 503.
@@ -260,6 +263,33 @@ pub fn respond_with_portals(
     snapshot: impl FnOnce() -> Option<StatusSnapshot>,
     portals: Option<&PortalTable>,
 ) -> Vec<u8> {
+    respond_published(
+        request_line,
+        snapshot,
+        Published {
+            portals,
+            places: None,
+        },
+    )
+}
+
+/// The tables the endpoint publishes beside `/status`: each `None` when it is not.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Published<'a> {
+    /// `/portals`.
+    pub portals: Option<&'a PortalTable>,
+    /// `/places`.
+    pub places: Option<&'a PlaceTable>,
+}
+
+/// [`respond`], also answering `/portals` and `/places` from `published`.
+#[must_use]
+pub fn respond_published(
+    request_line: &str,
+    snapshot: impl FnOnce() -> Option<StatusSnapshot>,
+    published: Published<'_>,
+) -> Vec<u8> {
+    let Published { portals, places } = published;
     let mut parts = request_line.split_whitespace();
     let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
     let path = target.split('?').next().unwrap_or("");
@@ -276,7 +306,9 @@ pub fn respond_with_portals(
             Some(mut s) => {
                 if portals.is_some() {
                     s.portals = Some("/portals".to_owned());
-                    s.places = Some("/places".to_owned());
+                    if places.is_none() {
+                        s.places = Some("/places".to_owned());
+                    }
                 }
                 response(200, "application/json", &s.to_json(), head_only)
             }
@@ -293,6 +325,15 @@ pub fn respond_with_portals(
                 503,
                 "text/plain",
                 "the portal table is being built; ask again shortly\n",
+                head_only,
+            ),
+        },
+        "/places" if places.is_some() => match places.and_then(PlaceTable::ready) {
+            Some(document) => response(200, "application/json", document, head_only),
+            None => response(
+                503,
+                "text/plain",
+                "the place table is being built; ask again shortly\n",
                 head_only,
             ),
         },
@@ -386,6 +427,20 @@ pub fn start(
     portals: Option<PortalTable>,
     snapshot: impl Fn() -> Option<StatusSnapshot> + Send + 'static,
 ) -> Result<StatusEndpoint, String> {
+    start_publishing(addr, allowed_origins, portals, None, snapshot)
+}
+
+/// [`start`], also serving `places` as `/places` when given.
+///
+/// # Errors
+/// The address cannot be bound, or the thread cannot start.
+pub fn start_publishing(
+    addr: SocketAddr,
+    allowed_origins: Vec<String>,
+    portals: Option<PortalTable>,
+    places: Option<PlaceTable>,
+    snapshot: impl Fn() -> Option<StatusSnapshot> + Send + 'static,
+) -> Result<StatusEndpoint, String> {
     let listener = TcpListener::bind(addr).map_err(|e| format!("{addr}: {e}"))?;
     let local = listener.local_addr().map_err(|e| format!("{addr}: {e}"))?;
     let stopped = Arc::new(AtomicBool::new(false));
@@ -399,7 +454,11 @@ pub fn start(
                 }
                 match stream {
                     Ok(stream) => {
-                        serve_one(stream, &allowed_origins, portals.as_ref(), &snapshot);
+                        let published = Published {
+                            portals: portals.as_ref(),
+                            places: places.as_ref(),
+                        };
+                        serve_one(stream, &allowed_origins, published, &snapshot);
                     }
                     Err(e) => log::warn!("Status endpoint: accept failed: {e}"),
                 }
@@ -412,7 +471,7 @@ pub fn start(
 fn serve_one(
     mut stream: TcpStream,
     allowed_origins: &[String],
-    portals: Option<&PortalTable>,
+    published: Published<'_>,
     snapshot: &dyn Fn() -> Option<StatusSnapshot>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
@@ -435,7 +494,7 @@ fn serve_one(
             .eq_ignore_ascii_case("origin")
             .then(|| value.trim())
     });
-    let mut answer = respond_with_portals(request_line, snapshot, portals);
+    let mut answer = respond_published(request_line, snapshot, published);
     if let Some(header) = cors_header(origin, allowed_origins) {
         answer = with_header(answer, &header);
     }

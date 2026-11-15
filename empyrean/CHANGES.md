@@ -13,6 +13,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 ([`RELEASING.md`](RELEASING.md)).
 
 ## Unreleased
+- A world can publish its places for a map at /places on its status endpoint (`publish_places`), and `--write-places` writes them to a file.
 
 - `@god` and `@ungod` work on a character of any era, not only the end of retail's.
 - `set-characterplus <character> [on|off]` puts the + before a character's name, or takes it away.

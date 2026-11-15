@@ -249,4 +249,358 @@ mod real {
             "creatures round Holtburg"
         );
     }
+
+    /// A load run: AI Players logged in across every town in steps (`AI_PLAYERS_LOAD`, default
+    /// 50,100,200,300), each step played for `AI_PLAYERS_SECONDS` (default 120) at real speed,
+    /// and what the world spent on it. Run it in release:
+    /// `cargo test --release -p empyrean-testkit --features real-content --test all ai_players_load -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a load run, by hand"]
+    fn ai_players_load() {
+        let steps: Vec<usize> = std::env::var("AI_PLAYERS_LOAD")
+            .unwrap_or_else(|_| "50,100,200,300".into())
+            .split(',')
+            .filter_map(|n| n.trim().parse().ok())
+            .collect();
+        let seconds: usize = std::env::var("AI_PLAYERS_SECONDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(120);
+        let mut l = create_character(&[44, 6, 21, 22, 24]);
+        l.enter_world();
+        let towns: Vec<usize> = ai_players::towns::of_era(l.ts.world.era.id)
+            .map(|(i, _)| i)
+            .collect();
+        {
+            let w = &mut l.ts.world;
+            w.ai_players.pinned = true;
+            w.ai_players.max_total_override = Some(10_000);
+            ai_players::set_enabled(w, true);
+        }
+        let rss = || {
+            std::process::Command::new("ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .trim()
+                        .parse::<u64>()
+                        .ok()
+                })
+                .map_or(0, |kb| kb / 1024)
+        };
+        println!(
+            "AI Players load run: {} towns, {seconds} s a step",
+            towns.len()
+        );
+        println!(
+            "{:>5} {:>9} {:>9} {:>9} {:>9} {:>10} {:>9} {:>8}",
+            "bots",
+            "build ms",
+            "tick avg",
+            "tick p95",
+            "tick max",
+            "landblocks",
+            "objects",
+            "RSS MB"
+        );
+        let mut made = 0;
+        for &n in &steps {
+            // Log in up to n, one town after another.
+            let started = std::time::Instant::now();
+            let before = made;
+            while made < n {
+                let town = towns[made % towns.len()];
+                ai_players::log_in_at(&mut l.ts.world, town).expect("a login");
+                made += 1;
+                for _ in 0..3 {
+                    l.ts.step();
+                }
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let build = started.elapsed().as_secs_f64() * 1000.0 / (made - before).max(1) as f64;
+            // Settle: every login done and placed.
+            l.advance(10.0);
+
+            // Play at real speed and time each tick.
+            let mut ticks = Vec::new();
+            for _ in 0..seconds {
+                let second = std::time::Instant::now();
+                for _ in 0..60 {
+                    let t = std::time::Instant::now();
+                    l.ts.step();
+                    ticks.push(t.elapsed().as_secs_f64() * 1000.0);
+                }
+                if let Some(rest) = Duration::from_secs(1).checked_sub(second.elapsed()) {
+                    std::thread::sleep(rest);
+                }
+            }
+            ticks.sort_by(f64::total_cmp);
+            #[allow(clippy::cast_precision_loss)]
+            let avg = ticks.iter().sum::<f64>() / ticks.len() as f64;
+            let p95 = ticks[ticks.len() * 95 / 100];
+            let max = ticks.last().copied().unwrap_or(0.0);
+            let w = &l.ts.world;
+            let in_world = w
+                .ai_players
+                .bots
+                .values()
+                .filter(|b| b.stage == Stage::InWorld)
+                .count();
+            println!(
+                "{:>5} {:>9.1} {:>9.2} {:>9.2} {:>9.2} {:>10} {:>9} {:>8}",
+                in_world,
+                build,
+                avg,
+                p95,
+                max,
+                empyrean_world::managers::landblock_manager::get_loaded_landblocks(w).len(),
+                w.objects.len(),
+                rss()
+            );
+        }
+    }
+
+    #[test]
+    fn a_hunter_walks_out_from_town_and_fights_monsters_of_its_level() {
+        let (mut l, _) = holtburg_with_a_bot();
+        let w = &mut l.ts.world;
+        ai_players::set_enabled(w, false);
+        w.ai_players.pinned = true;
+        let me = ai_players::map_coords(&l.location());
+        let w = &mut l.ts.world;
+        let ground = ai_players::hunt::pick_ground(w, me, 1500.0, &[me], 400.0).expect("a ground");
+        let level = ai_players::hunt::level_for(w, ground).expect("a level");
+        // Only this hunter: no more logins round the real player.
+        let have = u32::try_from(w.ai_players.bots.len()).expect("few");
+        w.ai_players.max_total_override = Some(have + 1);
+        ai_players::set_enabled(w, true);
+        ai_players::log_in_hunter_at(w, ground).expect("a hunter");
+        let mut hunter = None;
+        let mut fought = false;
+        let mut arrived = false;
+        for second in 0..300 {
+            ai_players::planner::Planner::wait(&mut l.ts.world, Duration::from_secs(60));
+            l.advance(1.0);
+            let w = &l.ts.world;
+            if second % 15 == 0 {
+                println!("{second} s: {:?}", ai_players::describe(w));
+            }
+            let Some((id, b)) = w.ai_players.bots.iter().find(|(_, b)| b.hunt.is_some()) else {
+                continue;
+            };
+            hunter = Some(*id);
+            let h = b.hunt.as_ref().expect("a hunter");
+            arrived |= h.arrived;
+            if h.kills > 0 {
+                fought = true;
+                break;
+            }
+        }
+        let id = hunter.expect("the hunter logged in");
+        let made =
+            l.ts.world
+                .objects
+                .get(ObjectGuid::new(id))
+                .and_then(WorldObject::level);
+        println!(
+            "Hunter level {made:?} for ground {ground:04X} (level {level}): arrived {arrived}, fought {fought}: {:?}",
+            ai_players::describe(&l.ts.world)
+        );
+        assert!(arrived, "the hunter reached its ground");
+        assert!(fought, "the hunter killed a monster");
+    }
+
+    /// `PROGRESS`/`RESULT` lines for a load run: the world's tick times over `ticks`, its
+    /// landblocks, objects and memory, the AI Players by kind, and the route planner's backlog.
+    fn load_line(kind: &str, l: &Loop, ticks: &mut [f64], extra: &str) -> String {
+        ticks.sort_by(f64::total_cmp);
+        #[allow(clippy::cast_precision_loss)]
+        let avg = ticks.iter().sum::<f64>() / ticks.len().max(1) as f64;
+        let p95 = ticks.get(ticks.len() * 95 / 100).copied().unwrap_or(0.0);
+        let max = ticks.last().copied().unwrap_or(0.0);
+        let w = &l.ts.world;
+        let bots = &w.ai_players.bots;
+        let in_world = bots.values().filter(|b| b.stage == Stage::InWorld).count();
+        let hunters = bots.values().filter(|b| b.hunt.is_some()).count();
+        let out = bots
+            .values()
+            .filter(|b| b.hunt.as_ref().is_some_and(|h| h.arrived))
+            .count();
+        let fighting = bots
+            .values()
+            .filter(|b| b.hunt.as_ref().is_some_and(|h| h.target.is_some()))
+            .count();
+        let (backlog, answered, busy) = ai_players::planner::Planner::stats(w);
+        let rss = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .ok()
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+            })
+            .map_or(0, |kb| kb / 1024);
+        format!(
+            "{kind} bots {in_world}/{} hunters {hunters} (at ground {out}, fighting {fighting}) \
+             tick avg {avg:.2} p95 {p95:.2} max {max:.1} ms, landblocks {}, objects {}, RSS {rss} MB, \
+             routes {answered} (planner {busy:.0} s, backlog {backlog}), failures {:?}{extra}",
+            bots.len(),
+            empyrean_world::managers::landblock_manager::get_loaded_landblocks(w).len(),
+            w.objects.len(),
+            w.ai_players.failures,
+        )
+    }
+
+    /// Runs the world one second at real speed, timing each tick.
+    fn real_second(l: &mut Loop, ticks: &mut Vec<f64>) {
+        let second = std::time::Instant::now();
+        for _ in 0..60 {
+            let t = std::time::Instant::now();
+            l.ts.step();
+            ticks.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        if let Some(rest) = Duration::from_secs(1).checked_sub(second.elapsed()) {
+            std::thread::sleep(rest);
+        }
+    }
+
+    /// A load run with hunters: 299 stand-in players spread as far apart as the land with
+    /// monsters allows, and the director filling towns and hunting grounds round them up to each
+    /// cap in `AI_PLAYERS_CAPS` (default 100,200,300,500), each then played for
+    /// `AI_PLAYERS_SECONDS` (default 120) at real speed. Prints a `PROGRESS` line every 10 s and
+    /// a `RESULT` line per cap. In release:
+    /// `cargo test --release -p empyrean-testkit --features real-content --test all ai_players_hunter_load -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a load run, by hand"]
+    fn ai_players_hunter_load() {
+        let caps: Vec<u32> = std::env::var("AI_PLAYERS_CAPS")
+            .unwrap_or_else(|_| "100,200,300,500".into())
+            .split(',')
+            .filter_map(|n| n.trim().parse().ok())
+            .collect();
+        let seconds: usize = std::env::var("AI_PLAYERS_SECONDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(120);
+        let players: usize = std::env::var("AI_PLAYERS_PLAYERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(299);
+        let mut l = create_character(&[44, 6, 21, 22, 24]);
+        l.enter_world();
+
+        // The stand-ins: farthest-point picks over every landblock with monsters outdoors.
+        let started = std::time::Instant::now();
+        let w = &mut l.ts.world;
+        let land: Vec<u16> = (0..=0xFFFFu16)
+            .filter(|&b| !ai_players::levels::of_block(w, b).is_empty())
+            .collect();
+        let at = |b: u16| ai_players::hunt::map_centre(b);
+        let mut picked = vec![ai_players::levels::block_at(42.28, 33.31)];
+        let mut nearest: Vec<f64> = land
+            .iter()
+            .map(|&b| ai_players::levels::distance_between(at(b), at(picked[0])))
+            .collect();
+        while picked.len() < players {
+            let (i, _) = nearest
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .expect("land");
+            let b = land[i];
+            picked.push(b);
+            for (j, &o) in land.iter().enumerate() {
+                nearest[j] = nearest[j].min(ai_players::levels::distance_between(at(o), at(b)));
+            }
+        }
+        let spacing = nearest.iter().copied().fold(0.0f64, f64::max);
+        println!(
+            "PROGRESS {} landblocks with monsters; {} stand-ins, none farther than {spacing:.0} m from one, in {:.1} s",
+            land.len(),
+            picked.len(),
+            started.elapsed().as_secs_f64()
+        );
+        w.ai_players.extra_anchors = picked.iter().map(|&b| at(b)).collect();
+        w.ai_players.fast_fill = true;
+        ai_players::set_enabled(w, true);
+
+        for &cap in &caps {
+            l.ts.world.ai_players.max_total_override = Some(cap);
+            // Fill to the cap at real speed, reporting every 10 s.
+            let fill = std::time::Instant::now();
+            let mut ticks = Vec::new();
+            let mut last = std::time::Instant::now();
+            // The most there have been, and since when: demand met is no more logins for 20 s.
+            let mut most = (0, std::time::Instant::now());
+            loop {
+                real_second(&mut l, &mut ticks);
+                let w = &l.ts.world;
+                let active = w
+                    .ai_players
+                    .bots
+                    .values()
+                    .filter(|b| b.stage == Stage::InWorld)
+                    .count();
+                let total = w.ai_players.bots.len();
+                if total > most.0 {
+                    most = (total, std::time::Instant::now());
+                }
+                let met = most.1.elapsed() >= Duration::from_secs(20);
+                let full = active >= usize::try_from(cap).unwrap_or(usize::MAX) || met;
+                if last.elapsed() >= Duration::from_secs(10) || full {
+                    last = std::time::Instant::now();
+                    println!(
+                        "{}",
+                        load_line(
+                            &format!(
+                                "PROGRESS cap {cap} filling {:.0} s:",
+                                fill.elapsed().as_secs_f64()
+                            ),
+                            &l,
+                            &mut ticks,
+                            ""
+                        )
+                    );
+                    ticks.clear();
+                }
+                if full || fill.elapsed() > Duration::from_secs(900) {
+                    break;
+                }
+            }
+            // Play at the cap.
+            let mut ticks = Vec::new();
+            let mut window = Vec::new();
+            let mut last = std::time::Instant::now();
+            for _ in 0..seconds {
+                let mut one = Vec::new();
+                real_second(&mut l, &mut one);
+                window.extend_from_slice(&one);
+                ticks.extend(one);
+                if last.elapsed() >= Duration::from_secs(10) {
+                    last = std::time::Instant::now();
+                    println!(
+                        "{}",
+                        load_line(&format!("PROGRESS cap {cap} playing:"), &l, &mut window, "")
+                    );
+                    window.clear();
+                }
+            }
+            println!(
+                "{}",
+                load_line(
+                    &format!("RESULT cap {cap}:"),
+                    &l,
+                    &mut ticks,
+                    &format!(
+                        ", filled in {:.0} s",
+                        fill.elapsed().as_secs_f64() - seconds as f64
+                    )
+                )
+            );
+        }
+    }
 }

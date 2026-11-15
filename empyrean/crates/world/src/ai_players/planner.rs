@@ -1,5 +1,6 @@
-//! Routes for AI Players: the shared route planner (`dereth-navigation`, the client's own) on a
-//! thread of its own, so planning never holds up the world.
+//! Routes for AI Players: the shared route planner (`dereth-navigation`, the client's own) on a few
+//! threads of their own, so planning never holds up the world. Each area of 4 by 4 landblocks is
+//! always planned by the same thread, so no area's map is built twice.
 //!
 //! The planner reads the land, buildings and setups from its own copies of the dat sources. The
 //! outdoor placements (landblock objects and scenery) are the server's, computed on the world
@@ -30,40 +31,74 @@ struct Request {
 pub struct Answer {
     pub bot: u32,
     pub route: Result<Vec<[f32; 3]>, String>,
+    /// The planner's seconds on it.
+    pub took: f64,
 }
 
 /// The world's half of the planner.
 pub struct Planner {
-    requests: Sender<Request>,
+    /// Each thread's requests, and the landblocks whose placements it has.
+    requests: Vec<Sender<Request>>,
+    sent: Vec<HashSet<u16>>,
     answers: Receiver<Answer>,
-    /// The landblocks whose placements the thread has.
-    sent: HashSet<u16>,
     /// Routes asked for and not yet answered.
     outstanding: usize,
     /// Answers taken by [`Planner::wait`], not yet handed out.
     ready: Vec<Answer>,
+    /// Routes answered, and the planner's seconds spent on them.
+    pub answered: u64,
+    pub busy_seconds: f64,
 }
 
 impl std::fmt::Debug for Planner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Planner")
-            .field("landblocks", &self.sent.len())
+            .field("threads", &self.requests.len())
             .finish_non_exhaustive()
     }
 }
 
 type Placements = Arc<Mutex<HashMap<u16, Vec<StaticPlacement>>>>;
 
+/// How many planner threads: half the machine's cores, from one to four.
+fn threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .div_ceil(2)
+        .clamp(1, 4)
+}
+
 impl Planner {
-    /// Starts the planner thread over the world's dats.
+    /// Starts the planner threads over the world's dats.
     #[must_use]
     pub fn start(w: &World) -> Self {
-        let (requests, inbox) = channel::<Request>();
         let (outbox, answers) = channel::<Answer>();
+        let mut requests = Vec::new();
+        for i in 0..threads() {
+            let (tx, inbox) = channel::<Request>();
+            requests.push(tx);
+            spawn(w, i, inbox, outbox.clone());
+        }
+        let n = requests.len();
+        Self {
+            requests,
+            sent: vec![HashSet::new(); n],
+            answers,
+            outstanding: 0,
+            ready: Vec::new(),
+            answered: 0,
+            busy_seconds: 0.0,
+        }
+    }
+}
+
+/// One planner thread, answering `inbox` into `outbox`.
+fn spawn(w: &World, i: usize, inbox: Receiver<Request>, outbox: Sender<Answer>) {
+    {
         let dats = Arc::clone(&w.dats);
         let land = phys_ext::dat_land_source(w);
         std::thread::Builder::new()
-            .name("ai-players-planner".into())
+            .name(format!("ai-players-planner-{i}"))
             .spawn(move || {
                 let land = land.unwrap_or_else(|| {
                     Arc::new(
@@ -118,34 +153,45 @@ impl Planner {
                         started.elapsed(),
                         route.as_ref().map(Vec::len)
                     );
-                    if outbox.send(Answer { bot: r.bot, route }).is_err() {
+                    let took = started.elapsed().as_secs_f64();
+                    if outbox
+                        .send(Answer {
+                            bot: r.bot,
+                            route,
+                            took,
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 }
             })
             .expect("the planner thread starts");
-        Self {
-            requests,
-            answers,
-            sent: HashSet::new(),
-            outstanding: 0,
-            ready: Vec::new(),
-        }
     }
+}
 
+impl Planner {
     /// Asks for a route for AI Player `bot` from `from` to within `reach` of `to`.
     pub fn ask(w: &mut World, bot: u32, from: &Position, to: &Position, reach: f32) {
         if w.ai_players.planner.is_none() {
             w.ai_players.planner = Some(Self::start(w));
         }
         let (from, to) = (nav_pos(from), nav_pos(to));
+        let n = w
+            .ai_players
+            .planner
+            .as_ref()
+            .map_or(1, |p| p.requests.len());
+        let lb = from.cell.0 >> 16;
+        let area = ((lb >> 8) / 4) * 64 + (lb & 0xFF) / 4;
+        let thread = usize::try_from(area).unwrap_or(0) % n;
         let mut statics = Vec::new();
         for b in blocks_between(&from, &to) {
             let known = w
                 .ai_players
                 .planner
                 .as_ref()
-                .is_some_and(|p| p.sent.contains(&b));
+                .is_some_and(|p| p.sent[thread].contains(&b));
             if !known {
                 statics.push((b, outdoor_placements(w, b)));
             }
@@ -154,10 +200,10 @@ impl Planner {
             return;
         };
         for (b, _) in &statics {
-            p.sent.insert(*b);
+            p.sent[thread].insert(*b);
         }
         p.outstanding += 1;
-        let _ = p.requests.send(Request {
+        let _ = p.requests[thread].send(Request {
             bot,
             from,
             to,
@@ -174,7 +220,18 @@ impl Planner {
         let mut out = std::mem::take(&mut p.ready);
         out.extend(p.answers.try_iter());
         p.outstanding = p.outstanding.saturating_sub(out.len());
+        p.answered += out.len() as u64;
+        p.busy_seconds += out.iter().map(|a| a.took).sum::<f64>();
         out
+    }
+
+    /// Routes asked for and not yet answered, routes answered, and the planner's seconds on them.
+    #[must_use]
+    pub fn stats(w: &World) -> (usize, u64, f64) {
+        w.ai_players
+            .planner
+            .as_ref()
+            .map_or((0, 0, 0.0), |p| (p.outstanding, p.answered, p.busy_seconds))
     }
 
     /// Waits up to `limit` for every route asked for: for a test running on virtual time, whose

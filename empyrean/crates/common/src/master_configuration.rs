@@ -78,6 +78,9 @@ pub struct AiPlayersConfiguration {
     /// The most AI Players in the world at once.
     #[serde(rename = "MaxTotal")]
     pub max_total: u32,
+    /// Past this many real players online, each one more takes one AI Player away.
+    #[serde(rename = "FadeFromPlayers")]
+    pub fade_from_players: u32,
     /// Town levels over the ones worked out from the land, as `Holtburg=5, Arwic=12`.
     #[serde(rename = "TownLevels")]
     pub town_levels: String,
@@ -86,8 +89,9 @@ pub struct AiPlayersConfiguration {
 impl Default for AiPlayersConfiguration {
     fn default() -> Self {
         Self {
-            leave_after_seconds: 60,
-            max_total: 60,
+            leave_after_seconds: 300,
+            max_total: 150,
+            fade_from_players: 300,
             town_levels: String::new(),
         }
     }

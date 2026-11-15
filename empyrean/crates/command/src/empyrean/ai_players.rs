@@ -67,7 +67,11 @@ pub fn handle_ai_players(w: &mut World, session: Option<SessionId>, parameters: 
         "status" => {
             let on = if ai_players::enabled(w) { "on" } else { "off" };
             let n = w.ai_players.bots.len();
-            say(w, &format!("AI Players are {on}, with {n} in the world."));
+            let cap = ai_players::cap(w);
+            say(
+                w,
+                &format!("AI Players are {on}, with {n} in the world of at most {cap}."),
+            );
         }
         _ => say(w, "Use: aiplayers on, off, status or list."),
     }

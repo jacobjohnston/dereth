@@ -1162,7 +1162,9 @@ pub fn send_teleported_via_magic_message(
 pub fn notify_landblocks(w: &mut World, this: ObjectGuid) {
     // notify current landblock of player activity
     if let Some(id) = w.objects.get(this).and_then(|o| o.current_landblock) {
-        crate::entity::landblock::set_active(w, id, false);
+        // Not ACE: an AI Player wakes only its own landblock, not the eight round it.
+        let own_only = crate::ai_players::is_ai_player(w, this.full());
+        crate::entity::landblock::set_active(w, id, own_only);
     }
 }
 

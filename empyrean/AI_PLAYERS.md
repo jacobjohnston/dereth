@@ -38,6 +38,11 @@ language models. This is a local feature (`local/ai-players`), not for upstream.
   towns and wilderness each one needs filled, and queue logins and log-offs.
 - **Brain.** Each AI Player reads the world directly and acts through the same handlers a
   client's messages reach (combat mode, attack, cast, use).
+- **Landblocks.** An AI Player keeps only its own landblock awake, not the eight round it as a
+  real player does, so a walking hunter's trail sleeps behind it.
+- **Settings.** `[ai_players]` in `empyrean.toml`: `leave_after_seconds` (300), `max_total` (150),
+  `fade_from_players` (300: past that many real players, each one more takes one AI Player away,
+  one every 5 seconds, the farthest from real players first) and `town_levels`.
 - **Build.** A new AI Player is made by the `playtest-character` pipeline: a level, an archetype,
   its XP and credits spent, and gear rolled from the tier it hunts at. Spells are its trained
   schools up to what it casts reliably. `SpellComponentsRequired` off and `SafeSpellComponents` on.
@@ -65,14 +70,54 @@ language models. This is a local feature (`local/ai-players`), not for upstream.
 4. Done. Level map: each outdoor landblock's creatures, from its encounters and outdoor
    generators (followed four deep), with their levels and chances, worked out as asked. A town's
    level is the median of the creatures in and next to its landblock (Holtburg 8, Arwic 15,
-   Fort Tethana 100), unless `[ai_players] town_levels` sets it. `leave_after_seconds` (60) and
-   `max_total` (60) are in the same section.
-5. Hunters.
+   Fort Tethana 100), unless `[ai_players] town_levels` sets it.
+5. Done. Hunters: the director serves whichever is shorter, a town near a real player or the
+   real player with the fewest hunters within 5 km (10 at most). A hunter's ground is a landblock
+   with monsters within 5 km of the player and at least 150 m from every real player; its level is
+   the ground's median monster level times 1.15, plus 3. It logs in at the nearest town, walks out,
+   and takes on the nearest monster on its ground (within 70 m of the centre, up to 3 levels above
+   itself, on awake land, not another hunter's, not within 40 m of a real player, not hurt by or
+   fighting a real player) in melee, with its bow or with its best single-target war or void
+   spell. It binds its wounds below 70% health out of a fight and 35% in one (its kits never run
+   out), its arrows are topped up, and after a death it walks back from its lifestone. A real
+   player no hunter could be placed near is passed over for two minutes.
 6. Town buffers.
 7. Tests and soak runs with AI Players on.
+
+## Load
+
+Two load runs, by hand, in release (`ai_players_load`, `ai_players_hunter_load` in the test kit;
+the commands are in their docs). The world's tick has 16.7 ms at 60 a second. Measured on an
+18-core Mac, End of Retail content.
+
+Town AI Players only, spread over all 33 towns:
+
+| AI Players | tick avg | tick p95 | landblocks | memory |
+|---|---|---|---|---|
+| 50 | 1.3 ms | 2.4 ms | 318 | 1.1 GB |
+| 300 | 1.4 ms | 2.3 ms | 352 | 1.2 GB |
+
+299 stand-in players spread as far apart as the land allows (none farther than 1.9 km from one),
+towns and hunters filled round them, each cap played two minutes at real speed. Bots waking their
+whole 3x3 (before) and only their own landblock (after):
+
+| cap | hunters | tick avg | tick p95 | worst | landblocks | memory |
+|---|---|---|---|---|---|---|
+| 100, before | 79 | 3.5 ms | 6.6 ms | 39 ms | 955 | 1.8 GB |
+| 200, before | 158 | 10.5 ms | 15.6 ms | 107 ms | 1,889 | 2.4 GB |
+| 300, before | 234 | 13.8 ms | 20.4 ms | 439 ms | 2,530 | 2.9 GB |
+| 200, after | 159 | 4.6 ms | 9.4 ms | 91 ms | 1,368 | 2.2 GB |
+| 300, after | 239 | 10.4 ms | 16.5 ms | 127 ms | 2,290 | 2.7 GB |
+
+The cost follows the landblocks loaded, and most of those are hunters' trails out of town. The
+stand-ins load no landblocks of their own; 299 real players would. Filling a hundred at once
+costs a few ticks of 30 to 70 ms (each new AI Player is built on the world thread). The route
+planner runs on up to four threads and answers about eight routes a second.
 
 ## Open
 
 - The 1999 Launch world's loot rolls make no weapons or jewellery, so it needs its own gear.
   The 2005 world needs checking. Both cap at level 126. End of Retail comes first.
-- Each AI Player keeps its 3x3 landblocks loaded: a global cap, measured with the soak runs.
+- New AI Players are built on the world thread (20 to 30 ms each in release).
+- `emote_manager` panics now and then on an object already gone (caught; seen in load runs, not
+  an AI Players change).

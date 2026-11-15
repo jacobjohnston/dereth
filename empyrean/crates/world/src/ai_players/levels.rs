@@ -131,6 +131,12 @@ pub fn block_at(ns: f64, ew: f64) -> u16 {
     at(ew) << 8 | at(ns)
 }
 
+/// Metres between two map coordinates (north, east).
+#[must_use]
+pub fn distance_between(a: (f64, f64), b: (f64, f64)) -> f64 {
+    dereth_primitives::num::math::hypot(a.0 - b.0, a.1 - b.1) * 240.0
+}
+
 /// Town levels the operator set (`[ai_players] town_levels`), by name.
 fn overrides() -> HashMap<String, u32> {
     let text = empyrean_common::config_manager::ConfigManager::try_config()

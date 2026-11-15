@@ -680,6 +680,12 @@ pub const SECTIONS: &[Section] = &[
                 "The most AI Players in the world at once.",
             ),
             e(
+                "fade_from_players",
+                "FadeFromPlayers",
+                "Past this many real players online, each one more takes one AI Player away, one at a\n\
+                 time.",
+            ),
+            e(
                 "town_levels",
                 "TownLevels",
                 "Town levels over the ones worked out from the land, as \"Holtburg=5, Arwic=12\".",

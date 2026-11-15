@@ -220,6 +220,44 @@ pub fn go(w: &mut World, id: u32, to: [f32; 2], reach: f32) {
     plan(w, id);
 }
 
+/// AI Player `id` runs straight at world metres `to` (a monster that moves), to within `reach`.
+pub fn chase(w: &mut World, id: u32, p: ObjectGuid, to: [f32; 2], reach: f32, now: f64) {
+    let Some(bot) = w.ai_players.bots.get_mut(&id) else {
+        return;
+    };
+    let moved = bot.walk.as_ref().is_none_or(|wk| {
+        wk.outcome.is_some() || m::hypotf(wk.to[0] - to[0], wk.to[1] - to[1]) > 2.0
+    });
+    if moved {
+        let carried = bot.walk.take();
+        bot.walk = Some(Walk {
+            to,
+            reach,
+            route: Some(vec![[to[0], to[1], 0.0]]),
+            next: 0,
+            moving: carried
+                .as_ref()
+                .is_some_and(|wk| wk.moving && wk.outcome.is_none()),
+            next_step: 0.0,
+            check_at: 0.0,
+            check_from: [0.0, 0.0],
+            replans: REPLANS,
+            outcome: None,
+        });
+    }
+    step(w, id, p, now);
+}
+
+/// AI Player `id` stops where it is, if it was walking.
+pub fn halt_here(w: &mut World, id: u32, p: ObjectGuid) {
+    let Some(walk) = w.ai_players.bots.get_mut(&id).and_then(|b| b.walk.take()) else {
+        return;
+    };
+    if walk.moving && walk.outcome.is_none() {
+        stand(w, id, p);
+    }
+}
+
 /// Plans AI Player `id`'s next hop from where it stands.
 fn plan(w: &mut World, id: u32) {
     let Some(p) = w

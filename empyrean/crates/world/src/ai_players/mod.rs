@@ -6,6 +6,7 @@
 //! for an AI Player), and every few seconds the director logs AI Players in near real players and
 //! out again when none is near.
 
+pub mod hunt;
 pub mod levels;
 pub mod names;
 pub mod planner;
@@ -111,6 +112,8 @@ pub struct Bot {
     /// When it next does something.
     pub idle_until: f64,
     pub sitting: bool,
+    /// A hunter's ground and fight; `None` for a town AI Player.
+    pub hunt: Option<hunt::Hunt>,
 }
 
 /// The world's AI Players.
@@ -129,6 +132,21 @@ pub struct AiPlayersState {
     planner: Option<planner::Planner>,
     /// The land's monster levels, worked out as asked.
     pub levels: levels::Levels,
+    /// Keeps every AI Player in whether or not a real player is near (load runs).
+    pub pinned: bool,
+    /// `max_total` over the configuration's (load runs).
+    pub max_total_override: Option<u32>,
+    /// Stand-ins for real players, as map coordinates (load runs).
+    pub extra_anchors: Vec<(f64, f64)>,
+    /// Logins as fast as the director can make them (load runs).
+    pub fast_fill: bool,
+    /// When the next AI Player may leave because real players are many.
+    next_fade: f64,
+    /// Real players no hunter could be placed near lately, by where they stand (tenths of a map
+    /// unit), and until when they are passed over.
+    barren: HashMap<(i32, i32), f64>,
+    /// Logins that failed, by why (for operators and load runs).
+    pub failures: std::collections::BTreeMap<String, u32>,
 }
 
 impl AiPlayersState {
@@ -218,6 +236,23 @@ pub fn real_players_online(w: &World) -> Vec<ObjectGuid> {
         .collect()
 }
 
+/// How many AI Players the world may hold now: `max_total`, less one for each real player online
+/// past `fade_from_players`.
+#[must_use]
+pub fn cap(w: &World) -> usize {
+    let s = settings();
+    let real = u32::try_from(real_online_count(w).max(0)).unwrap_or(0);
+    let max_total = w.ai_players.max_total_override.unwrap_or(s.max_total);
+    cap_of(max_total, s.fade_from_players, real)
+}
+
+/// [`cap`] for `real` players online.
+#[must_use]
+pub fn cap_of(max_total: u32, fade_from: u32, real: u32) -> usize {
+    let over = real.saturating_sub(fade_from);
+    usize::try_from(max_total.saturating_sub(over)).unwrap_or(usize::MAX)
+}
+
 /// How many players are online, not counting AI Players.
 #[must_use]
 pub fn real_online_count(w: &World) -> i32 {
@@ -240,7 +275,12 @@ pub fn tick(w: &mut World) {
     if now < w.ai_players.next_director {
         return;
     }
-    w.ai_players.next_director = now + DIRECTOR_EVERY;
+    w.ai_players.next_director = now
+        + if w.ai_players.fast_fill {
+            0.1
+        } else {
+            DIRECTOR_EVERY
+        };
     direct(w, now);
 }
 
@@ -311,8 +351,16 @@ fn advance(w: &mut World, now: f64) {
             Stage::InWorld => {
                 let Some(p) = player else { continue };
                 if teleporting(w, p) {
-                    // Died, or sent somewhere: it comes out the other side as a client would.
+                    // Died, or sent somewhere: it comes out the other side as a client would,
+                    // and a hunter walks back to its ground.
                     set_stage(w, id, Stage::Teleporting { since: now });
+                    if let Some(b) = w.ai_players.bots.get_mut(&id) {
+                        b.walk = None;
+                        if let Some(h) = b.hunt.as_mut() {
+                            h.arrived = false;
+                            h.target = None;
+                        }
+                    }
                 } else if !bot.placed {
                     send_to_town(w, id, p, bot.town);
                     set_stage(w, id, Stage::Teleporting { since: now });
@@ -356,6 +404,7 @@ const WANDER: f32 = 40.0;
 /// Each AI Player in the world does what it is doing: walks on, or, idle long enough, sets off
 /// somewhere in town or sits down for a while.
 fn live(w: &mut World, now: f64) {
+    let anchors = anchors(w);
     let ids: Vec<u32> = w
         .ai_players
         .bots
@@ -375,7 +424,11 @@ fn live(w: &mut World, now: f64) {
         if w.objects.get(p).is_none() || teleporting(w, p) {
             continue;
         }
-        town_life(w, id, p, now);
+        if w.ai_players.bots.get(&id).is_some_and(|b| b.hunt.is_some()) {
+            hunt::live(w, id, p, now, &anchors);
+        } else {
+            town_life(w, id, p, now);
+        }
     }
 }
 
@@ -514,6 +567,15 @@ fn resupply(w: &mut World, p: ObjectGuid) {
     }
     let mana = o.mana();
     crate::world_objects::creature_vitals::update_vital_delta(w, p, mana, 1_000_000);
+    // Nor of arrows.
+    if let Some(ammo) = crate::world_objects::creature_equipment::get_equipped_ammo(w, p) {
+        if let Some(a) = w.objects.get_mut(ammo) {
+            let max = i32::from(a.max_stack_size().unwrap_or(1));
+            if a.stack_size().unwrap_or(0) < max / 2 {
+                a.set_stack_size(Some(max));
+            }
+        }
+    }
 }
 
 /// Sends AI Player `id` through a portal to a spot near the centre of town `town`.
@@ -558,7 +620,7 @@ fn distance_m(a: (f64, f64), b: (f64, f64)) -> f64 {
 
 /// Where each real player counts from: where they stand, or where they last stood outdoors.
 fn anchors(w: &mut World) -> Vec<(f64, f64)> {
-    let mut out = Vec::new();
+    let mut out = w.ai_players.extra_anchors.clone();
     for g in real_players_online(w) {
         let Some(pos) = w.objects.get(g).and_then(|o| o.location()) else {
             continue;
@@ -609,7 +671,12 @@ fn direct(w: &mut World, now: f64) {
         if bot.stage == Stage::LoggingOut {
             continue;
         }
-        if near(&towns::TOWNS[bot.town], KEEP_RADIUS) {
+        let at = bot.hunt.as_ref().map_or_else(
+            || (towns::TOWNS[bot.town].ns, towns::TOWNS[bot.town].ew),
+            |h| hunt::map_centre(h.ground),
+        );
+        let kept = anchors.iter().any(|a| distance_m(*a, at) <= KEEP_RADIUS);
+        if w.ai_players.pinned || kept {
             if let Some(b) = w.ai_players.bots.get_mut(&id) {
                 b.alone_since = None;
             }
@@ -636,8 +703,31 @@ fn direct(w: &mut World, now: f64) {
         .values()
         .filter(|b| b.stage != Stage::LoggingOut)
         .count();
-    let max_total = usize::try_from(settings().max_total).unwrap_or(usize::MAX);
-    if loading || now < w.ai_players.next_login || active >= max_total {
+    // Out: one at a time while there are more than the cap, the one farthest from real players
+    // first.
+    let cap = cap(w);
+    if active > cap && now >= w.ai_players.next_fade {
+        w.ai_players.next_fade = now + LOGIN_EVERY;
+        let farthest = w
+            .ai_players
+            .bots
+            .iter()
+            .filter(|(_, b)| b.stage != Stage::LoggingOut)
+            .map(|(id, b)| {
+                let t = towns::TOWNS[b.town];
+                let d = anchors
+                    .iter()
+                    .map(|a| distance_m(*a, (t.ns, t.ew)))
+                    .fold(f64::INFINITY, f64::min);
+                (*id, d)
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(id, _)| id);
+        if let Some(id) = farthest {
+            log_out(w, id);
+        }
+    }
+    if loading || now < w.ai_players.next_login || active >= cap {
         return;
     }
     let mut short: Vec<(usize, usize)> = towns::of_era(w.era.id)
@@ -654,12 +744,78 @@ fn direct(w: &mut World, now: f64) {
         .filter(|(_, short)| *short > 0)
         .collect();
     short.sort_by_key(|s| std::cmp::Reverse(s.1));
-    if let Some(&(town, _)) = short.first() {
-        w.ai_players.next_login = now + LOGIN_EVERY;
-        if let Err(e) = log_in(w, town, now) {
-            log::warn!("AI Players: no login for {}: {e}", towns::TOWNS[town].name);
+    // The real player with the fewest hunters within 5 km of them.
+    let hunters: Vec<(f64, f64)> = w
+        .ai_players
+        .bots
+        .values()
+        .filter(|b| b.stage != Stage::LoggingOut)
+        .filter_map(|b| b.hunt.as_ref().map(|h| hunt::map_centre(h.ground)))
+        .collect();
+    w.ai_players.barren.retain(|_, until| *until > now);
+    let barren = &w.ai_players.barren;
+    let wild = anchors
+        .iter()
+        .filter(|a| !barren.contains_key(&barren_key(**a)))
+        .map(|a| {
+            let have = hunters
+                .iter()
+                .filter(|h| distance_m(*a, **h) <= SPAWN_RADIUS)
+                .count();
+            (*a, hunt::PER_PLAYER.saturating_sub(have))
+        })
+        .max_by_key(|(_, short)| *short)
+        .filter(|(_, short)| *short > 0);
+    let town_short = short.first().map_or(0, |s| s.1);
+    w.ai_players.next_login = now
+        + if w.ai_players.fast_fill {
+            0.0
+        } else {
+            LOGIN_EVERY
+        };
+    match wild {
+        Some((at, wild_short)) if wild_short >= town_short => {
+            let ground = hunt::pick_ground(w, at, SPAWN_RADIUS, &anchors, 150.0);
+            let failed = match ground.map(|g| log_in_hunter(w, g, now)) {
+                Some(Err(e)) => {
+                    log::warn!("AI Players: no hunter login: {e}");
+                    *w.ai_players.failures.entry(e).or_default() += 1;
+                    true
+                }
+                None => {
+                    log::debug!("AI Players: no hunting ground near {at:?}");
+                    *w.ai_players
+                        .failures
+                        .entry("no hunting ground".into())
+                        .or_default() += 1;
+                    true
+                }
+                Some(Ok(())) => false,
+            };
+            // Pass this player over for a while, so the others are served.
+            if failed {
+                w.ai_players.barren.insert(barren_key(at), now + BARREN_FOR);
+            }
+        }
+        _ => {
+            if let Some(&(town, _)) = short.first() {
+                if let Err(e) = log_in(w, town, now) {
+                    log::warn!("AI Players: no login for {}: {e}", towns::TOWNS[town].name);
+                    *w.ai_players.failures.entry(e).or_default() += 1;
+                }
+            }
         }
     }
+}
+
+/// Seconds a real player no hunter could be placed near is passed over.
+const BARREN_FOR: f64 = 120.0;
+
+/// A real player's spot as a key: tenths of a map unit (24 m).
+fn barren_key(at: (f64, f64)) -> (i32, i32) {
+    #[allow(clippy::cast_possible_truncation)]
+    let k = |v: f64| (v * 10.0).round() as i32;
+    (k(at.0), k(at.1))
 }
 
 /// Logs AI Player `id` out, as a player who asks to.
@@ -685,11 +841,60 @@ fn levels_for(w: &mut World, town: usize) -> (u32, u32) {
     (low, (low + 20).min(max))
 }
 
+/// Logs in an AI Player for town `town` now, near a real player or not (load runs).
+///
+/// # Errors
+/// Why none could be.
+pub fn log_in_at(w: &mut World, town: usize) -> Result<(), String> {
+    if w.ai_players.account_id.is_none() && !ensure_account(w) {
+        return Err("no account".into());
+    }
+    let now = now(w);
+    log_in(w, town, now)
+}
+
+/// Logs in a hunter for ground `ground` now, near a real player or not (load runs and tests).
+///
+/// # Errors
+/// Why none could be.
+pub fn log_in_hunter_at(w: &mut World, ground: u16) -> Result<(), String> {
+    if w.ai_players.account_id.is_none() && !ensure_account(w) {
+        return Err("no account".into());
+    }
+    let now = now(w);
+    log_in_hunter(w, ground, now)
+}
+
 /// Logs in an AI Player for town `town`: one of the pool of its level when there is one, a new
 /// one otherwise.
 fn log_in(w: &mut World, town: usize, now: f64) -> Result<(), String> {
-    let account_id = w.ai_players.account_id.ok_or("no account")?;
     let (low, high) = levels_for(w, town);
+    log_in_as(w, town, None, (low, high), now)
+}
+
+/// Logs in a hunter for ground `ground`, at the town nearest it.
+fn log_in_hunter(w: &mut World, ground: u16, now: f64) -> Result<(), String> {
+    let level = hunt::level_for(w, ground).ok_or("no monsters there")?;
+    let max = crate::world_objects::player_xp::get_max_level(w);
+    let town = hunt::nearest_town(w, hunt::map_centre(ground));
+    log_in_as(
+        w,
+        town,
+        Some(ground),
+        (level.saturating_sub(2).max(1), (level + 2).min(max)),
+        now,
+    )
+}
+
+/// Logs in an AI Player of a level from `low` to `high` at town `town`, hunting `ground` if given.
+fn log_in_as(
+    w: &mut World,
+    town: usize,
+    ground: Option<u16>,
+    (low, high): (u32, u32),
+    now: f64,
+) -> Result<(), String> {
+    let account_id = w.ai_players.account_id.ok_or("no account")?;
     let pool: Vec<u32> = w
         .player_manager
         .offline_players
@@ -746,6 +951,7 @@ fn log_in(w: &mut World, town: usize, now: f64) -> Result<(), String> {
             stamp: 0,
             idle_until: now + 3.0,
             sitting: false,
+            hunt: ground.map(hunt::Hunt::new),
         },
     );
     world_manager::player_enter_world(w, session, character);
@@ -797,7 +1003,32 @@ pub fn describe(w: &World) -> Vec<String> {
                 Stage::InWorld => "in the world",
                 Stage::LoggingOut => "logging out",
             };
-            format!("{MARKER}{name}: {}, {stage}", towns::TOWNS[b.town].name)
+            let place = b.hunt.as_ref().map_or_else(
+                || towns::TOWNS[b.town].name.to_owned(),
+                |h| {
+                    let (ns, ew) = hunt::map_centre(h.ground);
+                    let fighting = format!(
+                        "{}, {} attacks, {} kills, {} dropped{}",
+                        if h.target.is_some() { ", fighting" } else { "" },
+                        h.attacks,
+                        h.kills,
+                        h.dropped,
+                        if h.why.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" (last {})", h.why)
+                        }
+                    );
+                    format!(
+                        "hunting at {:.1}{} {:.1}{}{fighting}",
+                        ns.abs(),
+                        if ns < 0.0 { 'S' } else { 'N' },
+                        ew.abs(),
+                        if ew < 0.0 { 'W' } else { 'E' }
+                    )
+                },
+            );
+            format!("{MARKER}{name}: {place}, {stage}")
         })
         .collect()
 }
@@ -805,6 +1036,15 @@ pub fn describe(w: &World) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn past_the_fade_each_real_player_takes_one_ai_player_away() {
+        assert_eq!(cap_of(300, 300, 0), 300);
+        assert_eq!(cap_of(300, 300, 300), 300);
+        assert_eq!(cap_of(300, 300, 301), 299);
+        assert_eq!(cap_of(300, 300, 450), 150);
+        assert_eq!(cap_of(300, 300, 900), 0);
+    }
 
     #[test]
     fn a_spell_level_is_learned_when_its_hardest_spells_succeed_nine_times_in_ten() {

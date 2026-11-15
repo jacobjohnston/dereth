@@ -288,6 +288,32 @@ place	<kind>	published	<wcid>	<name>	<at>	0	0	-	<to or ->
 - The two zeros are when the place was first and last seen, which a server does not know, and the
   `-` is a house's owner, which it never names.
 
+`GET /places?version=2` answers version 2, which is the same places followed by the world's map
+marks: what a map needs worked out from everything the world places. A reader of version 1 refuses
+version 2, so `/places` alone stays version 1.
+
+```
+dereth-places-store	2
+world	<world name>
+place	…	(as in version 1)
+mark	<kind>	<name>	<at>	<detail or ->
+```
+
+- The kinds, in the order they are listed: `town` and `landmark` (the retail map's towns, points
+  of interest and smaller settlements, those of the world's era; a town where its vendors and
+  lifestone stand), `cottage`, `villa`, `mansion` (each house's slumlord), `lifestone`, `dungeon` (a
+  portal on the land into a dungeon, its detail what the dungeon holds), `portal` (a portal on the
+  land to elsewhere on the land), `drop` (where such a portal leads), `meeting_hall`, `apartments`,
+  `vendor`, `npc` (a creature that cannot be attacked and has something to say), `collector` (one
+  that also takes items), `bindstone`, `spawn` (neighbouring landblocks whose encounters come
+  mostly from one region generator, its detail the levels and commonest creatures) and `camp` (the
+  creatures and generators placed outdoors in one landblock).
+- What stands in a dungeon is not marked; its entrances' detail sums it up. A room the outside can
+  be seen from (the cell dat's `SeenOutside`) is a building's, and what stands in it is marked.
+- `at` is the outdoor position of the mark's spot, at height 0. The detail is sentences, joined by
+  an escaped line feed (`\n`). Names and details are written as the places write names.
+- Within a kind, marks are in name order, then by spot.
+
 ## License
 
 AGPL-3.0-only (see `LICENSE`). The server is derived from ACE, and its era rules from ClassicACE,

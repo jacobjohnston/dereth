@@ -71,7 +71,9 @@ pub use journey::{
 };
 pub use path::{global, global_distance};
 pub use path::{End, NavPath, NoPath, Waypoint, WaypointAction};
-pub use places::{KnownPlace, PlaceKind, PlaceStore, PortalUseWatch, PLACES_VERSION};
+pub use places::{
+    KnownPlace, MarkKind, PlaceKind, PlaceMark, PlaceStore, PortalUseWatch, PLACES_VERSION,
+};
 pub use portals::{
     EdgeSource, PortalEdge, PortalSighting, PortalStore, Recall, RecallEdge, StoreError,
     TeleportOutcome, TeleportWatch, STORE_VERSION,

@@ -198,8 +198,8 @@ fn the_store_reads_back_as_written_and_names_another_world() {
     assert_eq!(back.world, s.world);
     assert_eq!(back.places(), s.places());
     assert_eq!(
-        PlaceStore::from_text("dereth-places-store\t2\n"),
-        Err(StoreError::Version(2))
+        PlaceStore::from_text("dereth-places-store\t3\n"),
+        Err(StoreError::Version(3))
     );
     assert_eq!(
         PlaceStore::from_text("dereth-navigation-store\t1\n"),
@@ -210,6 +210,40 @@ fn the_store_reads_back_as_written_and_names_another_world() {
         PlaceStore::from_text(later).map(|s| s.places().len()),
         Ok(0)
     );
+}
+
+#[test]
+fn version_two_reads_the_map_marks_and_a_store_without_marks_is_written_as_version_one() {
+    let text = "dereth-places-store\t2\nworld\tLocal\n\
+        place\tlifestone\tpublished\t509\tLife Stone\t0xA9B40021 80.000 5.000 94.000\t0\t0\t-\t-\n\
+        mark\ttown\tHoltburg\t0xA9B4001F 81.000 160.000 0.000\t-\n\
+        mark\tdungeon\tDrudge Hideout\t0xA9B40021 84.000 7.500 0.000\tFor levels 5 and up.\\nHolds a vendor.\n\
+        mark\tshrine\tLater Kind\t0xA9B40021 84.000 7.500 0.000\t-\n\
+        mark\tcamp\tDrudge\t0xA9B40021 84.000 7.500 0.000\t-\tlater field\n";
+    let store = PlaceStore::from_text(text).expect("reads");
+    assert_eq!(store.places().len(), 1);
+    let marks = store.marks();
+    assert_eq!(
+        marks.iter().map(|m| m.kind).collect::<Vec<_>>(),
+        [MarkKind::Town, MarkKind::Dungeon, MarkKind::Camp],
+        "a kind this client does not know is passed over"
+    );
+    assert_eq!(
+        marks[1].detail.as_deref(),
+        Some("For levels 5 and up.\nHolds a vendor.")
+    );
+    assert_eq!(marks[0].at.cell.0, 0xA9B4_001F);
+    let back = PlaceStore::from_text(&store.to_text()).expect("reads back");
+    assert_eq!(back.marks(), store.marks());
+    assert!(store.to_text().starts_with("dereth-places-store\t2\n"));
+    let plain = store.without(EdgeSource::Hint);
+    assert_eq!(plain.marks(), store.marks());
+    assert!(PlaceStore::new("w")
+        .to_text()
+        .starts_with("dereth-places-store\t1\n"));
+    // A mark in a version-1 store is no line of that version.
+    let early = "dereth-places-store\t1\nworld\tw\nmark\ttown\tX\t0x00000001 0 0 0\t-\n";
+    assert!(PlaceStore::from_text(early).is_err());
 }
 
 fn portal() -> PortalSighting {

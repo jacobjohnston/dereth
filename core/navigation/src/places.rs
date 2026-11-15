@@ -13,6 +13,11 @@
 //!
 //! The store is text, one place a line, so it diffs and survives being edited by hand; see
 //! [`PlaceStore::to_text`].
+//!
+//! Version 2 of the store adds a world's map marks ([`PlaceMark`]): what its server works out for
+//! a map from everything it places, such as a dungeon's entrance and what it holds, the areas
+//! where creatures spawn, and the towns and landmarks of its era. A server publishes them to a
+//! client that asks for version 2.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -23,8 +28,8 @@ use crate::path::global_distance;
 use crate::portals::{escape, opt, read_opt, read_position, unescape, write_position};
 use crate::{EdgeSource, PortalSighting, StoreError};
 
-/// The place store's format version, the first line's second field.
-pub const PLACES_VERSION: u32 = 1;
+/// The place store's format version, the first line's second field: 2 adds the map marks.
+pub const PLACES_VERSION: u32 = 2;
 
 /// The object-description flags a place is told by.
 mod flag {
@@ -135,6 +140,107 @@ impl KnownPlace {
     }
 }
 
+/// What a mark on a world's map is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MarkKind {
+    /// A major town, where its vendors and lifestone stand in this world.
+    Town,
+    /// A smaller place the game's map names, or a region.
+    Landmark,
+    Cottage,
+    Villa,
+    Mansion,
+    /// A lifestone on the land or in a building.
+    Lifestone,
+    /// A portal on the land into a dungeon, named for it; its detail says what the dungeon holds.
+    Dungeon,
+    /// A portal on the land to elsewhere on the land.
+    Portal,
+    /// Where a portal on the land leads.
+    Drop,
+    /// A town's meeting hall portal.
+    MeetingHall,
+    /// A portal into a block of apartments.
+    Apartments,
+    /// A vendor on the land or in a building.
+    Vendor,
+    /// A person who cannot be attacked and has something to say.
+    Npc,
+    /// A person who also takes items: where quests are turned in.
+    Collector,
+    /// An allegiance bindstone.
+    Bindstone,
+    /// Neighbouring landblocks where one region's creatures spawn.
+    Spawn,
+    /// The creatures and generators placed outdoors in one landblock.
+    Camp,
+}
+
+impl MarkKind {
+    /// Every kind, in the order a server lists them.
+    pub const ALL: [Self; 17] = [
+        Self::Town,
+        Self::Landmark,
+        Self::Cottage,
+        Self::Villa,
+        Self::Mansion,
+        Self::Lifestone,
+        Self::Dungeon,
+        Self::Portal,
+        Self::Drop,
+        Self::MeetingHall,
+        Self::Apartments,
+        Self::Vendor,
+        Self::Npc,
+        Self::Collector,
+        Self::Bindstone,
+        Self::Spawn,
+        Self::Camp,
+    ];
+
+    /// The kind as one word, as the store writes it.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Town => "town",
+            Self::Landmark => "landmark",
+            Self::Cottage => "cottage",
+            Self::Villa => "villa",
+            Self::Mansion => "mansion",
+            Self::Lifestone => "lifestone",
+            Self::Dungeon => "dungeon",
+            Self::Portal => "portal",
+            Self::Drop => "drop",
+            Self::MeetingHall => "meeting_hall",
+            Self::Apartments => "apartments",
+            Self::Vendor => "vendor",
+            Self::Npc => "npc",
+            Self::Collector => "collector",
+            Self::Bindstone => "bindstone",
+            Self::Spawn => "spawn",
+            Self::Camp => "camp",
+        }
+    }
+
+    /// Read [`Self::word`].
+    #[must_use]
+    pub fn parse(w: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.word() == w)
+    }
+}
+
+/// A mark on a world's map, as its server works it out from everything it places.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlaceMark {
+    pub kind: MarkKind,
+    pub name: String,
+    /// Its spot, out of doors.
+    pub at: Position,
+    /// More about it, a sentence a line: where a portal leads and who may use it, what a
+    /// dungeon holds, which creatures spawn and at what levels.
+    pub detail: Option<String>,
+}
+
 /// The landblock a place stands in.
 const fn block(at: &Position) -> u32 {
     at.cell.0 >> 16
@@ -146,6 +252,8 @@ pub struct PlaceStore {
     /// The world these places are of: the server's own identity, never mixed with another's.
     pub world: String,
     places: Vec<KnownPlace>,
+    /// The world's map marks, as its server published them.
+    marks: Vec<PlaceMark>,
     /// Each kind's places by the landblock they stand in, so a place is found among its
     /// neighbours alone: a world's server may publish thousands.
     index: HashMap<(PlaceKind, u32), Vec<usize>>,
@@ -164,7 +272,7 @@ impl PlaceStore {
     }
 
     /// The store of `places`, in that order.
-    fn of(world: String, places: Vec<KnownPlace>, revision: u64) -> Self {
+    fn of(world: String, places: Vec<KnownPlace>, marks: Vec<PlaceMark>, revision: u64) -> Self {
         let mut index: HashMap<(PlaceKind, u32), Vec<usize>> = HashMap::new();
         for (i, p) in places.iter().enumerate() {
             index.entry((p.kind, block(&p.at))).or_default().push(i);
@@ -172,6 +280,7 @@ impl PlaceStore {
         Self {
             world,
             places,
+            marks,
             index,
             revision,
         }
@@ -204,6 +313,12 @@ impl PlaceStore {
     #[must_use]
     pub fn places(&self) -> &[KnownPlace] {
         &self.places
+    }
+
+    /// The world's map marks; none unless its server published version 2.
+    #[must_use]
+    pub fn marks(&self) -> &[PlaceMark] {
+        &self.marks
     }
 
     /// Goes up by one each time the store changes.
@@ -279,6 +394,7 @@ impl PlaceStore {
                 .filter(|p| p.source != source)
                 .cloned()
                 .collect(),
+            self.marks.clone(),
             self.revision,
         )
     }
@@ -289,14 +405,21 @@ impl PlaceStore {
     /// dereth-places-store<TAB>1
     /// world<TAB><identity>
     /// place<TAB>kind<TAB>source<TAB>wcid<TAB>name<TAB>at<TAB>first seen<TAB>last seen<TAB>owner<TAB>to
+    /// mark<TAB>kind<TAB>name<TAB>at<TAB>detail
     /// ```
     ///
-    /// A position is `0xCELLID x y z`; an absent value is `-`; names have their tabs, line
-    /// breaks and backslashes escaped.
+    /// A position is `0xCELLID x y z`; an absent value is `-`; names and details have their tabs,
+    /// line breaks and backslashes escaped. A store with no marks is written as version 1, which
+    /// every reader reads.
     #[must_use]
     pub fn to_text(&self) -> String {
+        let version = if self.marks.is_empty() {
+            1
+        } else {
+            PLACES_VERSION
+        };
         let mut out = format!(
-            "dereth-places-store\t{PLACES_VERSION}\nworld\t{}\n",
+            "dereth-places-store\t{version}\nworld\t{}\n",
             escape(&self.world)
         );
         for p in &self.places {
@@ -315,11 +438,24 @@ impl PlaceStore {
                     .map_or_else(|| String::from("-"), write_position),
             );
         }
+        for m in &self.marks {
+            let _ = writeln!(
+                out,
+                "mark\t{}\t{}\t{}\t{}",
+                m.kind.word(),
+                escape(&m.name),
+                write_position(&m.at),
+                m.detail
+                    .as_deref()
+                    .map_or_else(|| String::from("-"), escape),
+            );
+        }
         out
     }
 
-    /// Read a store written by [`Self::to_text`]. A line of a kind this client does not know is
-    /// passed over, so a later client's store still reads.
+    /// Read a store written by [`Self::to_text`], of either version. A line of a kind this client
+    /// does not know is passed over, and so are the fields after those it knows, so a later
+    /// client's store still reads.
     ///
     /// # Errors
     /// [`StoreError`] for text that is not a place store, a newer version, or a line that does
@@ -347,7 +483,7 @@ impl PlaceStore {
             let bad = |what: &str| StoreError::Line(n + 1, what.to_owned());
             match f.first().copied() {
                 Some("world") => store.world = unescape(f.get(1).copied().unwrap_or("")),
-                Some("place") if f.len() == 10 => {
+                Some("place") if f.len() >= 10 => {
                     let Some(kind) = PlaceKind::parse(f[1]) else {
                         continue;
                     };
@@ -367,10 +503,26 @@ impl PlaceStore {
                         },
                     });
                 }
+                Some("mark") if version >= 2 && f.len() >= 5 => {
+                    let Some(kind) = MarkKind::parse(f[1]) else {
+                        continue;
+                    };
+                    store.marks.push(PlaceMark {
+                        kind,
+                        name: unescape(f[2]),
+                        at: read_position(f[3]).ok_or_else(|| bad("at"))?,
+                        detail: (f[4] != "-").then(|| unescape(f[4])),
+                    });
+                }
                 _ => return Err(bad("not a place line")),
             }
         }
-        Ok(Self::of(store.world, store.places, store.revision))
+        Ok(Self::of(
+            store.world,
+            store.places,
+            store.marks,
+            store.revision,
+        ))
     }
 }
 

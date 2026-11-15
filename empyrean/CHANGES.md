@@ -13,7 +13,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 ([`RELEASING.md`](RELEASING.md)).
 
 ## Unreleased
-
+- Worlds that publish their places also publish a map's worth to clients that ask: towns, dungeons and what they hold, and where creatures spawn.
 - `@god` and `@ungod` work on a character of any era, not only the end of retail's.
 - `set-characterplus <character> [on|off]` puts the + before a character's name, or takes it away.
 - An administrator can learn Ethangar's Wrath (spell 6341, from a world's data overlay) with `@addspell 6341`: it strikes down every creature attacking them and the one they have selected.

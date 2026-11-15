@@ -13,6 +13,7 @@ pre-release leaves it for the final release, and its notes show it as it is);
 ([`RELEASING.md`](RELEASING.md)).
 
 ## Unreleased
+- Worlds that publish their places also publish a map's worth to clients that ask: towns, dungeons and what they hold, and where creatures spawn.
 
 ## 0.3.14 (2026-11-14)
 - Fixed attacks, spells and items failing for seconds after jumping in place.

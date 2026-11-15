@@ -24,7 +24,8 @@
 //! and its level limits; where each lifestone, portal, vendor and person the world places stands;
 //! both as `text/tab-separated-values`), and the status document names them (`"portals"` and
 //! `"places"`, each a path on this endpoint, `null` when not published); with it off, `/portals`
-//! and `/places` are `404` like any other path.
+//! and `/places` are `404` like any other path. `/places?version=2` answers version 2 of the
+//! places, which adds the world's map marks.
 //!
 //! The snapshot is taken on the world thread (a command through the world queue), so the
 //! endpoint never reads the world from another thread. Anything else is `404`, or `405` for a method
@@ -296,7 +297,11 @@ pub fn respond_with_portals(
                 head_only,
             ),
         },
-        "/places" if portals.is_some() => match portals.and_then(PortalTable::places_ready) {
+        "/places" if portals.is_some() => match portals.and_then(if asks_version_2(target) {
+            PortalTable::places_2_ready
+        } else {
+            PortalTable::places_ready
+        }) {
             Some(document) => response(200, "text/tab-separated-values", document, head_only),
             None => response(
                 503,
@@ -312,6 +317,13 @@ pub fn respond_with_portals(
             head_only,
         ),
     }
+}
+
+/// Whether a request for `target` asks for version 2 of a document: `version=2` in its query.
+fn asks_version_2(target: &str) -> bool {
+    target
+        .split_once('?')
+        .is_some_and(|(_, query)| query.split('&').any(|pair| pair == "version=2"))
 }
 
 fn response(code: u16, content_type: &str, body: &str, head_only: bool) -> Vec<u8> {

@@ -403,7 +403,8 @@ in the firewall.
 With `publish_portals = true` (off by default), it also answers `GET /portals` with the world's
 placed portals, their destinations and level limits, as a tab-separated table that clients use to
 route through portals, and `GET /places` with its lifestones, portals, vendors and people, which
-clients draw on their maps; `/status` names both (`portals`, `places`). The formats are in
+clients draw on their maps (`/places?version=2` adds the world's map marks: towns, dungeons and
+what they hold, spawn areas and more); `/status` names both (`portals`, `places`). The formats are in
 `empyrean/README.md`, "The portal table" and "The places".
 
 With the WebSocket endpoint on, `/status` also reports `websocket_url`, the URL browser clients

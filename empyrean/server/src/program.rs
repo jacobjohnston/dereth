@@ -311,6 +311,8 @@ pub fn main(options: &Options) -> ExitCode {
     let world_loop_ended = Arc::new(AtomicBool::new(false));
     // Not ACE: the status endpoint's portal table reads the same content, off the world thread.
     let portal_content = Arc::clone(&content);
+    // Its map marks tell a building's rooms from a dungeon's by the cell dat.
+    let portal_dats = Arc::clone(&dats);
     let world_thread = {
         let loop_ended = Arc::clone(&world_loop_ended);
         let clock = Arc::clone(&clock);
@@ -516,7 +518,14 @@ pub fn main(options: &Options) -> ExitCode {
     // ACE: ModManager.RegisterCommands
     // Not ported: without a mod loader there are no mod commands to register.
 
-    let status = start_status_endpoint(options, &config, &commands, started, &portal_content);
+    let status = start_status_endpoint(
+        options,
+        &config,
+        &commands,
+        started,
+        &portal_content,
+        portal_dats,
+    );
 
     // Not ACE: the admin channel (`server.admin_channel`), never in the updater's health check,
     // which must leave the running server's file alone.
@@ -1266,13 +1275,15 @@ fn start_bulk_patch(config: &MasterConfiguration) {
 
 /// Not ACE: starts the status endpoint when `--status` or `server.status_address` names an
 /// address. Each request takes its snapshot on the world thread through `commands`. With
-/// `server.publish_portals` on, it also serves `content`'s portal table.
+/// `server.publish_portals` on, it also serves `content`'s portal table and places, the map marks
+/// in version 2 of the places telling rooms apart by `dats`.
 fn start_status_endpoint(
     options: &Options,
     config: &MasterConfiguration,
     commands: &Sender<WorldCommand>,
     started: std::time::Instant,
     content: &Arc<dyn WorldDatabase>,
+    dats: Arc<DatManager>,
 ) -> Option<empyrean_server::status_endpoint::StatusEndpoint> {
     use empyrean_server::status_endpoint::{self, StatusSnapshot};
     let addr = match status_endpoint::status_address(
@@ -1311,9 +1322,11 @@ fn start_status_endpoint(
         Some(s)
     };
     let portals = config.server.publish_portals.then(|| {
-        empyrean_server::portal_table::PortalTable::new(
+        empyrean_server::portal_table::PortalTable::with_marks(
             &config.server.world_name,
+            config.era.profile,
             Arc::clone(content),
+            Some(dats),
         )
     });
     let publishing = portals.is_some();

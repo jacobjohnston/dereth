@@ -39,12 +39,30 @@
 //! and names are written as the portal table writes them. The two zeros are when the place was
 //! first and last seen, which a server does not know, and the `-` is a house's owner, which it
 //! never names.
+//!
+//! Version 2 of the places, served to a client that asks for it (`GET /places?version=2`), is
+//! version 1 with the world's map marks after the places ([`crate::place_marks`]):
+//!
+//! ```text
+//! dereth-places-store→2
+//! world→<world name>
+//! place→… (as in version 1)
+//! mark→<kind>→<name>→<at>→<detail or ->
+//! ```
+//!
+//! A mark's `at` is the outdoor position of its spot, at height 0, and its detail's sentences are
+//! joined by an escaped line feed (`\n`); names and details are written as names are. A version-1
+//! reader refuses a version-2 document, so version 1 stays what a client gets unless it asks.
 
 use std::sync::{Arc, OnceLock};
 
+use empyrean_common::era::EraId;
 use empyrean_content::models::world::{LandblockInstance, Weenie};
 use empyrean_content::WorldDatabase;
+use empyrean_dat::DatManager;
 use empyrean_entity::enums::{PositionType, PropertyBool, PropertyInt, PropertyString, WeenieType};
+
+use crate::place_marks::{self, mark_lines, Mark};
 
 /// The portal table's first line.
 pub const HEADER: &str = "dereth-navigation-store\t1\n";
@@ -52,20 +70,33 @@ pub const HEADER: &str = "dereth-navigation-store\t1\n";
 /// The places document's first line.
 pub const PLACES_HEADER: &str = "dereth-places-store\t1\n";
 
-/// What a world publishes: its portal table and its places.
+/// The first line of version 2 of the places, with the world's map marks.
+pub const PLACES_HEADER_2: &str = "dereth-places-store\t2\n";
+
+/// What a world publishes: its portal table, its places, and its places with its map marks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Documents {
     pub portals: String,
     pub places: String,
+    pub places_2: String,
 }
 
 impl Documents {
-    /// Both documents of `content` for the world named `world_name`.
+    /// The documents of `content` for the world named `world_name`, with no map marks.
     #[must_use]
     pub fn of(world_name: &str, content: &dyn WorldDatabase) -> Self {
+        Self::with_marks(world_name, content, &[])
+    }
+
+    /// The documents of `content` for the world named `world_name`, version 2 of its places
+    /// carrying `marks`.
+    #[must_use]
+    pub fn with_marks(world_name: &str, content: &dyn WorldDatabase, marks: &[Mark]) -> Self {
+        let places = place_lines(content);
         Self {
             portals: document(world_name, content),
-            places: places_document(world_name, content),
+            places: places_text(PLACES_HEADER, world_name, &places, ""),
+            places_2: places_text(PLACES_HEADER_2, world_name, &places, &mark_lines(marks)),
         }
     }
 }
@@ -85,6 +116,24 @@ impl PortalTable {
     pub fn new(world_name: &str, content: Arc<dyn WorldDatabase>) -> Self {
         let world_name = world_name.to_owned();
         Self::building(move || Documents::of(&world_name, &*content))
+    }
+
+    /// [`Self::new`], version 2 of the places carrying the map marks of a world playing `era`,
+    /// its rooms told apart by `dats`' cell dat when given.
+    #[must_use]
+    pub fn with_marks(
+        world_name: &str,
+        era: EraId,
+        content: Arc<dyn WorldDatabase>,
+        dats: Option<Arc<DatManager>>,
+    ) -> Self {
+        let world_name = world_name.to_owned();
+        Self::building(move || {
+            let rooms = dats.as_deref().map(place_marks::dat_rooms);
+            let rooms = rooms.as_ref().map(|r| r as &dyn Fn(u32) -> Option<bool>);
+            let marks = place_marks::marks(era, &*content, rooms);
+            Documents::with_marks(&world_name, &*content, &marks)
+        })
     }
 
     /// The documents `build` makes, their building begun on a thread of its own (or, should no
@@ -121,6 +170,13 @@ impl PortalTable {
     #[must_use]
     pub fn places_ready(&self) -> Option<&str> {
         self.documents.get().map(|d| d.places.as_str())
+    }
+
+    /// Version 2 of the places, with the map marks, once it is built; `None` while it is being
+    /// built.
+    #[must_use]
+    pub fn places_2_ready(&self) -> Option<&str> {
+        self.documents.get().map(|d| d.places_2.as_str())
     }
 
     /// The portal table, waiting for it to be built.
@@ -208,6 +264,33 @@ const CREATURE: i32 = 0x10;
 /// The places of `content` for the world named `world_name`.
 #[must_use]
 pub fn places_document(world_name: &str, content: &dyn WorldDatabase) -> String {
+    places_text(PLACES_HEADER, world_name, &place_lines(content), "")
+}
+
+/// Version 2 of the places of `content` for the world named `world_name`, with `marks`.
+#[must_use]
+pub fn places_document_2(world_name: &str, content: &dyn WorldDatabase, marks: &[Mark]) -> String {
+    places_text(
+        PLACES_HEADER_2,
+        world_name,
+        &place_lines(content),
+        &mark_lines(marks),
+    )
+}
+
+/// A places document: `header`, the world's name, `places` and `marks`.
+fn places_text(header: &str, world_name: &str, places: &str, marks: &str) -> String {
+    let mut out = String::from(header);
+    out.push_str("world\t");
+    out.push_str(&field(world_name));
+    out.push('\n');
+    out.push_str(places);
+    out.push_str(marks);
+    out
+}
+
+/// The `place` lines of `content`, in order.
+fn place_lines(content: &dyn WorldDatabase) -> String {
     let kinds = [
         (WeenieType::LifeStone, PlaceKind::Lifestone),
         (WeenieType::Portal, PlaceKind::Portal),
@@ -225,14 +308,7 @@ pub fn places_document(world_name: &str, content: &dyn WorldDatabase) -> String 
         );
     }
     lines.sort();
-    let mut out = String::from(PLACES_HEADER);
-    out.push_str("world\t");
-    out.push_str(&field(world_name));
-    out.push('\n');
-    for (_, line) in lines {
-        out.push_str(&line);
-    }
-    out
+    lines.into_iter().map(|(_, line)| line).collect()
 }
 
 /// One instance's place line and its sort key (cell, kind, class id, guid); `None` for a weenie
@@ -310,7 +386,7 @@ fn name(weenie: &Weenie) -> &str {
 
 /// `cell`, or for a bare landblock (cell index 0) the outdoor cell that `x`, `y` fall in: cells are
 /// 24 units square, eight to a side, numbered from 1 by column then row.
-fn land_cell(cell: u32, x: f32, y: f32) -> u32 {
+pub(crate) fn land_cell(cell: u32, x: f32, y: f32) -> u32 {
     if cell & 0xFFFF != 0 {
         return cell;
     }
@@ -319,12 +395,12 @@ fn land_cell(cell: u32, x: f32, y: f32) -> u32 {
     (cell & 0xFFFF_0000) | (axis(x) * 8 + axis(y) + 1)
 }
 
-fn position(cell: u32, x: f32, y: f32, z: f32) -> String {
+pub(crate) fn position(cell: u32, x: f32, y: f32, z: f32) -> String {
     format!("0x{cell:08X} {x:.3} {y:.3} {z:.3}")
 }
 
 /// A text field: tab, line feed and carriage return become spaces; a backslash is doubled.
-fn field(s: &str) -> String {
+pub(crate) fn field(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

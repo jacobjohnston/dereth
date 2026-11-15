@@ -6,6 +6,7 @@
 //! for an AI Player), and every few seconds the director logs AI Players in near real players and
 //! out again when none is near.
 
+pub mod buff;
 pub mod hunt;
 pub mod levels;
 pub mod names;
@@ -114,6 +115,9 @@ pub struct Bot {
     pub sitting: bool,
     /// A hunter's ground and fight; `None` for a town AI Player.
     pub hunt: Option<hunt::Hunt>,
+    /// The real player a town AI Player is buffing, and when it next looks for one.
+    pub buffing: Option<buff::Buffing>,
+    pub next_buff_look: f64,
 }
 
 /// The world's AI Players.
@@ -147,6 +151,10 @@ pub struct AiPlayersState {
     barren: HashMap<(i32, i32), f64>,
     /// Logins that failed, by why (for operators and load runs).
     pub failures: std::collections::BTreeMap<String, u32>,
+    /// Real players buffed lately, by character id, until when they are left be.
+    pub buffed: HashMap<u32, f64>,
+    /// Buffs AI Players have cast (for operators).
+    pub buffs_cast: u64,
 }
 
 impl AiPlayersState {
@@ -434,6 +442,9 @@ fn live(w: &mut World, now: f64) {
 
 /// A town AI Player's day: walk somewhere near the centre, stand a while, now and then sit.
 fn town_life(w: &mut World, id: u32, p: ObjectGuid, now: f64) {
+    if buff::live(w, id, p, now) {
+        return;
+    }
     let Some(bot) = w.ai_players.bots.get(&id).cloned() else {
         return;
     };
@@ -658,6 +669,7 @@ fn direct(w: &mut World, now: f64) {
     for p in bots_in_world(w) {
         resupply(w, p);
     }
+    w.ai_players.buffed.retain(|_, until| *until > now);
 
     let anchors = anchors(w);
     let near = |t: &towns::Town, r: f64| anchors.iter().any(|a| distance_m(*a, (t.ns, t.ew)) <= r);
@@ -825,6 +837,7 @@ pub fn log_out(w: &mut World, id: u32) {
     };
     bot.stage = Stage::LoggingOut;
     bot.walk = None;
+    bot.buffing = None;
     let session = bot.session;
     if w.sessions.player(session).is_some() {
         sessions::log_off_player(w, session, true);
@@ -952,6 +965,8 @@ fn log_in_as(
             idle_until: now + 3.0,
             sitting: false,
             hunt: ground.map(hunt::Hunt::new),
+            buffing: None,
+            next_buff_look: now + 10.0,
         },
     );
     world_manager::player_enter_world(w, session, character);
@@ -1004,7 +1019,12 @@ pub fn describe(w: &World) -> Vec<String> {
                 Stage::LoggingOut => "logging out",
             };
             let place = b.hunt.as_ref().map_or_else(
-                || towns::TOWNS[b.town].name.to_owned(),
+                || {
+                    let buffing = b.buffing.as_ref().map_or(String::new(), |x| {
+                        format!(", buffing ({} cast, {} to go)", x.cast, x.left.len())
+                    });
+                    format!("{}{buffing}", towns::TOWNS[b.town].name)
+                },
                 |h| {
                     let (ns, ew) = hunt::map_centre(h.ground);
                     let fighting = format!(

@@ -603,4 +603,69 @@ mod real {
             );
         }
     }
+
+    #[test]
+    fn a_town_ai_player_buffs_a_real_player_who_lacks_its_buffs() {
+        let (mut l, _) = holtburg_with_a_bot();
+        let me = l.g;
+        let holtburg = ai_players::towns::TOWNS
+            .iter()
+            .position(|t| t.name == "Holtburg")
+            .expect("Holtburg");
+        // Town AI Players until one has buffs to give.
+        l.ts.world.ai_players.max_total_override = Some(40);
+        let mut buffer = None;
+        for _ in 0..30 {
+            buffer = l.ts.world.ai_players.bots.iter().find_map(|(id, b)| {
+                let p = ObjectGuid::new(*id);
+                (b.hunt.is_none()
+                    && b.stage == Stage::InWorld
+                    && !ai_players::buff::buffs_of(&l.ts.world, p).is_empty())
+                .then_some(p)
+            });
+            if buffer.is_some() {
+                break;
+            }
+            ai_players::log_in_at(&mut l.ts.world, holtburg).expect("a login");
+            l.advance(3.0);
+        }
+        let buffer = buffer.expect("a town AI Player with buffs");
+        let buffs = ai_players::buff::buffs_of(&l.ts.world, buffer);
+        let lacked = buffs
+            .iter()
+            .filter(|s| {
+                ai_players::buff::wanted(&l.ts.world, me, **s)
+                    && ai_players::buff::lacks(&l.ts.world, me, **s)
+            })
+            .count();
+        assert!(lacked > 0, "the real player lacks its buffs");
+
+        let mine = |l: &Loop| {
+            l.ts.world
+                .objects
+                .get(me)
+                .and_then(|o| o.biota.properties_enchantment_registry.as_ref())
+                .map_or(0, |r| {
+                    r.iter()
+                        .filter(|e| ai_players::is_ai_player(&l.ts.world, e.caster_object_id))
+                        .count()
+                })
+        };
+        let mut got = 0;
+        for _ in 0..120 {
+            ai_players::planner::Planner::wait(&mut l.ts.world, Duration::from_secs(60));
+            l.advance(1.0);
+            got = mine(&l);
+            if got >= lacked.min(3) {
+                break;
+            }
+        }
+        println!(
+            "{} buffs known, {lacked} lacked, {got} given: {:?}",
+            buffs.len(),
+            ai_players::describe(&l.ts.world)
+        );
+        assert!(got > 0, "the real player was buffed by an AI Player");
+        assert!(l.ts.world.ai_players.buffs_cast > 0);
+    }
 }

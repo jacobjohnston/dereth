@@ -81,7 +81,13 @@ language models. This is a local feature (`local/ai-players`), not for upstream.
    spell. It binds its wounds below 70% health out of a fight and 35% in one (its kits never run
    out), its arrows are topped up, and after a death it walks back from its lifestone. A real
    player no hunter could be placed near is passed over for two minutes.
-6. Town buffers.
+6. Done. Town buffers: a town AI Player's buffs are its best spell of each kind it can cast on
+   someone else (beneficial creature and life enchantments, not item ones). Every 5 seconds an
+   idle one looks for the nearest real player within 30 m, outdoors, whom no other AI Player is
+   buffing and who was not buffed in the last ten minutes, and who lacks some of them: none of
+   that kind, a weaker one, or under five minutes left; a skill's buff only if the player trains
+   the skill. It walks within 10 m, readies magic and casts one every 3 seconds, then goes back
+   to its day. It reads the player's enchantments directly.
 7. Tests and soak runs with AI Players on.
 
 ## Load

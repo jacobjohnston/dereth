@@ -57,7 +57,11 @@ language models. This is a local feature (`local/ai-players`), not for upstream.
 2. Done. Uncounted and unchanged: no vitae, no items dropped, no experience, no loot or rares from
    their kills, nothing spent of the spell economy or spell charge; trades, gifts, friends,
    fellowships and oaths turned away with a message; left out of channel lists.
-3. Movement: client-style walking and routes.
+3. Done. Movement: AI Players send a client's motion and position messages through the server's
+   own handlers, along routes from the client's planner (`dereth-navigation`) on a thread of its
+   own; trips longer than 180 m go in hops, and a body stopped by something replans. Town AI
+   Players wander within 40 m of the centre, stand a while, and now and then sit. A new area's
+   first route takes seconds to plan (its map is built once); later ones take milliseconds.
 4. Level map and town levels.
 5. Hunters.
 6. Town buffers.

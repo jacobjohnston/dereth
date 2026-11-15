@@ -357,6 +357,12 @@ pub fn load_landblock(w: &mut World, landblock: u16) -> bool {
     resident
 }
 
+/// Not ACE: the dat land source the physics world runs on (AI Players' routes share it).
+#[must_use]
+pub fn dat_land_source(w: &World) -> Option<Arc<DatLandSource>> {
+    w.phys_ext.land.clone()
+}
+
 /// The server's dat-static bodies (room and dungeon statics, landblock objects, scenery).
 #[must_use]
 pub fn dat_statics(w: &World) -> &DatStatics {

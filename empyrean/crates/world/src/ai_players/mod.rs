@@ -7,7 +7,9 @@
 //! out again when none is near.
 
 pub mod names;
+pub mod planner;
 pub mod towns;
+pub mod walk;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
@@ -21,6 +23,7 @@ use crate::managers::{player_manager, world_manager};
 use crate::sessions::{self, SessionData};
 use crate::world_objects::{player_location, player_networking};
 use crate::World;
+use dereth_primitives::num::math as m;
 
 /// What an AI Player's name starts with, as an admin's starts with `+`.
 pub const MARKER: char = '~';
@@ -94,6 +97,13 @@ pub struct Bot {
     pub alone_since: Option<f64>,
     /// Whether it has been sent to its town since it logged in.
     pub placed: bool,
+    /// Where it is walking.
+    pub walk: Option<walk::Walk>,
+    /// Its client's game action sequence.
+    pub stamp: u32,
+    /// When it next does something.
+    pub idle_until: f64,
+    pub sitting: bool,
 }
 
 /// The world's AI Players.
@@ -108,6 +118,8 @@ pub struct AiPlayersState {
     /// Where each real player last stood outdoors, by character id.
     last_outdoor: HashMap<u32, (f64, f64)>,
     rng: u64,
+    /// The route planner's thread, started with the first route.
+    planner: Option<planner::Planner>,
 }
 
 impl AiPlayersState {
@@ -214,6 +226,8 @@ pub fn tick(w: &mut World) {
         return;
     }
     advance(w, now);
+    walk::take_routes(w);
+    live(w, now);
     if now < w.ai_players.next_director {
         return;
     }
@@ -325,6 +339,85 @@ fn login_complete(w: &mut World, p: ObjectGuid) {
         }
         player_networking::send_property_updates_and_overrides(w, p);
     }
+}
+
+/// Metres from a town's centre a town AI Player wanders.
+const WANDER: f32 = 40.0;
+
+/// Each AI Player in the world does what it is doing: walks on, or, idle long enough, sets off
+/// somewhere in town or sits down for a while.
+fn live(w: &mut World, now: f64) {
+    let ids: Vec<u32> = w
+        .ai_players
+        .bots
+        .iter()
+        .filter(|(_, b)| b.stage == Stage::InWorld && b.placed)
+        .map(|(id, _)| *id)
+        .collect();
+    for id in ids {
+        let Some(p) = w.ai_players.bots.get(&id).and_then(|b| w.sessions.player(b.session)) else {
+            continue;
+        };
+        if w.objects.get(p).is_none() || teleporting(w, p) {
+            continue;
+        }
+        town_life(w, id, p, now);
+    }
+}
+
+/// A town AI Player's day: walk somewhere near the centre, stand a while, now and then sit.
+fn town_life(w: &mut World, id: u32, p: ObjectGuid, now: f64) {
+    let Some(bot) = w.ai_players.bots.get(&id).cloned() else {
+        return;
+    };
+    if let Some(walking) = &bot.walk {
+        let rest = match walking.outcome {
+            None => {
+                walk::step(w, id, p, now);
+                return;
+            }
+            Some(walk::Outcome::Arrived) => 10.0 + f64::from(w.ai_players.unit()) * 30.0,
+            Some(walk::Outcome::Failed) => 3.0 + f64::from(w.ai_players.unit()) * 5.0,
+        };
+        if let Some(b) = w.ai_players.bots.get_mut(&id) {
+            b.walk = None;
+            b.idle_until = now + rest;
+        }
+        return;
+    }
+    if now < bot.idle_until {
+        return;
+    }
+    if bot.sitting {
+        walk::stand(w, id, p);
+    }
+    let sit = !bot.sitting && w.ai_players.unit() < 0.2;
+    if sit {
+        walk::sit(w, id, p);
+        let rest = 20.0 + f64::from(w.ai_players.unit()) * 40.0;
+        if let Some(b) = w.ai_players.bots.get_mut(&id) {
+            b.sitting = true;
+            b.idle_until = now + rest;
+        }
+        return;
+    }
+    if let Some(b) = w.ai_players.bots.get_mut(&id) {
+        b.sitting = false;
+    }
+    let t = towns::TOWNS[bot.town];
+    #[allow(clippy::cast_possible_truncation)]
+    let centre = [
+        ((t.ew + 101.95) * METRES_PER_UNIT) as f32,
+        ((t.ns + 101.95) * METRES_PER_UNIT) as f32,
+    ];
+    let angle = w.ai_players.unit() * std::f32::consts::TAU;
+    let r = w.ai_players.unit().sqrt() * WANDER;
+    walk::go(
+        w,
+        id,
+        [centre[0] + m::cosf(angle) * r, centre[1] + m::sinf(angle) * r],
+        3.0,
+    );
 }
 
 /// The magic schools, and how sure of a cast an AI Player must be to learn a level's spells.
@@ -556,6 +649,7 @@ pub fn log_out(w: &mut World, id: u32) {
         return;
     };
     bot.stage = Stage::LoggingOut;
+    bot.walk = None;
     let session = bot.session;
     if w.sessions.player(session).is_some() {
         sessions::log_off_player(w, session, true);
@@ -625,6 +719,10 @@ fn log_in(w: &mut World, town: usize, now: f64) -> Result<(), String> {
             town,
             alone_since: None,
             placed: false,
+            walk: None,
+            stamp: 0,
+            idle_until: now + 3.0,
+            sitting: false,
         },
     );
     world_manager::player_enter_world(w, session, character);

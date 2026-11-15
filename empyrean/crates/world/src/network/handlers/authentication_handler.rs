@@ -22,7 +22,7 @@ use empyrean_net::{
 };
 use empyrean_store::models::auth::Account;
 
-use crate::managers::player_manager::{self, property_manager_get_bool};
+use crate::managers::player_manager::property_manager_get_bool;
 use crate::managers::world_manager::WorldStatusState;
 use crate::network::game_messages::game_message::{enqueue_send, BinaryWriter, GameMessage};
 use crate::network::game_messages::game_message_opcode::GameMessageOpcode;
@@ -49,9 +49,17 @@ pub fn do_login(
     end_point_c2s: SocketAddr,
     login_request: &PacketInboundLoginRequest,
 ) {
-    let mut account = w.auth.lock().get_account_by_name(&login_request.account);
+    // Not ACE: no client logs into the AI Players' account.
+    let ai_players = login_request
+        .account
+        .eq_ignore_ascii_case(crate::ai_players::ACCOUNT);
+    let mut account = if ai_players {
+        None
+    } else {
+        w.auth.lock().get_account_by_name(&login_request.account)
+    };
 
-    if account.is_none() {
+    if account.is_none() && !ai_players {
         if login_request.net_auth_type == NetAuthType::AccountPassword
             && login_request.password.as_deref() != Some("")
         {
@@ -371,7 +379,7 @@ pub fn send_connect_response(
     let character_list_message = game_message_character_list(w, &s.characters, s);
     let server_name_message = game_message_server_name(
         &sessions::config_server_world_name(),
-        player_manager::get_online_count(w),
+        crate::ai_players::real_online_count(w),
         i32::try_from(w.net.config.maximum_allowed_sessions).unwrap_or(i32::MAX),
     );
     let ddd_interrogation = game_message_ddd_interrogation(w);

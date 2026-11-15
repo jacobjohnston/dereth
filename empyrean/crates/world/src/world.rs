@@ -121,6 +121,8 @@ pub struct World {
     pub cast_potency: Option<crate::world_objects::spell_potency::SpellPotency>,
     /// Not ACE: the Dereth Network's world half (off until the host configures it).
     pub federation: crate::federation::FederationState,
+    /// Not ACE: the AI Players (see `crate::ai_players`).
+    pub ai_players: crate::ai_players::AiPlayersState,
 }
 
 /// `DatabaseManager.Authentication` and `DatabaseManager.AutoPromoteNextAccountToAdmin`.
@@ -222,6 +224,7 @@ impl World {
             spell_economy: Default::default(),
             cast_potency: None,
             federation: crate::federation::FederationState::default(),
+            ai_players: crate::ai_players::AiPlayersState::default(),
         }
     }
 }

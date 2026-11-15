@@ -483,6 +483,29 @@ store_path = "network.json"
 min_character_age_seconds = 0
 
 # ----------------------------------------------------------------------------------------------
+[ai_players]
+# AI Players: server-controlled characters that log in near real players, fill towns and
+# hunt the land around them. Switched on and off with @aiplayers (the ai_players_enabled
+# property), not here.
+
+# default: 300 (Empyrean only)
+# Seconds an AI Player stays once no real player is within 6 km.
+leave_after_seconds = 300
+
+# default: 150 (Empyrean only)
+# The most AI Players in the world at once.
+max_total = 150
+
+# default: 300 (Empyrean only)
+# Past this many real players online, each one more takes one AI Player away, one at a
+# time.
+fade_from_players = 300
+
+# default: "" (Empyrean only)
+# Town levels over the ones worked out from the land, as "Holtburg=5, Arwic=12".
+town_levels = ""
+
+# ----------------------------------------------------------------------------------------------
 [portal_storms]
 # Portal storms move players out of a crowded landblock: past the threshold a storm brews,
 # then is imminent, then moves one player outdoors to the middle of a neighboring landblock

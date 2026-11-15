@@ -234,6 +234,8 @@ pub fn initialize(submit: Option<Submit>) {
 
     // Not ACE: empyrean-world's Talk handler reaches this crate through a hook (see the module docs).
     game_action_talk::set_command_path(handle_talk_command);
+    // Not ACE: new AI Players are made as playtest characters are.
+    crate::empyrean::ai_players::install();
 
     let Some(submit) = submit else { return };
 

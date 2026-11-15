@@ -775,8 +775,7 @@ fn refresh_status_ping(w: &mut World) {
     } else {
         WorldState::Starting
     };
-    let players = u16::try_from(crate::managers::player_manager::get_online_count(w).max(0))
-        .unwrap_or(u16::MAX);
+    let players = u16::try_from(crate::ai_players::real_online_count(w).max(0)).unwrap_or(u16::MAX);
     if let Some(ping) = w.net.status_ping.as_mut() {
         ping.facts.state = state;
         ping.facts.players = players;
@@ -846,6 +845,9 @@ impl World {
             delay_manager::run_actions,
         );
         perf::register_event_end(self, MonitorType::DelayManagerRunActions);
+
+        // Not ACE: the AI Players' logins, portal space and director.
+        run_stage(self, "AiPlayers.Tick", (), crate::ai_players::tick);
 
         perf::restart_event(self, MonitorType::UpdateGameWorld);
         let game_world_updated = run_stage(

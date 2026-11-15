@@ -750,6 +750,13 @@ pub fn player_name(w: &crate::World, this: empyrean_entity::ObjectGuid) -> Optio
         && cloak_status.is_some_and(|c| c < empyrean_entity::enums::CloakStatus::Player)
     {
         Some(format!("+{}", base_name.unwrap_or_default()))
+    } else if crate::ai_players::is_ai_player(w, this.full()) {
+        // Not ACE: an AI Player's name carries its marker.
+        Some(format!(
+            "{}{}",
+            crate::ai_players::MARKER,
+            base_name.unwrap_or_default()
+        ))
     } else {
         base_name
     }
@@ -761,7 +768,9 @@ pub fn player_set_name(w: &mut crate::World, this: empyrean_entity::ObjectGuid, 
     crate::world_objects::world_object::world_object_set_name(
         w,
         this,
-        value.trim_start_matches('+').to_owned(),
+        value
+            .trim_start_matches(['+', crate::ai_players::MARKER])
+            .to_owned(),
     )
 }
 

@@ -21,6 +21,7 @@
 //! layout: [`entity`], [`factories`], [`managers`], [`network`], [`physics`] and
 //! [`world_objects`].
 
+pub mod ai_players;
 pub mod dispatch;
 pub mod federation;
 pub mod object_store;

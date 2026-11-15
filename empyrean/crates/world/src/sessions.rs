@@ -409,7 +409,7 @@ pub fn send_final_log_off_messages(w: &mut World, session: SessionId) {
 
         let server_name_message = game_message_server_name(
             &config_server_world_name(),
-            player_manager::get_online_count(w),
+            crate::ai_players::real_online_count(w),
             w.net.config.maximum_allowed_sessions.cs_cast(),
         );
         enqueue_send(w, session, server_name_message);
@@ -560,6 +560,10 @@ pub fn tick_outbound(w: &mut World) {
     let ids: Vec<SessionId> = w.sessions.iter().map(|(id, _)| id).collect();
     for session in ids {
         let Some(transport) = w.net.session(session) else {
+            // Not ACE: an AI Player's session waits for its character to load.
+            if crate::ai_players::holds(w, session) {
+                continue;
+            }
             let player = w.sessions.player(session);
             if player.is_none_or(|p| player_manager::get_online_player(w, p.full()).is_none()) {
                 w.sessions.remove(session);

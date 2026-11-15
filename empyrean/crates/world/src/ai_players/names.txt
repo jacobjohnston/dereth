@@ -1,0 +1,1003 @@
+# AI Player names: heritage, gender, name. Built from the 1999 creation screens' naming help.
+1 1 Arric
+1 1 Torham
+1 1 Beornlan the Red
+1 1 Osward
+1 1 Oswylf the Wary
+1 1 Aldric Ordsun
+1 1 Eadtor
+1 1 Hildbald
+1 1 Sigberht the Clever
+1 1 Wendhelm
+1 1 Wothlan
+1 1 Armer
+1 1 Arric the Younger
+1 1 Garhard Grithsun
+1 1 Brandsig
+1 1 Burhelm Holtsun
+1 1 Wigwulf the Red
+1 1 Hamgrim the Fox
+1 1 Herewald
+1 1 Rimberht
+1 1 Leofgils the Younger
+1 1 Ordstan the Fair
+1 1 Ecggar
+1 1 Torwylf
+1 1 Godfrith
+1 1 Tormer Blodsun
+1 1 Forstreng the Quiet
+1 1 Wulward
+1 1 Dunwylf
+1 1 Wothdred Holtsun
+1 1 Garmer
+1 1 Thurstan Halsun
+1 1 Hamreng
+1 1 Wulsig Hrothsun
+1 1 Sigreng the Fox
+1 1 Aldgar
+1 1 Wilhelm the Old
+1 1 Cyngryn
+1 1 Garred the Stout
+1 1 Scinfrith Brunsun
+1 1 Ulfhard
+1 1 Wilreng
+1 1 Beornfrith
+1 1 Tordred Ostsun
+1 1 Thurwylf the Swift
+1 1 Tormund
+1 1 Wendwine
+1 1 Beornhelm Estsun
+1 1 Hamwine
+1 1 Ceolbald Brunsun
+1 1 Brandmund the Fox
+1 1 Godbrim
+1 1 Arwin
+1 1 Thurstan Ostsun
+1 1 Scingryn Dunsun
+1 1 Wilhelm
+1 1 Torwald Thornsun
+1 1 Hrothwine
+1 1 Grimdred
+1 1 Godric the Smith
+1 1 Beornberht the Bold
+1 1 Hrothsig the Black
+1 1 Ordulf
+1 1 Wilward
+1 1 Hunward Leofsun
+1 1 Wendlan the Lucky
+1 1 Ordgrim Hrothsun
+1 1 Hildnoth the Patient
+1 1 Rimbald
+1 1 Herestan the Ox
+1 1 Scinwylf
+1 1 Aldhelm
+1 1 Dunmer the Smith
+1 1 Forstwin
+1 1 Eadwald the Quiet
+1 1 Thurgrim
+1 1 Rimtor the Elder
+1 1 Leoflan
+1 1 Torwylf the Strong
+1 1 Cuthgils the Quiet
+1 1 Garward the Fox
+1 1 Cynfrith Holtsun
+1 1 Aldhard
+1 1 Wendstan the Red
+1 1 Eaddred
+1 1 Stanwylf the Hound
+1 1 Scinwin the Younger
+1 1 Scinham
+1 1 Cynfrith Halsun
+1 1 Hamgar
+1 1 Ordberht the Quiet
+1 1 Wulgrim
+1 1 Hunfrith
+1 1 Hrothreng the Black
+1 1 Ceollan
+1 1 Wothgeld the Lame
+1 1 Wilfrith
+1 1 Godwulf Arnsun
+1 1 Hrothreng Stensun
+1 1 Beornnoth the Younger
+1 1 Brandbald
+1 1 Ulfgeld the Red
+1 1 Cynfrith the Tall
+1 1 Wiggrim the Elder
+1 1 Ceolbald
+1 1 Wigmund Brunsun
+1 1 Scinberht Ethsun
+1 1 Thurdred the Elder
+1 1 Siggryn
+1 1 Burgeld
+1 1 Torgeld
+1 1 Ulfnoth the Swift
+1 1 Dungryn the Elder
+1 1 Herewin the Hunter
+1 1 Hunwin Wynsun
+1 1 Wendgeld
+1 1 Hildreng
+1 1 Sigwin the Younger
+1 1 Wulgar
+1 1 Wulwulf Blodsun
+1 1 Torhard
+1 1 Wothgar
+1 1 Forstbald
+1 1 Hereulf the Hunter
+1 1 Ecgstan Holtsun
+1 1 Ceolbrim
+1 1 Hrothberht
+1 1 Grimhard
+1 1 Ordric the Red
+1 1 Leofdred
+1 1 Scingeld
+1 1 Scinlan
+1 1 Ethelric the Smith
+1 1 Ecgreng
+1 1 Beornbrim the Strong
+1 1 Leofbald the Tall
+1 1 Ceolwulf
+1 1 Garberht
+1 1 Beornlan
+1 1 Ulfward
+1 1 Grimlan Rynesun
+1 1 Tornoth
+1 1 Scinlan the Stout
+1 1 Godbald
+1 1 Garwald
+1 1 Burward
+1 1 Hunberht the Red
+1 1 Stangils the Ox
+1 1 Torfrith the Quiet
+1 1 Godbald the Stout
+1 1 Brandwylf the Clever
+1 1 Leofward Estsun
+1 1 Thurberht the Red
+1 1 Aldstan the Stout
+1 1 Ecgred
+1 1 Rimmund the Hound
+1 1 Ordnoth
+1 1 Sighelm Thornsun
+1 1 Stanham Leofsun
+1 1 Dungryn
+1 1 Oswylf the Patient
+1 1 Wendnoth the Stout
+1 1 Stanstan
+1 1 Thurnoth the Old
+1 1 Hunnoth the Stout
+1 1 Scinbrim
+1 1 Grimbald Arnsun
+1 2 Wynthryth
+1 2 Wynswith the Lark
+1 2 Ethela
+1 2 Mildith the Raven
+1 2 Haswinn Stenmad
+1 2 Dirnira
+1 2 Mildburh the Fair
+1 2 Sunild the Merry
+1 2 Ulelal the True
+1 2 Ulehar
+1 2 Ossith Arnmad
+1 2 Leofa Thornmad
+1 2 Eadflaed
+1 2 Berburh
+1 2 Aethlan
+1 2 Cynesith the Bright
+1 2 Thaeth
+1 2 Gislan
+1 2 Cynewinn
+1 2 Osryn
+1 2 Osild
+1 2 Hildlan the Steady
+1 2 Thaew
+1 2 Arith
+1 2 Leofthryth
+1 2 Wilburh the Fair
+1 2 Mildeth the True
+1 2 Bereth
+1 2 Eadys
+1 2 Osys
+1 2 Hildwyn
+1 2 Domys
+1 2 Aetha
+1 2 Cynesith Dunmad
+1 2 Cengyth
+1 2 Raeun
+1 2 Elfild
+1 2 Thaith
+1 2 Raeew
+1 2 Wynith the Wise
+1 2 Hildgyth
+1 2 Sunys
+1 2 Dirngyth
+1 2 Thaflaed
+1 2 Milda
+1 2 Lislan
+1 2 Aethbroc
+1 2 Ulea the Kind
+1 2 Thahar
+1 2 Wynwen
+1 2 Cenwen the Quiet
+1 2 Cyneira
+1 2 Eadlal the Fierce
+1 2 Leofmod the Swift
+1 2 Berbroc the Kind
+1 2 Wilhar the Merry
+1 2 Gisew
+1 2 Ulebroc
+1 2 Sothun Ordmad
+1 2 Ethhar the Gentle
+1 2 Cynelan
+1 2 Eththryth
+1 2 Sothhar Estmad
+1 2 Ethys the Swift
+1 2 Hildwen
+1 2 Etheth
+1 2 Wynlal the Steady
+1 2 Aethwyn the Merry
+1 2 Eadira
+1 2 Domun
+1 2 Cynewyn
+1 2 Berun the Healer
+1 2 Domlal
+1 2 Sotha Halmad
+1 2 Hasswith
+1 2 Giswinn the Weaver
+1 2 Elfew
+1 2 Armod
+1 2 Elfeth the Lark
+1 2 Hildsith the Merry
+1 2 Lisira
+1 2 Sothgyth Grithmad
+1 2 Domlan
+1 2 Lisys
+1 2 Elfith the Swift
+1 2 Suna the Fair
+1 2 Cynethryth the Quiet
+1 2 Raewen
+1 2 Hasbroc
+1 2 Berwen Ethmad
+1 2 Aethwen
+1 2 Ulegyth
+1 2 Gissith
+1 2 Mildthryth
+1 2 Eadys Brunmad
+1 2 Centhryth
+1 2 Eadthryth
+1 2 Cyneflaed the Raven
+1 2 Wyngyth Leofmad
+1 2 Hildun
+1 2 Hasun
+1 2 Thawinn
+1 2 Eadild
+1 2 Tharyn
+1 2 Elfys Thornmad
+1 2 Mildela Ostmad
+1 2 Leofela
+1 2 Lisflaed
+1 2 Censwith
+1 2 Gisys
+1 2 Sothwinn the Lucky
+1 2 Sunew
+1 2 Giswyn
+1 2 Dirnhar the Lark
+1 2 Bereth Wynmad
+1 2 Aethlal
+1 2 Liswinn
+1 2 Gisgyth
+1 2 Hildlal
+1 2 Osira
+1 2 Gisun the Steady
+1 2 Elfswith
+1 2 Elfa the Wise
+1 2 Lisryn
+1 2 Cenew the Healer
+1 2 Eadhar the Wise
+1 2 Cyneswith
+1 2 Leoflan the Healer
+1 2 Osela
+1 2 Aethwyn
+1 2 Sunira
+1 2 Leofild
+1 2 Dirnun the Healer
+1 2 Hildburh
+1 2 Domswith
+1 2 Elfwinn
+1 2 Domwyn
+1 2 Raelan
+1 2 Lisryn the Fair
+1 2 Bergyth
+1 2 Berswith
+1 2 Aethsith the Quiet
+1 2 Aethira the Swift
+1 2 Hildthryth
+1 2 Wynwinn the Kind
+1 2 Wynith Blodmad
+1 2 Wilys
+1 2 Elfela Wynmad
+1 2 Dirnwinn the Fierce
+1 2 Wilela
+1 2 Hildeth
+1 2 Sunbroc the Gentle
+1 2 Eadlal the Swift
+1 2 Dirnlal
+1 2 Wilswith the Kind
+1 2 Leofryn the Quiet
+1 2 Raebroc
+1 2 Hasira
+1 2 Dirnswith
+1 2 Berryn
+1 2 Uleswith Grithmad
+1 2 Cena the Quiet
+1 2 Cenys
+1 2 Liswen Rynemad
+1 2 Elfith
+1 2 Elfgyth
+1 2 Haswen the Bright
+2 1 Kariris
+2 1 Salun al-Shams
+2 1 Bashan
+2 1 Jabham ibn Yazman
+2 1 Dharar
+2 1 Yusuq ibn Qa'yam
+2 1 Rashif ibn Bashr
+2 1 Dharnuj
+2 1 Salib
+2 1 Rashib al-Tuwah
+2 1 Bashmar al-Daud
+2 1 Khailal ibn Wahid
+2 1 Hamik ibn Rafiq
+2 1 Tashib ibn Malik
+2 1 Dharabar ibn Yazman
+2 1 Karwhar
+2 1 Nasud
+2 1 Zahar al-Salim
+2 1 Fazid al-Hakim
+2 1 Fadlib ibn Jahiz
+2 1 Abdun al-Qa'yam
+2 1 Khatal al-Nadir
+2 1 Zahuq ibn Mansur
+2 1 Ma'ud
+2 1 Mirid al-Jahiz
+2 1 Qadmar ibn Salim
+2 1 Halir ibn Mauki
+2 1 Bashwhar al-Jahiz
+2 1 Abtal al-Sabah
+2 1 Zahif
+2 1 Mirib al-Qutuz
+2 1 Karilal al-Daud
+2 1 Sunar al-Rafiq
+2 1 Khaul
+2 1 Salilal al-Ruz
+2 1 Ma'ik
+2 1 Abwhar ibn Tiqiq
+2 1 Jabwhar
+2 1 Bashan ibn Haddad
+2 1 Bashilal ibn Halras
+2 1 Ma'ilal
+2 1 Yuswhar al-Sabah
+2 1 Bashilal
+2 1 Sunib
+2 1 Hamham al-Thudadh
+2 1 Tiqim al-Fahd
+2 1 Munnuj
+2 1 Nasud ibn Hakim
+2 1 Abdul ibn Ilyas
+2 1 Bashul ibn Qasim
+2 1 Tiqtal ibn Yazid
+2 1 Bashtal al-Shams
+2 1 Abtal
+2 1 Halud
+2 1 Mirim
+2 1 Ma'un al-Daud
+2 1 Dharabar ibn Qasim
+2 1 Fadlar
+2 1 Sunud
+2 1 Fazib al-Jahiz
+2 1 Hamib ibn Malik
+2 1 Dharad ibn Thudadh
+2 1 Nasik ibn Salim
+2 1 Sunmar
+2 1 Abdad al-Zaraf
+2 1 Munik al-Yazman
+2 1 Qadim
+2 1 Mirim ibn Yazman
+2 1 Yustal al-Yazman
+2 1 Salul al-Yufa
+2 1 Abdim ibn Wahid
+2 1 Yusilal
+2 1 Tashiris al-Qutuz
+2 1 Fazar ibn Qa'yam
+2 1 Abdim
+2 1 Dharham
+2 1 Abik ibn Zayd
+2 1 Halmar ibn Dhuha
+2 1 Ma'ir
+2 1 Abiris al-Qa'yam
+2 1 Zahir
+2 1 Rashar ibn Jahiz
+2 1 Abif
+2 1 Ma'an
+2 1 Tashik
+2 1 Abdnuj ibn Halras
+2 1 Zahan
+2 1 Fazib al-Thudadh
+2 1 Uzan al-Shams
+2 1 Fadlad ibn Jahiz
+2 1 Halif
+2 1 Jabik
+2 1 Zahar ibn Yufa
+2 1 Rashid al-Zaraf
+2 1 Yusiris al-Fahd
+2 1 Abul
+2 1 Abdun ibn Haddad
+2 1 Jabad al-Daud
+2 1 Yusaz
+2 1 Uzabar al-Mutar
+2 1 Karabar al-Jarir
+2 1 Yusilal ibn Salim
+2 1 Dhariris
+2 1 Yusif al-Zayd
+2 1 Halabar al-Wahid
+2 1 Qadid al-Yazman
+2 1 Halad ibn Yufa
+2 1 Sunif
+2 1 Halham
+2 1 Munaz al-Qasim
+2 1 Munim
+2 1 Fazabar al-Rashid
+2 1 Qadiris al-Tiqiq
+2 1 Zahiris
+2 1 Abun ibn Ruz
+2 1 Munham al-Hakim
+2 1 Yusar
+2 1 Khaad al-Ruz
+2 1 Yusad al-Salim
+2 1 Nasham
+2 1 Abdham ibn Qa'yam
+2 1 Rashib
+2 1 Sunham
+2 1 Zahuq ibn Haddad
+2 1 Abib
+2 1 Tiqiris
+2 1 Sunwhar al-Mansur
+2 1 Tashtal ibn Tamir
+2 1 Rashham
+2 1 Kartal ibn Wahid
+2 1 Salan
+2 1 Suniris al-Yufa
+2 1 Ma'ud al-Harun
+2 1 Karun ibn Tamir
+2 1 Ma'mar ibn Kazim
+2 1 Sunuq ibn Shams
+2 1 Hammar ibn Jarir
+2 1 Zahan ibn Rashid
+2 1 Tiqilal
+2 1 Bashim ibn Shams
+2 1 Karud
+2 1 Fadlud ibn Yazman
+2 1 Mirik al-Yufa
+2 1 Sunir ibn Hakim
+2 1 Nasud ibn Yazman
+2 1 Karuq al-Malik
+2 1 Fazib al-Malik
+2 1 Bashmar
+2 1 Hamar
+2 1 Abdilal al-Yazman
+2 1 Halabar
+2 1 Salib al-Jarir
+2 1 Qadim ibn Mauki
+2 1 Abdiris al-Daud
+2 1 Ma'id al-Dhuha
+2 1 Fadlaz
+2 1 Fadlun ibn Shams
+2 1 Mirid al-Halras
+2 1 Uzilal
+2 1 Yusid ibn Bashr
+2 1 Khaun
+2 1 Sunim
+2 1 Tiquq ibn Haddad
+2 1 Ma'tal
+2 1 Abmar
+2 1 Qadul al-Bashr
+2 1 Qadilal
+2 2 Hauba al-Tuwah
+2 2 Salima bint Yazman
+2 2 Zarila al-Qutuz
+2 2 Shulada al-Qa'yam
+2 2 Haisa
+2 2 Yaifa
+2 2 Majqiya
+2 2 Faqiya al-Ilyas
+2 2 Nuhahra
+2 2 Rahiya bint Wahid
+2 2 Munada
+2 2 Munmira bint Rashid
+2 2 Qaysmala bint Rafiq
+2 2 Laiada
+2 2 Salla'ida bint Bashr
+2 2 Faina
+2 2 Khayuba bint Tuwah
+2 2 Yauba al-Zayd
+2 2 Salmala bint Haddad
+2 2 Khayima
+2 2 Hamala bint Qa'yam
+2 2 Majuba bint Fahd
+2 2 Shuliya
+2 2 Shulnaba
+2 2 Jaidmala al-Zaraf
+2 2 Rahila
+2 2 Shulzarafa
+2 2 Rahiya al-Malik
+2 2 Qaysisa al-Tamir
+2 2 Laiila al-Bashr
+2 2 Muniya al-Jahiz
+2 2 Di'isa al-Ilyas
+2 2 Rahuba al-Qa'yam
+2 2 Nurina al-Bashr
+2 2 Jaidifa bint Wahid
+2 2 Yaiya
+2 2 Faahra
+2 2 Munahra
+2 2 Khayzarafa bint Daud
+2 2 Rahima
+2 2 Haira
+2 2 Ashrima bint Shams
+2 2 Bahifa bint Fahd
+2 2 Nurbah al-Nadir
+2 2 Qaysila bint Qasim
+2 2 Faqiya al-Rafiq
+2 2 Laimala bint Zaraf
+2 2 Zarifa al-Yazman
+2 2 Shulira
+2 2 Salifa bint Jahiz
+2 2 Khayzarafa
+2 2 Faima
+2 2 Haahra
+2 2 Bahima
+2 2 Ashrmira bint Bashr
+2 2 Bahisa bint Ilyas
+2 2 Faiya
+2 2 Ashrifa
+2 2 Munmira
+2 2 Shulifa
+2 2 Shulifa al-Qa'yam
+2 2 Di'naba
+2 2 Zarila bint Salim
+2 2 Hanaba
+2 2 Samima
+2 2 Jaidifa
+2 2 Ashriya al-Yazman
+2 2 Munuba al-Shams
+2 2 Di'ifa
+2 2 Munira al-Rafiq
+2 2 Nuhila
+2 2 Bahbah al-Salim
+2 2 Majada al-Mutar
+2 2 Hajlina al-Tamir
+2 2 Haira bint Tuwah
+2 2 Laiahra bint Shams
+2 2 Saluba
+2 2 Shulisa
+2 2 Haima
+2 2 Munbah al-Yazid
+2 2 Yaisa bint Fahd
+2 2 Munisa al-Rashid
+2 2 Munifa al-Harun
+2 2 Di'iya bint Yazman
+2 2 Muniya
+2 2 Nuhla'ida
+2 2 Salisa bint Ilyas
+2 2 Faina al-Tamir
+2 2 Khayada
+2 2 Samada
+2 2 Laiira bint Halras
+2 2 Zarbah al-Nadir
+2 2 Munahra bint Kazim
+2 2 Ashruba al-Mansur
+2 2 Shulima
+2 2 Nuhmira al-Rafiq
+2 2 Majila bint Daud
+2 2 Ashrima al-Mansur
+2 2 Yamala bint Kazim
+2 2 Hajlada
+2 2 Munira bint Kazim
+2 2 Di'iya
+2 2 Yanaba
+2 2 Fala'ida al-Rafiq
+2 2 Fauba al-Malik
+2 2 Yaiya al-Rafiq
+2 2 Khayada al-Thudadh
+2 2 Fauba bint Mutar
+2 2 Majima bint Tuwah
+2 2 Qaysnaba bint Ruz
+2 2 Khayada al-Hakim
+2 2 Yazarafa al-Ilyas
+2 2 Salisa bint Rafiq
+2 2 Samuba al-Daud
+2 2 Laiahra
+2 2 Bahisa al-Halras
+2 2 Majmira bint Wahid
+2 2 Majahra
+2 2 Zarifa bint Thudadh
+2 2 Yaqiya al-Sabah
+2 2 Ashrbah
+2 2 Bahada
+2 2 Bahina bint Mauki
+2 2 Majmira bint Thudadh
+2 2 Zarina
+2 2 Faahra bint Zayd
+2 2 Jaidina bint Nadir
+2 2 Zarla'ida bint Salim
+2 2 Salina
+2 2 Bahima al-Qutuz
+2 2 Hajlbah bint Yufa
+2 2 Rahina
+2 2 Shulbah
+2 2 Hajlzarafa bint Mutar
+2 2 Lainaba bint Tuwah
+2 2 Haila
+2 2 Rahisa al-Fahd
+2 2 Ashrmala al-Mansur
+2 2 Jaidqiya al-Harun
+2 2 Munahra al-Dhuha
+2 2 Zarbah
+2 2 Qaysifa
+2 2 Zarifa bint Halras
+2 2 Laibah
+2 2 Munima bint Haddad
+2 2 Zarzarafa al-Rafiq
+2 2 Laiila bint Ilyas
+2 2 Hajlmala
+2 2 Rahnaba al-Zaraf
+2 2 Majmala al-Sabah
+2 2 Khayzarafa al-Yufa
+2 2 Ashrmala
+2 2 Di'ahra bint Yazid
+2 2 Salla'ida al-Kazim
+2 2 Samzarafa
+2 2 Bahila bint Tiqiq
+2 2 Nuhisa
+2 2 Hamala bint Sabah
+2 2 Faisa
+2 2 Yaila bint Rashid
+2 2 Jaidisa al-Fahd
+2 2 Shulqiya
+2 2 Jaidbah
+2 2 Bahima al-Tuwah
+2 2 Nurifa
+2 2 Qaysisa bint Zayd
+2 2 Zarmala al-Rashid
+3 1 Houlai Tai-Yi
+3 1 Sheng Taijun
+3 1 Mei Chonshan
+3 1 Chin Xao-Po
+3 1 Tsao Xaowei
+3 1 Song Zhowei
+3 1 Chin Zanren
+3 1 Chin Chonwei
+3 1 Houlai Fengbin
+3 1 Yuan Zanxin
+3 1 Lao Jinxin
+3 1 Zhao Chonwei
+3 1 Tsing Bo-Tao
+3 1 Heng Fengren
+3 1 Ninwa Zanlung
+3 1 Kuo Lipei
+3 1 Wu Fengjhen
+3 1 Ninwa Zhopei
+3 1 Chin Banren
+3 1 Ling Chon-Po
+3 1 Ling Shen-Po
+3 1 Luo Long-Po
+3 1 Luo Li-Ko
+3 1 Ruan Zhojhen
+3 1 Tsao Xaojhen
+3 1 Jinwei Hai-Ko
+3 1 Song Fenghou
+3 1 Tan Hanpei
+3 1 Tan Zho-Ko
+3 1 Luo Tsu-Gau
+3 1 Song Bo-Gau
+3 1 Ruan Li-Gau
+3 1 Ninwa Fengwei
+3 1 Chueh Shou-Gau
+3 1 Shui Longlung
+3 1 Chin Zhohou
+3 1 Gao Mingjun
+3 1 Zhao Shoushan
+3 1 Yuan Han-Tao
+3 1 Houlai Tai-Gau
+3 1 Zhao Banren
+3 1 Jinwei Ming-Ko
+3 1 Tsing Shoubin
+3 1 Pao Banwei
+3 1 Hsu Feng-Po
+3 1 Tsing Jinxin
+3 1 Wu Jinshan
+3 1 Yuan Shoulung
+3 1 Tan Tai-Gau
+3 1 Gao Zanjun
+3 1 Tsao Longlung
+3 1 Xue Kunjun
+3 1 Hsu Ban-Po
+3 1 Sheng Taijhen
+3 1 Ninwa Shoushan
+3 1 Gao Tsujun
+3 1 Pao Bojhen
+3 1 Chin Longwei
+3 1 Gao Ban-Ko
+3 1 Heng Hanwei
+3 1 Song Gong-Po
+3 1 Bao Gong-Gau
+3 1 Jinwei Zanbin
+3 1 Gao Shoujun
+3 1 Zhao Gongshan
+3 1 Bao Xaobin
+3 1 Tan Hanren
+3 1 Heng Tsubin
+3 1 Tsing Zhowei
+3 1 Wenji Banli-Zan
+3 1 Kuo Jinwei
+3 1 Mei Kunli-Zan
+3 1 Jyiigo Han-Po
+3 1 Mei Zholi-Zan
+3 1 Wenji Ban-Yi
+3 1 Xue Lijhen
+3 1 Mei Xaohou
+3 1 Wu Chonjhen
+3 1 Tian Fengwei
+3 1 Tian Kun-Yi
+3 1 Jinwei Bobin
+3 1 Lao Chon-Ko
+3 1 Heng Li-Yi
+3 1 Ninwa Gongxin
+3 1 Hsu Zhoxin
+3 1 Jyiigo Banhou
+3 1 Heng Lishan
+3 1 Tsing Banhou
+3 1 Ling Chon-Tao
+3 1 Kuo Shouren
+3 1 Tian Shoujun
+3 1 Heng Xaobin
+3 1 Chueh Tsuwei
+3 1 Ninwa Shenxin
+3 1 Yuan Kunbin
+3 1 Ling Zho-Tao
+3 1 Ninwa Chon-Tao
+3 1 Shui Bo-Gau
+3 1 Hsu Shou-Po
+3 1 Sheng Taihou
+3 1 Pao Shou-Ko
+3 1 Chin Jin-Gau
+3 1 Wu Tsu-Tao
+3 1 Xue Kunwei
+3 1 Chin Han-Gau
+3 1 Yuan Kun-Yi
+3 1 Ling Bowei
+3 1 Houlai Zholung
+3 1 Wu Weilung
+3 1 Tian Chonhou
+3 1 Bao Hanjun
+3 1 Yuan Zan-Gau
+3 1 Chueh Haihou
+3 1 Xue Mingpei
+3 1 Luo Han-Tao
+3 1 Bao Feng-Po
+3 1 Ruan Chon-Po
+3 1 Kuo Banshan
+3 1 Fenping Fengwei
+3 1 Bao Fengren
+3 1 Luo Banshan
+3 1 Ninwa Longren
+3 1 Luo Fenghou
+3 1 Ninwa Chonshan
+3 1 Houlai Longshan
+3 1 Ninwa Jin-Po
+3 1 Chin Weiwei
+3 1 Xue Kun-Tao
+3 1 Xue Boli-Zan
+3 1 Kuo Bo-Tao
+3 1 Jyiigo Bohou
+3 1 Lao Taishan
+3 1 Jyiigo Tsu-Gau
+3 1 Gao Chon-Gau
+3 1 Houlai Kunlung
+3 1 Tsing Hai-Yi
+3 1 Ling Zhopei
+3 1 Tsing Haixin
+3 1 Kuo Tairen
+3 1 Sheng Shoujhen
+3 1 Tsing Longshan
+3 1 Luo Long-Yi
+3 1 Wu Longhou
+3 1 Tan Banjhen
+3 1 Pao Chonpei
+3 1 Bao Weishan
+3 1 Song Chonbin
+3 1 Wu Haixin
+3 1 Jinwei Shoushan
+3 1 Yuan Boli-Zan
+3 1 Ninwa Jinhou
+3 1 Jinwei Long-Gau
+3 1 Ninwa Chonbin
+3 1 Houlai Kunjhen
+3 1 Heng Bobin
+3 1 Mei Kunwei
+3 1 Wu Mingshan
+3 1 Heng Zholung
+3 1 Chin Hanxin
+3 1 Tsing Li-Yi
+3 1 Lao Fengshan
+3 1 Xue Kunbin
+3 1 Chueh Zanjhen
+3 1 Tsao Weijhen
+3 1 Tsing Haijun
+3 1 Fenping Bojun
+3 1 Xue Liren
+3 2 Lao Meizhi
+3 2 Sheng Ruyue
+3 2 Kuo Linxia
+3 2 Sheng Linming
+3 2 Ling Meiyue
+3 2 Heng You-Hua
+3 2 Wu Ruh
+3 2 Gao Qinfei
+3 2 Tan Huaming
+3 2 Tsao Hua-Lan
+3 2 Hsu Ling-Yu
+3 2 Sheng Aih
+3 2 Yuan Aiming
+3 2 Zhao Yuexia
+3 2 Song Lingh
+3 2 Kuo Qinlin
+3 2 Ninwa Zhoh
+3 2 Tsing Qinmei
+3 2 Song Yan-Rou
+3 2 Ling Ai-Gau
+3 2 Mei Mei-Yu
+3 2 Jyiigo Jiali
+3 2 Fenping Lanzhi
+3 2 Tan Lingmei
+3 2 Wenji Hua-Rou
+3 2 Sheng Yueyue
+3 2 Ling Qinjing
+3 2 Wenji Yuejing
+3 2 Pao Jia-Rou
+3 2 Pao Ru-Hua
+3 2 Kuo Zhofei
+3 2 Jinwei Lin-Hua
+3 2 Houlai Jiayue
+3 2 Song Jialin
+3 2 Mei Zho-Lan
+3 2 Tsing Huayue
+3 2 Wenji Qinmei
+3 2 Jinwei Rufei
+3 2 Wenji Linli
+3 2 Heng Ru-Yu
+3 2 Ruan Yan-Gau
+3 2 Song Lan-Gau
+3 2 Jinwei Yue-Yu
+3 2 Lao Huali
+3 2 Wu Yueli
+3 2 Gao Lingming
+3 2 Bao Anfei
+3 2 Bao Xiuming
+3 2 Yuan Youzhi
+3 2 Shui Lan-Gau
+3 2 Heng Jia-Lan
+3 2 Pao An-Lan
+3 2 Jinwei Jiali
+3 2 Tsao Ruyue
+3 2 Hsu Xiuming
+3 2 Bao Rufei
+3 2 Zhao Jiazhi
+3 2 Fenping Lan-Hua
+3 2 Heng Xiu-Yu
+3 2 Yuan Anh
+3 2 Ling Youjing
+3 2 Tsao Huaming
+3 2 Tsao Xiuyue
+3 2 Xue Yuefei
+3 2 Xue Yan-Rou
+3 2 Jyiigo You-Yu
+3 2 Shui Rulin
+3 2 Tan Aili
+3 2 Song Yanming
+3 2 Ruan Xiu-Yu
+3 2 Pao Lanlin
+3 2 Wu Jiajing
+3 2 Mei Suzhi
+3 2 Song Yuejing
+3 2 Zhao Lingli
+3 2 Bao You-Lan
+3 2 Wenji Su-Rou
+3 2 Lao Hua-Hua
+3 2 Xue Ruxia
+3 2 Heng Lingzhi
+3 2 Zhao An-Rou
+3 2 Pao Ling-Lan
+3 2 Ling You-Yu
+3 2 Wu Anming
+3 2 Zhao Lin-Yu
+3 2 Jinwei Ailin
+3 2 Jinwei Linlin
+3 2 Kuo Linmei
+3 2 Zhao Yuemei
+3 2 Song Su-Gau
+3 2 Tian Anjing
+3 2 Ruan Mei-Hua
+3 2 Kuo Jiali
+3 2 Yuan Ruyue
+3 2 Zhao Xiuh
+3 2 Luo Zhofei
+3 2 Ling Jia-Lan
+3 2 Chueh Anyue
+3 2 Pao Xiuyue
+3 2 Zhao Xiumei
+3 2 Pao Linfei
+3 2 Hsu Jiali
+3 2 Bao Zholin
+3 2 Gao Lanfei
+3 2 Luo Qinli
+3 2 Pao Qinlin
+3 2 Fenping Xiujing
+3 2 Yuan Lingfei
+3 2 Chin Mei-Rou
+3 2 Ruan Huaming
+3 2 Wu Anyue
+3 2 Tsao Linlin
+3 2 Lao You-Hua
+3 2 Shui Lingli
+3 2 Luo Xiu-Lan
+3 2 Tan Yanmei
+3 2 Jyiigo Aimei
+3 2 Mei Qin-Lan
+3 2 Xue Youmei
+3 2 Tan Su-Yu
+3 2 Mei Yan-Yu
+3 2 Kuo Youzhi
+3 2 Shui Zhoming
+3 2 Chueh An-Yu
+3 2 Lao Lanjing
+3 2 Chueh Ai-Lan
+3 2 Xue Lanxia
+3 2 Gao Yanyue
+3 2 Mei Linfei
+3 2 Fenping Youlin
+3 2 Pao Aifei
+3 2 Tian Qin-Hua
+3 2 Mei Ling-Lan
+3 2 Heng Yue-Yu
+3 2 Heng Mei-Gau
+3 2 Tan Lan-Gau
+3 2 Tian Lin-Gau
+3 2 Ruan Xiuh
+3 2 Sheng Yueli
+3 2 Mei Yan-Hua
+3 2 Wenji Jia-Yu
+3 2 Tan Zho-Hua
+3 2 Xue Jiaxia
+3 2 Kuo Anfei
+3 2 Tan Xiu-Yu
+3 2 Fenping Meih
+3 2 Luo Zhoxia
+3 2 Yuan Suming
+3 2 Mei Su-Hua
+3 2 Hsu Yanjing
+3 2 Ninwa Jiamei
+3 2 Yuan Xiu-Yu
+3 2 Shui Youfei
+3 2 Jinwei Qin-Yu
+3 2 Luo Mei-Hua
+3 2 Tian Aifei
+3 2 Mei Aiming
+3 2 Song Anmei
+3 2 Tsing Qinlin
+3 2 Wu Yue-Lan
+3 2 Jinwei Yuefei
+3 2 Xue Ru-Hua
+3 2 Wu Jiayue
+3 2 Mei Yan-Rou
+3 2 Pao Suzhi
+3 2 Ling Aimei
+3 2 Kuo Xiuyue

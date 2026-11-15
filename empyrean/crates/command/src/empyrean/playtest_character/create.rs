@@ -32,8 +32,24 @@ pub fn body(
     account: &Account,
     guid: ObjectGuid,
     name: &str,
+    body: (u32, u32),
+    innate: [u32; 6],
+) -> Result<CreatedPlayer, String> {
+    body_looking(w, account, guid, name, body, innate, None)
+}
+
+/// [`body`] with the look `look` instead of the heritage's first.
+///
+/// # Errors
+/// As [`body`].
+pub fn body_looking(
+    w: &mut World,
+    account: &Account,
+    guid: ObjectGuid,
+    name: &str,
     (heritage, gender): (u32, u32),
     innate: [u32; 6],
+    look: Option<Appearance>,
 ) -> Result<CreatedPlayer, String> {
     let offered = super::with_tables(w, |t| t.heritages());
     let Some((_, heritage_name)) = offered.iter().find(|(id, _)| *id == heritage) else {
@@ -67,10 +83,10 @@ pub fn body(
     );
     info.heritage = HeritageGroup(i32::try_from(heritage).map_err(|_| "no such heritage")?);
     info.gender = gender;
-    info.appearance = Appearance {
+    info.appearance = look.unwrap_or(Appearance {
         headgear_style: u32::MAX,
         ..Appearance::default()
-    };
+    });
     info.template_option = 0;
     info.start_area = 0;
     info.skill_advancement_classes = super::with_tables(w, |t| {
@@ -130,6 +146,24 @@ pub fn create(
     result: &Path,
 ) -> Result<dereth_progression::order::Made, String> {
     let order: Order = super::read_order(input)?;
+    let made = create_from_order(w, account, name, &order, None)?;
+    let text = serde_json::to_vec_pretty(&made).map_err(|e| e.to_string())?;
+    std::fs::write(result, text).map_err(|e| e.to_string())?;
+    Ok(made)
+}
+
+/// Make the character `name` on account `account` from `order`, looking as `look` or as its
+/// heritage's first look: [`create`] without its files.
+///
+/// # Errors
+/// Why nothing was made.
+pub fn create_from_order(
+    w: &mut World,
+    account: &str,
+    name: &str,
+    order: &Order,
+    look: Option<Appearance>,
+) -> Result<dereth_progression::order::Made, String> {
     let account = w
         .auth
         .lock()
@@ -153,7 +187,7 @@ pub fn create(
         .unwrap_or(dereth_progression::heritage::ALUVIAN);
     let gender = order.gender.unwrap_or(dereth_progression::gender::MALE);
     // Everything the apply would refuse, refused before anything is saved.
-    super::checked_build(w, &order, heritage)?;
+    super::checked_build(w, order, heritage)?;
     let classes = order.items.iter().map(|i| i.class);
     for class in classes.chain(order.slots.values().filter_map(|s| s.class)) {
         if w.content.get_cached_weenie(class).is_none() {
@@ -161,13 +195,14 @@ pub fn create(
         }
     }
     let guid = guid_manager::new_player_guid(w);
-    let mut made = body(
+    let mut made = body_looking(
         w,
         &account,
         guid,
         bare,
         (heritage, gender),
         order.plan.innate,
+        look,
     )?;
     let mut player = made.player.biota.clone();
     let mut carried = possessions(w, &mut made);
@@ -188,5 +223,5 @@ pub fn create(
         db.commit_batch().map_err(|e| e.to_string())?;
     }
     player_manager::add_offline_player_biota(w, player);
-    super::apply_recipe(w, name, input, None, result, true)
+    super::apply_order(w, name, order, None)
 }

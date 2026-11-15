@@ -343,6 +343,7 @@ pub fn get_offline_player(w: &World, guid: u32) -> Option<&OfflinePlayer> {
 /// The `string` overload: the first offline player named `name` or `+name`, ignoring case.
 #[must_use]
 pub fn get_offline_player_by_name<'a>(w: &'a World, name: &str) -> Option<&'a OfflinePlayer> {
+    let name = name.trim_start_matches(crate::ai_players::MARKER);
     let admin = format!("+{name}");
 
     w.player_manager.offline_players.values().find(|p| {
@@ -404,6 +405,7 @@ pub fn get_online_player(w: &World, guid: u32) -> Option<ObjectGuid> {
 /// The `string` overload: the first online player named `name` or `+name`, ignoring case.
 #[must_use]
 pub fn get_online_player_by_name(w: &World, name: &str) -> Option<ObjectGuid> {
+    let name = name.trim_start_matches(crate::ai_players::MARKER);
     let admin = format!("+{name}");
 
     w.player_manager
@@ -411,7 +413,8 @@ pub fn get_online_player_by_name(w: &World, name: &str) -> Option<ObjectGuid> {
         .values()
         .find(|p| {
             let n = online_name(w, p.guid);
-            equals_ordinal_ignore_case(&n, name) || equals_ordinal_ignore_case(&n, &admin)
+            let n = n.trim_start_matches(crate::ai_players::MARKER);
+            equals_ordinal_ignore_case(n, name) || equals_ordinal_ignore_case(n, &admin)
         })
         .map(|p| p.guid)
 }
@@ -595,7 +598,10 @@ pub fn find_by_name(w: &World, name: &str) -> (Option<IPlayer>, bool) {
     let player = w
         .player_manager
         .player_names
-        .get(&OrdinalIgnoreCase(name.trim_start_matches('+').to_owned()))
+        .get(&OrdinalIgnoreCase(
+            name.trim_start_matches(['+', crate::ai_players::MARKER])
+                .to_owned(),
+        ))
         .copied();
 
     let is_online = player.is_some_and(IPlayer::is_online);

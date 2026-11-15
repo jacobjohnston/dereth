@@ -913,6 +913,8 @@ pub mod default_property_manager {
 
     const DEFAULT_BOOLEAN_PAIRS: &[(&str, bool, &str)] = &[
         ("account_login_boots_in_use", true, "if FALSE, oldest connection to account is not booted when new connection occurs"),
+        // Not ACE: AI Players (see `crate::ai_players`).
+        ("ai_players_enabled", false, "if TRUE, server-controlled AI Players log in near real players"),
         ("advanced_combat_pets", false, "(non-retail function) If enabled, Combat Pets can cast spells"),
         ("advocate_fane_auto_bestow", false, "If enabled, Advocate Fane will automatically bestow new advocates to advocate_fane_auto_bestow_level"),
         ("aetheria_heal_color", false, "If enabled, changes the aetheria healing over time messages from the default retail red color to green"),

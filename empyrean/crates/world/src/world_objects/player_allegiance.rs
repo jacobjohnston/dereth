@@ -490,6 +490,11 @@ pub fn handle_action_swear_allegiance(w: &mut World, this: ObjectGuid, target_gu
         return;
     };
 
+    // Not ACE: AI Players take no vassals.
+    if crate::ai_players::turn_away(w, this, target_guid, "take an oath of allegiance") {
+        return;
+    }
+
     if !is_pledgable(w, this, patron) {
         return;
     }

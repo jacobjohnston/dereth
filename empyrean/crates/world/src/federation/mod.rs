@@ -1570,7 +1570,7 @@ pub fn tick(w: &mut World) {
     }
     if w.federation.link == LinkState::Up && t >= w.federation.next_status {
         w.federation.next_status = t + 60.0;
-        let players = crate::managers::player_manager::get_online_count(w);
+        let players = crate::ai_players::real_online_count(w);
         let open =
             w.world_manager.world_status == crate::managers::world_manager::WorldStatusState::Open;
         send(

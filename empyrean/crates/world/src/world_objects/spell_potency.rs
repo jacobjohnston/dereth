@@ -122,6 +122,10 @@ fn store(w: &mut World, player: ObjectGuid, spell: u32, charge: f32) {
 
 /// A successful spellbook cast spends the spell's charge.
 pub fn spend_charge(w: &mut World, player: ObjectGuid, spell: u32) {
+    // Not ACE: an AI Player's spells never tire.
+    if crate::ai_players::is_ai_player(w, player.full()) {
+        return;
+    }
     if let Some(charge) = current_charge(w, player, spell) {
         store(w, player, spell, spell_charge::decayed(charge));
     }
@@ -174,11 +178,12 @@ pub fn after_successful_cast(
     spell: &crate::entity::spell::Spell,
     used: SpellPotency,
 ) {
-    if !w.era.features.spell_economy {
+    // Not ACE: an AI Player's casts spend nothing of the world's.
+    if !w.era.features.spell_economy || crate::ai_players::is_ai_player(w, player.full()) {
         return;
     }
     let now = w.now.unix_time;
-    let active = usize::try_from(crate::managers::player_manager::get_online_count(w)).unwrap_or(1);
+    let active = usize::try_from(crate::ai_players::real_online_count(w)).unwrap_or(1);
     let weight = spell.spell_economy_mod();
     w.spell_economy.spend(spell.id(), weight, active, now);
     let text = crate::world_objects::spell_economy::line(used.economy);

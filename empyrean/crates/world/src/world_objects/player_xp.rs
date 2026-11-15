@@ -118,6 +118,10 @@ pub fn grant_xp(
     xp_type: XpType,
     share_type: ShareType,
 ) {
+    // Not ACE: an AI Player stays the level it was made.
+    if crate::ai_players::is_ai_player(w, this.full()) {
+        return;
+    }
     if crate::entity::damage_history_info::player_is_olthoi_player(w, this) {
         if emc::has_vitae(w, this) {
             update_xp_vitae(w, this, amount);

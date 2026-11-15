@@ -6,7 +6,6 @@ use empyrean_entity::enums::Channel;
 use empyrean_net::GameMessageGroup;
 use empyrean_net::SessionId;
 
-use crate::managers::player_manager;
 use crate::network::game_event::game_event_message::game_event_message;
 use crate::network::game_event::game_event_message::session_data;
 use crate::network::game_event::game_event_type::GameEventType;
@@ -30,7 +29,8 @@ pub fn game_event_channel_list(
     );
 
     let mut player_names = Vec::new();
-    for client in player_manager::get_all_online(w) {
+    // Not ACE: AI Players are never listed.
+    for client in crate::ai_players::real_players_online(w) {
         let Some(o) = w.objects.get(client) else {
             continue;
         };

@@ -71,6 +71,19 @@ pub fn handle(w: &mut World, message: &mut Payload<'_>, session: SessionId) -> H
         );
     }
 
+    // Not ACE: an AI Player does not read tells, and the server says so.
+    if crate::ai_players::is_ai_player(w, target_player.full()) {
+        enqueue_send(
+            w,
+            session,
+            game_message_system_chat(
+                &format!("{target_name} is an AI Player and can't reply."),
+                ChatMessageType::Broadcast,
+            ),
+        );
+        return Ok(());
+    }
+
     // Not ACE's (retail, V284; the retail captures): a squelched sender gets the echo and
     // no "<name> has you squelched." notice; the tell is not delivered. Squelch was private.
     if squelch_manager::squelches_contains(w, target_player, Some(player), ChatMessageType::Tell) {

@@ -215,7 +215,10 @@ pub fn nav_pos(p: &Position) -> NavPos {
 fn blocks_between(a: &NavPos, b: &NavPos) -> Vec<u16> {
     let xy = |p: &NavPos| {
         let lb = p.cell.0 >> 16;
-        (i32::try_from(lb >> 8).unwrap_or(0), i32::try_from(lb & 0xFF).unwrap_or(0))
+        (
+            i32::try_from(lb >> 8).unwrap_or(0),
+            i32::try_from(lb & 0xFF).unwrap_or(0),
+        )
     };
     let ((ax, ay), (bx, by)) = (xy(a), xy(b));
     let mut out = Vec::new();

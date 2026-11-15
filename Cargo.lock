@@ -2906,6 +2906,7 @@ dependencies = [
  "dereth-client-net",
  "dereth-client-runtime",
  "dereth-dat",
+ "dereth-navigation",
  "dereth-network-protocol",
  "dereth-physics",
  "dereth-primitives",

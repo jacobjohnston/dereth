@@ -10,11 +10,11 @@ mod real {
     use empyrean_world::entity::position_extensions;
     use empyrean_world::managers::player_manager;
     use empyrean_world::world_objects::player_xp::grant_xp;
-    use std::time::Duration;
     use empyrean_world::world_objects::{
         player, player_character, player_death, player_fellowship, player_inventory,
         player_location, player_trade,
     };
+    use std::time::Duration;
 
     const HOLTBURG: (f64, f64) = (42.28, 33.31);
 
@@ -72,7 +72,8 @@ mod real {
         let name = player::player_name(&l.ts.world, bot).expect("a name");
         assert!(name.starts_with(ai_players::MARKER), "{name}");
         let at = ai_players::map_coords(&l.location_of(bot));
-        let metres = (dereth_primitives::num::math::hypot(at.0 - HOLTBURG.0, at.1 - HOLTBURG.1)) * 240.0;
+        let metres =
+            (dereth_primitives::num::math::hypot(at.0 - HOLTBURG.0, at.1 - HOLTBURG.1)) * 240.0;
         assert!(metres < 100.0, "in Holtburg: {at:?}");
         assert!(ai_players::is_ai_player(&l.ts.world, bot.full()));
         assert!(!ai_players::is_ai_player(&l.ts.world, l.g.full()));
@@ -200,15 +201,23 @@ mod real {
                 let Some(at) = l.ts.world.objects.get(*b).and_then(WorldObject::location) else {
                     continue;
                 };
-                let (a, s) = (ai_players::map_coords(&at), ai_players::map_coords(&start[i]));
-                farthest[i] = farthest[i].max(dereth_primitives::num::math::hypot(a.0 - s.0, a.1 - s.1) * 240.0);
-                let from_centre = dereth_primitives::num::math::hypot(a.0 - HOLTBURG.0, a.1 - HOLTBURG.1) * 240.0;
+                let (a, s) = (
+                    ai_players::map_coords(&at),
+                    ai_players::map_coords(&start[i]),
+                );
+                farthest[i] = farthest[i]
+                    .max(dereth_primitives::num::math::hypot(a.0 - s.0, a.1 - s.1) * 240.0);
+                let from_centre =
+                    dereth_primitives::num::math::hypot(a.0 - HOLTBURG.0, a.1 - HOLTBURG.1) * 240.0;
                 assert!(from_centre < 80.0, "stays in town: {from_centre} m");
                 assert!(!at.indoors(), "stays outdoors");
             }
         }
         println!("AI Players walked: {farthest:?} m");
-        assert!(farthest.iter().any(|d| *d > 5.0), "someone walked: {farthest:?}");
+        assert!(
+            farthest.iter().any(|d| *d > 5.0),
+            "someone walked: {farthest:?}"
+        );
         let seen: Vec<MovementPositionEvent> = l.since(mark);
         assert!(
             seen.iter().any(|m| bots.iter().any(|b| m.id.0 == b.full())),

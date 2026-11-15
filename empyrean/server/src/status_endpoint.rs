@@ -41,8 +41,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use empyrean_world::managers::world_manager::WorldStatusState;
 use empyrean_world::managers::landblock_manager;
+use empyrean_world::managers::world_manager::WorldStatusState;
 use empyrean_world::World;
 
 use crate::portal_table::PortalTable;

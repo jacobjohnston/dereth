@@ -79,9 +79,13 @@ pub fn set_builder(build: BuildFn) {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Stage {
     /// Its character is loading.
-    Entering { since: f64 },
+    Entering {
+        since: f64,
+    },
     /// In portal space, on its way to `since + PORTAL_SPACE`.
-    Teleporting { since: f64 },
+    Teleporting {
+        since: f64,
+    },
     InWorld,
     LoggingOut,
 }
@@ -355,7 +359,12 @@ fn live(w: &mut World, now: f64) {
         .map(|(id, _)| *id)
         .collect();
     for id in ids {
-        let Some(p) = w.ai_players.bots.get(&id).and_then(|b| w.sessions.player(b.session)) else {
+        let Some(p) = w
+            .ai_players
+            .bots
+            .get(&id)
+            .and_then(|b| w.sessions.player(b.session))
+        else {
             continue;
         };
         if w.objects.get(p).is_none() || teleporting(w, p) {
@@ -415,7 +424,10 @@ fn town_life(w: &mut World, id: u32, p: ObjectGuid, now: f64) {
     walk::go(
         w,
         id,
-        [centre[0] + m::cosf(angle) * r, centre[1] + m::sinf(angle) * r],
+        [
+            centre[0] + m::cosf(angle) * r,
+            centre[1] + m::sinf(angle) * r,
+        ],
         3.0,
     );
 }
@@ -530,7 +542,8 @@ fn send_to_town(w: &mut World, id: u32, p: ObjectGuid, town: usize) {
 pub fn map_coords(pos: &Position) -> (f64, f64) {
     let raw = pos.landblock_id().raw();
     let p = pos.pos();
-    let at = |block: u32, v: f32| (f64::from(block) * 192.0 + f64::from(v)) / METRES_PER_UNIT - 101.95;
+    let at =
+        |block: u32, v: f32| (f64::from(block) * 192.0 + f64::from(v)) / METRES_PER_UNIT - 101.95;
     (at((raw >> 16) & 0xFF, p.y), at(raw >> 24, p.x))
 }
 
@@ -675,7 +688,11 @@ fn log_in(w: &mut World, town: usize, now: f64) -> Result<(), String> {
         .player_manager
         .offline_players
         .values()
-        .filter(|p| p.account.as_ref().is_some_and(|a| a.account_id == account_id))
+        .filter(|p| {
+            p.account
+                .as_ref()
+                .is_some_and(|a| a.account_id == account_id)
+        })
         .filter(|p| {
             p.level()
                 .and_then(|l| u32::try_from(l).ok())
@@ -736,10 +753,7 @@ fn build(w: &mut World, low: u32, high: u32) -> Result<u32, String> {
     for _ in 0..50 {
         let n = all[w.ai_players.below(all.len())];
         let taken = player_manager::find_by_name(w, n.name).0.is_some()
-            || !w
-                .shard
-                .base_database()
-                .is_character_name_available(n.name);
+            || !w.shard.base_database().is_character_name_available(n.name);
         if taken {
             continue;
         }

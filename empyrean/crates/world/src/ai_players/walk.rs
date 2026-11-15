@@ -222,7 +222,12 @@ pub fn go(w: &mut World, id: u32, to: [f32; 2], reach: f32) {
 
 /// Plans AI Player `id`'s next hop from where it stands.
 fn plan(w: &mut World, id: u32) {
-    let Some(p) = w.ai_players.bots.get(&id).and_then(|b| w.sessions.player(b.session)) else {
+    let Some(p) = w
+        .ai_players
+        .bots
+        .get(&id)
+        .and_then(|b| w.sessions.player(b.session))
+    else {
         return;
     };
     let Some(walk) = w.ai_players.bots.get(&id).and_then(|b| b.walk.clone()) else {
@@ -340,7 +345,12 @@ pub fn step(w: &mut World, id: u32, p: ObjectGuid, now: f64) {
     #[allow(clippy::cast_possible_truncation)]
     let stride = (speed * STEP as f32).min(d);
     let heading = m::atan2f(dx, dy);
-    let next = ground_at(w, here[0] + dx / d * stride, here[1] + dy / d * stride, heading);
+    let next = ground_at(
+        w,
+        here[0] + dx / d * stride,
+        here[1] + dy / d * stride,
+        heading,
+    );
     if walk.moving {
         moved(w, id, &next);
     } else {

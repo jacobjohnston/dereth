@@ -46,7 +46,10 @@ pub fn handle_ai_players(w: &mut World, session: Option<SessionId>, parameters: 
     match word.as_str() {
         "on" => {
             ai_players::set_enabled(w, true);
-            say(w, "AI Players are on. They log in near real players, one every 5 seconds.");
+            say(
+                w,
+                "AI Players are on. They log in near real players, one every 5 seconds.",
+            );
         }
         "off" => {
             ai_players::set_enabled(w, false);
@@ -72,7 +75,9 @@ pub fn handle_ai_players(w: &mut World, session: Option<SessionId>, parameters: 
 
 /// The archetypes a world offers, in a stable order.
 fn offered(w: &World) -> Vec<Archetype> {
-    with_tables(w, |t| builtin().into_iter().filter(|a| a.offered(&t)).collect())
+    with_tables(w, |t| {
+        builtin().into_iter().filter(|a| a.offered(&t)).collect()
+    })
 }
 
 /// Makes a new AI Player: the playtest character an order of its level makes, as one of the

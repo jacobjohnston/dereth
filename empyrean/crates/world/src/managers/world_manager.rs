@@ -775,8 +775,7 @@ fn refresh_status_ping(w: &mut World) {
     } else {
         WorldState::Starting
     };
-    let players = u16::try_from(crate::ai_players::real_online_count(w).max(0))
-        .unwrap_or(u16::MAX);
+    let players = u16::try_from(crate::ai_players::real_online_count(w).max(0)).unwrap_or(u16::MAX);
     if let Some(ping) = w.net.status_ping.as_mut() {
         ping.facts.state = state;
         ping.facts.players = players;
